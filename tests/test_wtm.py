@@ -1,0 +1,1856 @@
+"""End-to-end integration tests for wtm.
+
+Each test builds a throwaway projects root and exercises the real ``wtm``
+console script as a subprocess, so the typer wiring, exit codes, stdout/stderr
+discipline, git side effects, and hook firing are all covered.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+WTM = [sys.executable, "-m", "wtm.cli"]
+
+
+def run(
+    *args: str,
+    root: Path,
+    cwd: Path | None = None,
+    hooks_dir: Path | None = None,
+    cd_file: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke wtm with an isolated environment."""
+    env = dict(os.environ)
+    env["WTM_PROJECTS_ROOT"] = str(root)
+    if hooks_dir is not None:
+        env["WTM_HOOKS_DIR"] = str(hooks_dir)
+    else:
+        env["WTM_HOOKS_DIR"] = str(root / "_no_global_hooks")
+    if cd_file is not None:
+        env["WTM_CD_FILE"] = str(cd_file)
+    # Deterministic git identity / no user config leakage.
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+            "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+        }
+    )
+    if extra_env:
+        env.update(extra_env)
+
+    return subprocess.run(
+        WTM + list(args),
+        cwd=str(cwd or root),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    """An empty projects root."""
+    r = tmp_path / "projects"
+    r.mkdir()
+    (r / "_gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+
+    return r
+
+
+def _seed_repo(root: Path, project: str) -> Path:
+    """Create a bare project with one commit on 'main' and return its .git dir.
+
+    A non-bare source repo is built and bare-cloned into the project, so the
+    resulting bare repo at ``<project>/.git`` has a commit to branch from.
+    """
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    source = root / "_sources" / project
+    source.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True, env=git_env)
+    (source / "file.txt").write_text("hello\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "init"], check=True, env=git_env)
+
+    assert run("clone", str(source), project, root=root).returncode == 0
+    git_dir = root / project / ".git"
+    assert git_dir.is_dir()
+
+    return git_dir
+
+
+# --- project new / clone / list ---------------------------------------------
+
+
+def test_project_new_creates_layout(root: Path) -> None:
+    res = run("project", "new", "proj", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "proj" / ".git").is_dir()
+    assert (root / "proj" / "worktrees").is_dir()
+    # Diagnostics go to stderr, not stdout.
+    assert res.stdout == ""
+    assert "created project" in res.stderr
+
+
+def test_project_new_rejects_duplicate(root: Path) -> None:
+    run("project", "new", "proj", root=root)
+    res = run("project", "new", "proj", root=root)
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+
+
+def test_project_new_rejects_slash(root: Path) -> None:
+    res = run("project", "new", "a/b", root=root)
+    assert res.returncode == 1
+    assert "may not contain '/'" in res.stderr
+
+
+def test_top_level_new_removed(root: Path) -> None:
+    # 'wtm new' no longer exists; it is now 'wtm project new'.
+    res = run("new", "proj", root=root)
+    assert res.returncode == 2
+
+
+def test_project_clone_from_local_origin(root: Path) -> None:
+    origin = _seed_repo(root, "origin")
+    res = run("project", "clone", str(origin), "cloned", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "cloned" / ".git").is_dir()
+
+
+def test_clone_sets_origin_fetch_refspec(root: Path) -> None:
+    # wtm clone must produce the dual-ref layout: upstream heads fetch into
+    # refs/remotes/origin/* (not refs/heads/*), which create's resolution needs.
+    origin = _seed_repo(root, "origin")
+    run("project", "clone", str(origin), "cloned", root=root)
+    refspec = subprocess.run(
+        ["git", "--git-dir", str(root / "cloned" / ".git"), "config", "remote.origin.fetch"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert refspec == "+refs/heads/*:refs/remotes/origin/*"
+
+
+def test_clone_shorthand_from_local_origin(root: Path) -> None:
+    # 'wtm clone' is the documented shorthand for 'wtm project clone'.
+    origin = _seed_repo(root, "origin")
+    res = run("clone", str(origin), "cloned", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "cloned" / ".git").is_dir()
+
+
+def test_clone_no_bare_flag_removed(root: Path) -> None:
+    # Non-bare clones are no longer supported; the flag must be unknown.
+    origin = _seed_repo(root, "origin")
+    res = run("clone", str(origin), "cloned", "--no-bare", root=root)
+    assert res.returncode == 2
+
+
+def test_project_list_only_repo_dirs(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    (root / "stray").mkdir()  # no .git/, must be ignored
+    res = run("project", "list", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.split() == ["alpha"]
+
+
+# --- project list --tree -----------------------------------------------------
+
+
+def test_project_list_tree_shows_worktrees(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "feature/x", root=root)  # nested NAME -> flat leaf
+    res = run("project", "list", "--tree", root=root)
+    assert res.returncode == 0, res.stderr
+    # Sorted children: 'feat' is non-last (tee), 'feature/x' is last (elbow).
+    assert res.stdout == "alpha\n├── feat\n└── feature/x\n"
+
+
+def test_project_list_tree_short_flag(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("project", "list", "-t", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "alpha\n└── feat\n"
+
+
+def test_project_list_tree_empty_project(root: Path) -> None:
+    # A freshly-created project has no worktrees: just the bare name, no leaves.
+    run("project", "new", "alpha", root=root)
+    res = run("project", "list", "--tree", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "alpha\n"
+
+
+def test_project_list_tree_error_marker(root: Path) -> None:
+    # A dir with an empty .git/ passes the project filter but fails the git
+    # worktree query, so the tree marks it inline instead of looking empty.
+    _seed_repo(root, "alpha")
+    (root / "broken" / ".git").mkdir(parents=True)
+    res = run("project", "list", "--tree", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "broken\n└── <error reading worktrees>\n" in res.stdout
+
+
+def test_project_list_default_unchanged(root: Path) -> None:
+    # Without --tree, output stays the flat one-name-per-line listing.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("project", "list", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "alpha\n"
+
+
+def test_worktree_list_strict_raises_on_broken_project(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (root / "broken" / ".git").mkdir(parents=True)
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    from wtm import git
+    from wtm.core import Config
+    from wtm.worktree import Worktree
+
+    worktree = Worktree(Config.load())
+    # Lenient (default) swallows the failure; strict surfaces it.
+    assert worktree.list("broken") == []
+    with pytest.raises(git.GitError):
+        worktree.list("broken", strict=True)
+
+
+# --- list (worktrees) --------------------------------------------------------
+
+
+def test_list_project_worktrees(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("list", "alpha", root=root)
+    assert res.returncode == 0, res.stderr
+    # wtm-native: one line per worktree, named relative to worktrees/.
+    assert [line.split()[0] for line in res.stdout.splitlines()] == ["feat"]
+
+
+def test_list_excludes_bare_repo(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("list", "alpha", root=root)
+    assert res.returncode == 0, res.stderr
+    assert [line.split()[0] for line in res.stdout.splitlines()] == ["feat"]
+    assert "(bare)" not in res.stdout
+
+
+def test_list_infers_project_from_cwd(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("list", root=root, cwd=repo)  # no PROJECT arg
+    assert res.returncode == 0, res.stderr
+    assert [line.split()[0] for line in res.stdout.splitlines()] == ["feat"]
+
+
+def test_list_outside_root_errors(root: Path, tmp_path: Path) -> None:
+    res = run("list", root=root, cwd=tmp_path)  # cwd not under projects root
+    assert res.returncode == 1
+    assert "not under" in res.stderr
+
+
+# --- list completion ---------------------------------------------------------
+
+
+def _complete(root: Path, *, words: str, cword: str, cwd: Path | None = None) -> str:
+    """Drive the real bash completion protocol against the installed console
+    script (prog name 'wtm' -> deterministic _WTM_COMPLETE) and return stdout.
+    """
+    wtm_bin = Path(sys.executable).parent / "wtm"
+    env = {
+        **os.environ,
+        "WTM_PROJECTS_ROOT": str(root),
+        "_WTM_COMPLETE": "complete_bash",
+        "COMP_WORDS": words,
+        "COMP_CWORD": cword,
+    }
+    res = subprocess.run(
+        [str(wtm_bin)],
+        env=env,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+
+    return res.stdout
+
+
+def test_complete_project_filters_by_prefix(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "alto")
+    _seed_repo(root, "beta")
+    (root / "stray").mkdir()  # no .git/, must be excluded
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    from wtm.cli import _complete_project
+
+    assert _complete_project("") == ["alpha", "alto", "beta"]
+    assert _complete_project("al") == ["alpha", "alto"]
+
+
+def test_list_completion_emits_projects(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    (root / "stray").mkdir()  # no .git/, must be excluded
+    out = _complete(root, words="wtm list ", cword="2")
+    assert out.split() == ["alpha", "beta"]
+
+
+def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "alto")
+    _seed_repo(root, "beta")
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    from wtm.cli import _complete_project_arg
+
+    class _Ctx:  # minimal stand-in: only .params is read
+        def __init__(self, args: tuple[str, ...]) -> None:
+            self.params = {"args": args}
+
+    # First positional slot -> PROJECT completion (prefix-filtered).
+    assert _complete_project_arg(_Ctx(()), "al") == ["alpha", "alto"]
+    # A positional already given -> NAME/DIR slot, no project completion.
+    assert _complete_project_arg(_Ctx(("alpha",)), "") == []
+
+
+@pytest.mark.parametrize("cmd", ["create", "install", "enter", "delete", "resolve"])
+def test_first_slot_completes_projects(root: Path, cmd: str) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    (root / "stray").mkdir()  # no .git/, must be excluded
+    out = _complete(root, words=f"wtm {cmd} ", cword="2")
+    assert out.split() == ["alpha", "beta"]
+
+
+def test_second_slot_no_project_completion(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    out = _complete(root, words="wtm create alpha ", cword="3")
+    assert out.split() == []
+
+
+# --- worktree-name completion ------------------------------------------------
+
+
+def test_worktree_names_lists_relative_names(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "feature/x", root=root)  # nested NAME
+    (root / "alpha" / "worktrees" / "stray").mkdir()  # not a worktree -> excluded
+    out = _complete(root, words="wtm enter alpha ", cword="3")
+    # Full slashed names; the bare repo and the stray dir are excluded.
+    assert out.split() == ["feat", "feature/x"]
+
+
+def test_worktree_names_lenient_on_missing_project(root: Path) -> None:
+    out = _complete(root, words="wtm enter nope ", cword="3")
+    assert out.split() == []
+
+
+def test_worktree_names_infers_project_from_cwd(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    out = _complete(root, words="wtm enter ", cword="2", cwd=repo)
+    assert "feat" in out.split()
+
+
+@pytest.mark.parametrize("cmd", ["install", "enter", "delete", "resolve"])
+def test_second_slot_completes_worktrees(root: Path, cmd: str) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "fix", root=root)
+    out = _complete(root, words=f"wtm {cmd} alpha ", cword="3")
+    assert out.split() == ["feat", "fix"]
+
+
+def test_first_slot_unions_projects_and_cwd_worktrees(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "feat", root=root)
+    # From inside project 'alpha': projects (alpha, beta) U alpha's worktrees (feat).
+    out = _complete(root, words="wtm enter ", cword="2", cwd=repo)
+    assert out.split() == ["alpha", "beta", "feat"]
+
+
+def test_first_slot_outside_root_projects_only(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    # cwd not under the projects root: no cwd worktrees, just projects.
+    out = _complete(root, words="wtm enter ", cword="2", cwd=tmp_path)
+    assert out.split() == ["alpha"]
+
+
+# --- create ------------------------------------------------------------------
+
+
+def test_create_new_branch_and_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("create", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert (wt / "file.txt").exists()
+    branch = subprocess.run(
+        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "feat"
+
+
+def test_create_nested_name(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("create", "alpha", "feature/x", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "feature" / "x" / "file.txt").exists()
+
+
+def test_create_infers_project_from_cwd(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    res = run("create", "feat", root=root, cwd=repo)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "feat").is_dir()
+
+
+def test_create_orphan_bootstraps_empty_project(root: Path) -> None:
+    # 'project new' yields an empty bare repo (no commits); the first worktree
+    # must bootstrap onto a new orphan branch (git >= 2.43).
+    assert run("project", "new", "alpha", root=root).returncode == 0
+    res = run("create", "alpha", "main", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "orphan" in res.stderr
+    wt = root / "alpha" / "worktrees" / "main"
+    assert wt.is_dir()
+    branch = subprocess.run(
+        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "main"
+    # The orphan branch is unborn: no commits yet.
+    assert (
+        subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+
+
+def test_create_existing_local_branch(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    subprocess.run(["git", "-C", str(repo), "branch", "existing"], check=True)
+    res = run("create", "alpha", "wt", "-b", "existing", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "existing local branch 'existing'" in res.stderr
+
+
+def test_create_rejects_traversal(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("create", "alpha", "../escape", root=root)
+    assert res.returncode == 1
+    assert "may not contain '..'" in res.stderr
+
+
+def test_create_cd_emits_to_cd_file(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run("create", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "feat")
+
+
+# --- enter --create ----------------------------------------------------------
+
+
+def test_enter_create_makes_worktree_when_absent(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("enter", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert (wt / "file.txt").exists()
+    assert cd_file.read_text().strip() == str(wt)
+    branch = subprocess.run(
+        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "feat"
+
+
+def test_enter_create_enters_existing_idempotently(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("enter", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(wt)
+    # Existing path is silent: no create diagnostic.
+    assert "new branch" not in res.stderr
+    assert "existing local branch" not in res.stderr
+
+
+def test_enter_create_honors_branch_on_create(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    subprocess.run(["git", "-C", str(repo), "branch", "existing"], check=True)
+    res = run("enter", "alpha", "wt", "-c", "-b", "existing", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "existing local branch 'existing'" in res.stderr
+
+
+def test_enter_branch_requires_create(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("enter", "alpha", "feat", "-b", "foo", root=root)
+    assert res.returncode == 1
+    assert "requires --create" in res.stderr
+
+
+def test_enter_create_warns_branch_ignored_when_exists(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("enter", "alpha", "feat", "-c", "-b", "other", root=root, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert "ignored" in res.stderr
+    assert cd_file.read_text().strip() == str(wt)
+
+
+def test_enter_create_rejects_dir_target(root: Path) -> None:
+    res = run("enter", "./feat", "-c", root=root)
+    assert res.returncode == 1
+    assert "not a path" in res.stderr
+
+
+def test_enter_create_rejects_no_target(root: Path) -> None:
+    res = run("enter", "-c", root=root)
+    assert res.returncode == 1
+
+
+def test_enter_create_runs_install_hooks(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "hook.out"
+    _write_hook(hooks / "wtm-install", f'echo "$WTM_EVENT" > "{out}"\n')
+    res = run("enter", "alpha", "feat", "-c", "-i", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "install"
+
+
+# --- resolve -----------------------------------------------------------------
+
+
+def test_resolve_prints_path_without_git(root: Path) -> None:
+    res = run("resolve", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha" / "worktrees" / "feat")
+
+
+def test_resolve_rejects_path(root: Path) -> None:
+    res = run("resolve", "./feat", root=root)
+    assert res.returncode == 1
+    assert "not a path" in res.stderr
+
+
+def test_resolve_env_emits_exports(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("resolve", "alpha", "feat", "--env", root=root)
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+    assert any(line.startswith("export WTM_BRANCH='feat'") for line in lines)
+    assert any(line.startswith("export WTM_GIT_COMMON_DIR='") for line in lines)
+    # WTM_REPO_DIR was dropped from the contract.
+    assert not any("WTM_REPO_DIR" in line for line in lines)
+
+
+def test_resolve_env_quote_escaping(root: Path) -> None:
+    # A project name with a single quote must be escaped for eval safety.
+    _seed_repo(root, "o'brien")
+    run("create", "o'brien", "feat", root=root)
+    res = run("resolve", "o'brien", "feat", "--env", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "export WTM_PROJECT='o'\\''brien'" in res.stdout
+
+
+# --- delete ------------------------------------------------------------------
+
+
+def test_delete_requires_target(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    wt = root / "alpha" / "worktrees" / "feat"
+    run("create", "alpha", "feat", root=root)
+    res = run("delete", root=root, cwd=wt)  # no explicit target
+    assert res.returncode == 1
+    assert "a target is required" in res.stderr
+
+
+def test_delete_removes_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert wt.is_dir()
+    res = run("delete", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not wt.exists()
+
+
+def test_delete_prunes_nested_parents(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feature/x", root=root)
+    res = run("delete", "alpha", "feature/x", root=root)
+    assert res.returncode == 0, res.stderr
+    # The intermediate worktrees/feature dir should be pruned.
+    assert not (root / "alpha" / "worktrees" / "feature").exists()
+    # But worktrees/ itself must survive.
+    assert (root / "alpha" / "worktrees").is_dir()
+
+
+def test_delete_branch_with_D(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("delete", "alpha", "feat", "-D", root=root)
+    branches = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "feat" not in branches
+
+
+# --- delete: rescue the stranded shell ---------------------------------------
+
+
+def test_delete_cds_to_oldpwd_when_standing_in_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(prev)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(prev)
+
+
+def test_delete_cds_to_project_dir_when_oldpwd_gone(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(tmp_path / "does-not-exist")},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "alpha")
+
+
+def test_delete_cds_from_subdir_of_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    sub = wt / "sub"
+    sub.mkdir()
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        root=root,
+        cwd=sub,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(prev)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(prev)
+
+
+def test_delete_no_cd_when_outside_deleted_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "other", root=root)
+    other = root / "alpha" / "worktrees" / "other"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    # Standing in a different worktree: deleting 'feat' must not move the shell.
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        root=root,
+        cwd=other,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(prev)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text() == ""
+
+
+def test_delete_silent_without_shell_wrapper(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    # No WTM_CD_FILE (cd_file unset): no cd channel, so stay silent on stdout.
+    res = run("delete", "alpha", "feat", root=root, cwd=wt, extra_env={"OLDPWD": str(prev)})
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == ""
+    assert "cd manually" not in res.stderr
+
+
+# --- core.rescue_dir (unit) --------------------------------------------------
+
+
+def test_rescue_dir_prefers_existing_oldpwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wtm.core import rescue_dir
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    project = tmp_path / "project"
+    monkeypatch.setenv("OLDPWD", str(prev))
+    # cwd is the worktree (or below it) -> rescue to the existing $OLDPWD.
+    assert rescue_dir(wt, wt, project) == prev
+    assert rescue_dir(wt / "sub", wt, project) == prev
+
+
+def test_rescue_dir_falls_back_to_project_when_oldpwd_unusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wtm.core import rescue_dir
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    project = tmp_path / "project"
+    # $OLDPWD missing -> project dir; $OLDPWD pointing to a gone dir -> project dir.
+    monkeypatch.delenv("OLDPWD", raising=False)
+    assert rescue_dir(wt, wt, project) == project
+    monkeypatch.setenv("OLDPWD", str(tmp_path / "gone"))
+    assert rescue_dir(wt, wt, project) == project
+
+
+def test_rescue_dir_none_when_outside_or_no_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wtm.core import rescue_dir
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    project = tmp_path / "project"
+    monkeypatch.setenv("OLDPWD", str(tmp_path))
+    # cwd outside the deleted worktree, or unavailable -> no rescue.
+    assert rescue_dir(tmp_path / "elsewhere", wt, project) is None
+    assert rescue_dir(None, wt, project) is None
+
+
+# --- hooks -------------------------------------------------------------------
+
+
+def _write_hook(path: Path, body: str, *, executable: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/env sh\n" + body)
+    if executable:
+        path.chmod(0o755)
+
+
+def test_create_hook_fires_with_contract(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "hook.out"
+    _write_hook(
+        hooks / "wtm-create",
+        'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$1" "$WTM_PROJECT" "$WTM_BRANCH"'
+        f' "$WTM_PROJECTS_ROOT" > "{out}"\n',
+    )
+    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    event, dir_, project, branch, projects_root = out.read_text().strip().split("|")
+    assert event == "create"
+    assert dir_ == str(root / "alpha" / "worktrees" / "feat")
+    assert project == "alpha"
+    assert branch == "feat"
+    assert projects_root == str(root)
+
+
+def test_hook_ordering_file_before_dir(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    order = tmp_path / "order"
+    _write_hook(hooks / "wtm-create", f'echo file >> "{order}"\n')
+    _write_hook(hooks / "wtm-create.d" / "20-b", f'echo b >> "{order}"\n')
+    _write_hook(hooks / "wtm-create.d" / "10-a", f'echo a >> "{order}"\n')
+    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["file", "a", "b"]
+
+
+def test_hook_failure_nonfatal_without_strict(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-create", "exit 3\n")
+    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    assert res.returncode == 0
+    assert "hook failed" in res.stderr
+
+
+def test_hook_failure_fatal_with_strict(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-create", "exit 3\n")
+    res = run("hook", "run", "alpha", "feat", "create", "--strict", root=root, hooks_dir=hooks)
+    assert res.returncode == 1
+    assert "hook failed" in res.stderr
+
+
+def test_non_executable_hook_fatal_under_strict(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-create", "true\n", executable=False)
+    res = run("hook", "run", "alpha", "feat", "create", "--strict", root=root, hooks_dir=hooks)
+    assert res.returncode == 1
+    assert "not executable" in res.stderr
+
+
+def test_init_command_removed(root: Path) -> None:
+    # 'wtm init' is gone; running the create event's hooks is 'wtm hook run create'.
+    res = run("init", "alpha", "feat", root=root)
+    assert res.returncode == 2
+
+
+def test_delete_hook_teardown_order(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    workspace = tmp_path / "workspace-hooks"
+    order = tmp_path / "order"
+    wt = root / "alpha" / "worktrees" / "feat"
+    # One delete hook per scope; teardown fires worktree -> project -> workspace
+    # -> global (most specific first).
+    _write_hook(hooks / "wtm-delete", f'echo global >> "{order}"\n')
+    _write_hook(workspace / "wtm-delete", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-delete", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-delete", f'echo worktree >> "{order}"\n')
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        "-f",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["worktree", "project", "workspace", "global"]
+
+
+def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    workspace = tmp_path / "workspace-hooks"
+    order = tmp_path / "order"
+    wt = root / "alpha" / "worktrees" / "feat"
+    # Setup fires global -> workspace -> project -> worktree (most general first).
+    _write_hook(hooks / "wtm-create", f'echo global >> "{order}"\n')
+    _write_hook(workspace / "wtm-create", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-create", f'echo worktree >> "{order}"\n')
+    res = run(
+        "hook",
+        "run",
+        "alpha",
+        "feat",
+        "create",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["global", "workspace", "project", "worktree"]
+
+
+def test_delete_hook_runs_before_worktree_removal(root: Path, tmp_path: Path) -> None:
+    # A per-worktree delete hook must see the live worktree: the delete event
+    # fires before 'git worktree remove'.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    out = tmp_path / "alive"
+    _write_hook(
+        wt / ".wtm" / "hooks" / "wtm-delete",
+        f'test -f "$WTM_DIR/file.txt" && echo alive > "{out}"\n',
+    )
+    res = run("delete", "alpha", "feat", "-f", root=root)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "alive"
+    assert not wt.exists()
+
+
+# --- hook run scope filter ---------------------------------------------------
+
+
+def test_hook_run_scope_filters_to_one_scope(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    ran = tmp_path / "ran"
+    _write_hook(hooks / "wtm-create", f'echo global >> "{ran}"\n')
+    _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{ran}"\n')
+    res = run(
+        "hook",
+        "run",
+        "alpha",
+        "feat",
+        "create",
+        "--scope",
+        "project",
+        root=root,
+        hooks_dir=hooks,
+    )
+    assert res.returncode == 0, res.stderr
+    assert ran.read_text().split() == ["project"]
+
+
+def test_hook_run_rejects_unknown_event(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("hook", "run", "alpha", "feat", "bogus", root=root)
+    assert res.returncode == 1
+    assert "unknown event" in res.stderr
+
+
+def test_install_alias_runs_install_hooks(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "hook.out"
+    _write_hook(hooks / "wtm-install", f'echo "$WTM_EVENT" > "{out}"\n')
+    res = run("install", "alpha", "feat", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "install"
+
+
+# --- hook install / delete / list --------------------------------------------
+
+
+def test_hook_install_bare_file_infers_event(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    dest = root / "alpha" / ".git" / "hooks" / "wtm-create"
+    assert dest.is_file()
+    assert os.access(dest, os.X_OK)  # copies are chmod 0755
+
+
+def test_hook_install_named_file_needs_event_and_lands_in_dotd(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    # Pre-create the .d so a plain-named file joins it as an entry.
+    (repo / "hooks" / "wtm-delete.d").mkdir(parents=True)
+    src = tmp_path / "50-purge"
+    _write_hook(src, "true\n")
+    res = run(
+        "hook",
+        "install",
+        str(src),
+        "alpha",
+        "feat",
+        "--event",
+        "delete",
+        root=root,
+    )
+    assert res.returncode == 0, res.stderr
+    assert (repo / "hooks" / "wtm-delete.d" / "50-purge").is_file()
+
+
+def test_hook_install_requires_event_when_uninferrable(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    src = tmp_path / "50-purge"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "alpha", "feat", root=root)
+    assert res.returncode == 1
+    assert "cannot infer event" in res.stderr
+
+
+def test_hook_install_dir_merges_into_dotd(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    bundle = tmp_path / "bundle"
+    _write_hook(bundle / "10-a", "true\n")
+    _write_hook(bundle / "20-b", "true\n")
+    res = run(
+        "hook",
+        "install",
+        str(bundle),
+        "alpha",
+        "feat",
+        "--event",
+        "delete",
+        root=root,
+    )
+    assert res.returncode == 0, res.stderr
+    dotd = repo / "hooks" / "wtm-delete.d"
+    assert (dotd / "10-a").is_file()
+    assert (dotd / "20-b").is_file()
+
+
+def test_hook_install_collision_needs_force(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    assert run("hook", "install", str(src), "alpha", "feat", root=root).returncode == 0
+    res = run("hook", "install", str(src), "alpha", "feat", root=root)
+    assert res.returncode == 1
+    assert "exists" in res.stderr
+    res = run("hook", "install", str(src), "alpha", "feat", "--force", root=root)
+    assert res.returncode == 0, res.stderr
+
+
+def test_hook_install_link_symlinks(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "alpha", "feat", "--link", root=root)
+    assert res.returncode == 0, res.stderr
+    dest = root / "alpha" / ".git" / "hooks" / "wtm-create"
+    assert dest.is_symlink()
+    assert dest.resolve() == src.resolve()
+
+
+def test_hook_install_worktree_scope(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    src = tmp_path / "wtm-delete"
+    _write_hook(src, "true\n")
+    res = run(
+        "hook",
+        "install",
+        str(src),
+        "alpha",
+        "feat",
+        "--scope",
+        "worktree",
+        root=root,
+    )
+    assert res.returncode == 0, res.stderr
+    dest = root / "alpha" / "worktrees" / "feat" / ".wtm" / "hooks" / "wtm-delete"
+    assert dest.is_file()
+
+
+def test_hook_install_global_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "--scope", "global", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert (hooks / "wtm-create").is_file()
+
+
+def test_hook_delete_bare_file(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    _write_hook(repo / "hooks" / "wtm-create", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "create", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not (repo / "hooks" / "wtm-create").exists()
+
+
+def test_hook_delete_dotd_requires_recursive(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "delete", root=root)
+    assert res.returncode == 1
+    assert "recursive" in res.stderr
+    assert (repo / "hooks" / "wtm-delete.d").is_dir()
+    res = run("hook", "delete", "alpha", "feat", "delete", "-r", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not (repo / "hooks" / "wtm-delete.d").exists()
+
+
+def test_hook_delete_entry_level(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "20-b", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "delete/10-a", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not (repo / "hooks" / "wtm-delete.d" / "10-a").exists()
+    assert (repo / "hooks" / "wtm-delete.d" / "20-b").is_file()
+
+
+def test_hook_list_groups_by_event(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _write_hook(repo / "hooks" / "wtm-create", "true\n")
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
+    res = run("hook", "list", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "create:" in res.stdout
+    assert "delete:" in res.stdout
+    assert "wtm-create" in res.stdout
+    assert "10-a" in res.stdout
+
+
+def test_hook_list_types_summary(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
+    _write_hook(repo / "hooks" / "wtm-delete.d" / "20-b", "true\n")
+    res = run("hook", "list", "alpha", "feat", "--types", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "delete: 2 hook(s)" in res.stdout
+    assert "create: 0 hook(s)" in res.stdout
+
+
+# --- workspace scope ---------------------------------------------------------
+
+
+def test_hook_install_workspace_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-hooks"
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run(
+        "hook",
+        "install",
+        str(src),
+        "--scope",
+        "workspace",
+        root=root,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert (workspace / "wtm-create").is_file()
+
+
+def test_workspace_scope_default_location(root: Path, tmp_path: Path) -> None:
+    # With WTM_WORKSPACE_HOOKS_DIR unset the workspace dir is $root/.wtm/hooks.
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "--scope", "workspace", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / ".wtm" / "hooks" / "wtm-create").is_file()
+
+
+def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    workspace = tmp_path / "workspace-hooks"
+    out = tmp_path / "ran"
+    _write_hook(workspace / "wtm-create", f'echo "$WTM_EVENT" > "{out}"\n')
+    res = run(
+        "hook",
+        "run",
+        "alpha",
+        "feat",
+        "create",
+        "--scope",
+        "workspace",
+        root=root,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "create"
+    listed = run(
+        "hook",
+        "list",
+        "alpha",
+        "feat",
+        root=root,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert "workspace:" in listed.stdout
+
+
+# --- enter / leave events ----------------------------------------------------
+
+
+def test_enter_event_fires_on_enter(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    _write_hook(hooks / "wtm-enter", f'echo "$WTM_EVENT" > "{out}"\n')
+    res = run("enter", "alpha", "feat", root=root, hooks_dir=hooks, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "enter"
+
+
+def test_enter_event_fires_on_create_cd(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    _write_hook(hooks / "wtm-enter", f'echo "$WTM_EVENT" >> "{out}"\n')
+    res = run("create", "alpha", "feat", "-c", root=root, hooks_dir=hooks, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "enter"
+
+
+def test_create_without_cd_does_not_fire_enter(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    _write_hook(hooks / "wtm-enter", f'echo enter >> "{out}"\n')
+    res = run("create", "alpha", "feat", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert not out.exists()
+
+
+def test_enter_install_then_enter_order(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    order = tmp_path / "order"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    _write_hook(hooks / "wtm-install", f'echo install >> "{order}"\n')
+    _write_hook(hooks / "wtm-enter", f'echo enter >> "{order}"\n')
+    res = run("enter", "alpha", "feat", "-i", root=root, hooks_dir=hooks, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["install", "enter"]
+
+
+def test_create_cd_install_order(root: Path, tmp_path: Path) -> None:
+    # 'wtm create -c -i' fires create -> install -> enter.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    order = tmp_path / "order"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    _write_hook(hooks / "wtm-create", f'echo create >> "{order}"\n')
+    _write_hook(hooks / "wtm-install", f'echo install >> "{order}"\n')
+    _write_hook(hooks / "wtm-enter", f'echo enter >> "{order}"\n')
+    res = run(
+        "create",
+        "alpha",
+        "feat",
+        "-c",
+        "-i",
+        root=root,
+        hooks_dir=hooks,
+        cd_file=cd_file,
+    )
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["create", "install", "enter"]
+
+
+def test_leave_event_fires_with_cwd_default(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    # cwd default: bare 'wtm leave' acts on the worktree you stand in.
+    _write_hook(
+        hooks / "wtm-leave",
+        f'printf "%s|%s\\n" "$WTM_EVENT" "$WTM_DIR" > "{out}"\n',
+    )
+    res = run("leave", root=root, cwd=wt, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    event, dir_ = out.read_text().strip().split("|")
+    assert event == "leave"
+    assert dir_ == str(wt)
+    assert wt.exists()  # non-destructive
+
+
+def test_leave_cd_lands_in_oldpwd(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run(
+        "leave",
+        "-c",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(prev)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(prev)
+
+
+def test_leave_cd_falls_back_to_project_dir(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    gone = tmp_path / "gone"  # never created -> not a dir
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run(
+        "leave",
+        "-c",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(gone)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "alpha")
+
+
+# --- usage / dispatch --------------------------------------------------------
+
+
+def test_no_args_shows_help(root: Path) -> None:
+    res = run(root=root)
+    assert res.returncode != 0
+    assert "Usage:" in res.stdout or "Usage:" in res.stderr
+
+
+def test_unknown_command(root: Path) -> None:
+    res = run("frobnicate", root=root)
+    assert res.returncode == 2
+
+
+# --- worktree subcommand group -----------------------------------------------
+#
+# The worktree-level commands are canonically 'wtm worktree <cmd>' with a
+# top-level '<cmd>' alias. The rest of the suite exercises the aliases; these
+# assert the subcommand form is wired to the same handlers.
+
+
+def test_worktree_group_no_args_shows_help(root: Path) -> None:
+    res = run("worktree", root=root)
+    assert res.returncode != 0
+    assert "Usage:" in res.stdout or "Usage:" in res.stderr
+
+
+def test_worktree_create_makes_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("worktree", "create", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert (wt / "file.txt").exists()
+    branch = subprocess.run(
+        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "feat"
+
+
+def test_worktree_list_matches_alias(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)  # via the top-level alias
+    sub = run("worktree", "list", "alpha", root=root)
+    alias = run("list", "alpha", root=root)
+    assert sub.returncode == 0, sub.stderr
+    assert [line.split()[0] for line in sub.stdout.splitlines()] == ["feat"]
+    assert sub.stdout == alias.stdout  # same handler, identical output
+
+
+def test_worktree_resolve_prints_path(root: Path) -> None:
+    res = run("worktree", "resolve", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha" / "worktrees" / "feat")
+
+
+def test_worktree_delete_removes_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("worktree", "create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert wt.is_dir()
+    res = run("worktree", "delete", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not wt.exists()
+
+
+# --- migrate -----------------------------------------------------------------
+
+
+def _git(cwd: Path, *args: str, root: Path) -> subprocess.CompletedProcess[str]:
+    """Run git in *cwd* with the test's isolated identity/config."""
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+
+    return subprocess.run(["git", "-C", str(cwd), *args], env=env, capture_output=True, text=True)
+
+
+def _seed_source(root: Path, name: str = "src") -> Path:
+    """Build a plain working clone (the migration source) with dirty state.
+
+    Returns the source top level, placed *outside* the projects root (sources
+    live in a sibling tree, like ``~/workspace/src``). It has a real upstream (a
+    bare repo) as ``origin``, a committed ``main``, a checked-out
+    ``feature/foo`` branch, a modified tracked file, an untracked file, and a
+    git-ignored ``build/`` dir.
+    """
+    outside = root.parent  # the tmp_path; siblings of the projects root
+    upstream = outside / "_upstream" / f"{name}.git"
+    upstream.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--bare", str(upstream), root=root)
+
+    source = outside / "_src" / name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "clone", "-q", str(upstream), str(source), root=root)
+    (source / "file.txt").write_text("hello\n")
+    (source / ".gitignore").write_text("build/\n")
+    _git(source, "add", ".", root=root)
+    _git(source, "commit", "-qm", "init", root=root)
+    _git(source, "push", "-q", "origin", "main", root=root)
+
+    _git(source, "checkout", "-qb", "feature/foo", root=root)
+    (source / "file.txt").write_text("work-in-progress\n")  # modified tracked
+    (source / "untracked.txt").write_text("untracked\n")  # untracked
+    (source / "build").mkdir()
+    (source / "build" / "artifact.bin").write_text("ignored\n")  # ignored
+
+    return source
+
+
+def test_migrate_creates_target_and_worktree(root: Path) -> None:
+    source = _seed_source(root)
+    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+
+    git_dir = root / "proj" / ".git"
+    assert git_dir.is_dir()
+    # Dual-ref refspec present and origin points at the real upstream.
+    assert (
+        _git(
+            root, "--git-dir", str(git_dir), "config", "remote.origin.fetch", root=root
+        ).stdout.strip()
+        == "+refs/heads/*:refs/remotes/origin/*"
+    )
+    assert _git(
+        root, "--git-dir", str(git_dir), "config", "remote.origin.url", root=root
+    ).stdout.strip() == str(root.parent / "_upstream" / "src.git")
+
+    wt = root / "proj" / "worktrees" / "feature" / "foo"
+    assert _git(wt, "symbolic-ref", "--short", "HEAD", root=root).stdout.strip() == "feature/foo"
+    # Working-tree state reproduced: modified + untracked + ignored.
+    assert (wt / "file.txt").read_text() == "work-in-progress\n"
+    assert (wt / "untracked.txt").exists()
+    assert (wt / "build" / "artifact.bin").exists()
+
+
+def test_migrate_infers_project_from_source_basename(root: Path) -> None:
+    source = _seed_source(root, "myrepo")
+    res = run("migrate", root=root, cwd=source)  # no --project, no positional
+    assert res.returncode == 0, res.stderr
+    assert (root / "myrepo" / ".git").is_dir()
+
+
+def test_project_migrate_subcommand_form(root: Path) -> None:
+    # 'migrate' is canonically 'wtm project migrate' with a 'wtm migrate' alias;
+    # the subcommand form is wired to the same handler.
+    source = _seed_source(root)
+    res = run("project", "migrate", "--project", "proj", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    assert (root / "proj" / ".git").is_dir()
+    assert (root / "proj" / "worktrees" / "feature" / "foo").is_dir()
+
+
+def test_migrate_positional_names_project(root: Path) -> None:
+    source = _seed_source(root)
+    res = run("migrate", "chosen", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    assert (root / "chosen" / ".git").is_dir()
+
+
+def test_migrate_no_ignored_drops_ignored_files(root: Path) -> None:
+    source = _seed_source(root)
+    res = run("migrate", "--project", "proj", "--no-ignored", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    wt = root / "proj" / "worktrees" / "feature" / "foo"
+    assert (wt / "untracked.txt").exists()  # untracked kept
+    assert not (wt / "build" / "artifact.bin").exists()  # ignored dropped
+
+
+def test_migrate_exclude_pattern_honored(root: Path) -> None:
+    source = _seed_source(root)
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--exclude",
+        "untracked.txt",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 0, res.stderr
+    wt = root / "proj" / "worktrees" / "feature" / "foo"
+    assert not (wt / "untracked.txt").exists()
+
+
+def test_migrate_mirrors_uncommitted_deletion(root: Path) -> None:
+    source = _seed_source(root)
+    # Delete a committed file without committing: the mirror must drop it too.
+    (source / "file.txt").unlink()
+    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    wt = root / "proj" / "worktrees" / "feature" / "foo"
+    assert not (wt / "file.txt").exists()
+
+
+def test_migrate_no_worktree_skips_checkout(root: Path) -> None:
+    source = _seed_source(root)
+    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    assert (root / "proj" / ".git").is_dir()
+    assert list((root / "proj" / "worktrees").iterdir()) == []
+
+
+def test_migrate_copies_remotes(root: Path) -> None:
+    source = _seed_source(root)
+    _git(source, "remote", "add", "fork", "git@example.com:me/fork.git", root=root)
+    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    remotes = _git(
+        root, "--git-dir", str(root / "proj" / ".git"), "remote", root=root
+    ).stdout.split()
+    assert "fork" in remotes
+
+
+def test_migrate_existing_target_refused_without_update(root: Path) -> None:
+    source = _seed_source(root)
+    run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    # A new branch added after the first migrate must NOT reach the target
+    # without --update.
+    _git(source, "checkout", "-qb", "another", root=root)
+    (source / "a.txt").write_text("a\n")
+    _git(source, "add", ".", root=root)
+    _git(source, "commit", "-qm", "a", root=root)
+
+    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+    assert (
+        _git(
+            root,
+            "--git-dir",
+            str(root / "proj" / ".git"),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/another",
+            root=root,
+        ).returncode
+        != 0
+    )
+
+
+def test_migrate_existing_target_pushes_new_branch(root: Path) -> None:
+    source = _seed_source(root)
+    run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    # A new branch added after the first migrate must reach the existing target.
+    _git(source, "checkout", "-qb", "another", root=root)
+    (source / "a.txt").write_text("a\n")
+    _git(source, "add", ".", root=root)
+    _git(source, "commit", "-qm", "a", root=root)
+
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--no-worktree",
+        "--update",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 0, res.stderr
+    assert (
+        _git(
+            root,
+            "--git-dir",
+            str(root / "proj" / ".git"),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/another",
+            root=root,
+        ).returncode
+        == 0
+    )
+    # The temporary push remote is cleaned up from the source.
+    assert "wtm-migrate-target" not in _git(source, "remote", root=root).stdout.split()
+
+
+def test_migrate_init_bare_imports_refs_via_push(root: Path) -> None:
+    # --init-bare makes an empty repo, so references must arrive by push from
+    # the source (the disk-clone shortcut does not apply).
+    source = _seed_source(root)
+    res = run("migrate", "--project", "proj", "--init-bare", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    git_dir = root / "proj" / ".git"
+    for branch in ("main", "feature/foo"):
+        assert (
+            _git(
+                root,
+                "--git-dir",
+                str(git_dir),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+                root=root,
+            ).returncode
+            == 0
+        )
+    # Fetch refspec still set on the init'd bare repo.
+    assert (
+        _git(
+            root, "--git-dir", str(git_dir), "config", "remote.origin.fetch", root=root
+        ).stdout.strip()
+        == "+refs/heads/*:refs/remotes/origin/*"
+    )
+    wt = root / "proj" / "worktrees" / "feature" / "foo"
+    assert (wt / "file.txt").read_text() == "work-in-progress\n"
+
+
+def test_migrate_dry_run_makes_no_changes(root: Path) -> None:
+    source = _seed_source(root)
+    res = run("migrate", "--project", "proj", "--dry-run", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    assert not (root / "proj").exists()
+    assert "from_disk" in res.stderr
+
+
+def test_migrate_cd_emits_worktree_path(root: Path, tmp_path: Path) -> None:
+    source = _seed_source(root)
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run("migrate", "--project", "proj", "-c", root=root, cwd=source, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "proj" / "worktrees" / "feature" / "foo")
+
+
+def test_migrate_detached_head_requires_name(root: Path) -> None:
+    source = _seed_source(root)
+    head = _git(source, "rev-parse", "HEAD", root=root).stdout.strip()
+    _git(source, "checkout", "-q", head, root=root)  # detach
+    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    assert res.returncode == 1
+    assert "detached HEAD" in res.stderr
+
+
+def test_migrate_under_projects_root_needs_source(root: Path) -> None:
+    # Standing under the projects root with no source given is an error.
+    run("project", "new", "proj", root=root)
+    res = run("migrate", root=root, cwd=root / "proj")
+    assert res.returncode == 1
+    assert "source" in res.stderr
+
+
+# --- migrate --all-worktrees -------------------------------------------------
+
+
+def _add_linked_worktree(
+    source: Path, name: str, branch: str, root: Path, *, content: str = "linked\n"
+) -> Path:
+    """Add a linked worktree on a new *branch* beside *source*; return its path."""
+    path = source.parent / name
+    _git(source, "worktree", "add", "-q", "-b", branch, str(path), root=root)
+    (path / "wt.txt").write_text(content)
+
+    return path
+
+
+def _detach_worktree(source: Path, name: str, root: Path) -> tuple[Path, str]:
+    """Add a linked worktree detached at HEAD; return its path and the sha."""
+    path = source.parent / name
+    head = _git(source, "rev-parse", "HEAD", root=root).stdout.strip()
+    _git(source, "worktree", "add", "-q", "--detach", str(path), head, root=root)
+
+    return path, head
+
+
+def test_migrate_all_worktrees_reproduces_set(root: Path) -> None:
+    source = _seed_source(root)  # main worktree on feature/foo
+    _add_linked_worktree(source, "wt-bar", "bar", root)
+    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+
+    # Main worktree named after the source dir basename (not its branch).
+    main_wt = root / "proj" / "worktrees" / "src"
+    assert (
+        _git(main_wt, "symbolic-ref", "--short", "HEAD", root=root).stdout.strip() == "feature/foo"
+    )
+    assert (main_wt / "untracked.txt").exists()  # working tree mirrored
+
+    # Linked worktree reproduced under its source dir name, on its branch.
+    bar_wt = root / "proj" / "worktrees" / "wt-bar"
+    assert _git(bar_wt, "symbolic-ref", "--short", "HEAD", root=root).stdout.strip() == "bar"
+    assert (bar_wt / "wt.txt").read_text() == "linked\n"
+
+
+def test_migrate_all_worktrees_detached_pins_branch(root: Path) -> None:
+    source = _seed_source(root)
+    _path, head = _detach_worktree(source, "wt-detached", root)
+    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+
+    wt = root / "proj" / "worktrees" / "wt-detached"
+    # A branch named after the source dir was pinned at the detached commit.
+    assert _git(wt, "symbolic-ref", "--short", "HEAD", root=root).stdout.strip() == "wt-detached"
+    assert _git(wt, "rev-parse", "HEAD", root=root).stdout.strip() == head
+
+
+def test_migrate_all_worktrees_skips_existing_collision(root: Path) -> None:
+    source = _seed_source(root)
+    _add_linked_worktree(source, "wt-bar", "bar", root)
+    # First migrate creates both worktrees.
+    run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    # Re-run: both targets already exist, so both are skipped, run still succeeds.
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--all-worktrees",
+        "--update",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "skipped" in res.stderr
+
+
+def test_migrate_all_worktrees_rejects_name(root: Path) -> None:
+    source = _seed_source(root)
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--all-worktrees",
+        "--name",
+        "x",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 1
+    assert "mutually exclusive" in res.stderr
+
+
+def test_migrate_all_worktrees_rejects_no_worktree(root: Path) -> None:
+    source = _seed_source(root)
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--all-worktrees",
+        "--no-worktree",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 1
+    assert "mutually exclusive" in res.stderr
+
+
+def test_migrate_all_worktrees_skips_prunable(root: Path) -> None:
+    source = _seed_source(root)
+    path = _add_linked_worktree(source, "wt-gone", "gone", root)
+    shutil.rmtree(path)  # leave a registered-but-missing worktree
+    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    assert res.returncode == 0, res.stderr
+    assert not (root / "proj" / "worktrees" / "wt-gone").exists()
+    assert "prunable" in res.stderr or "missing" in res.stderr
+    # The healthy main worktree is still reproduced.
+    assert (root / "proj" / "worktrees" / "src").is_dir()
+
+
+def test_migrate_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Path) -> None:
+    source = _seed_source(root)
+    linked = _add_linked_worktree(source, "wt-bar", "bar", root)
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    # Invoke from inside the linked worktree: -c should land there, not in main.
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--all-worktrees",
+        "-c",
+        root=root,
+        cwd=linked,
+        cd_file=cd_file,
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "proj" / "worktrees" / "wt-bar")
+
+
+def test_migrate_all_worktrees_dry_run_previews_each(root: Path) -> None:
+    source = _seed_source(root)
+    _add_linked_worktree(source, "wt-bar", "bar", root)
+    res = run(
+        "migrate",
+        "--project",
+        "proj",
+        "--all-worktrees",
+        "--dry-run",
+        root=root,
+        cwd=source,
+    )
+    assert res.returncode == 0, res.stderr
+    assert not (root / "proj").exists()  # no changes
+    assert "worktree 'src'" in res.stderr
+    assert "worktree 'wt-bar'" in res.stderr

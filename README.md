@@ -1,0 +1,220 @@
+# wtm — git worktree manager
+
+`wtm` manages git worktrees laid out under a single projects root:
+
+```
+$WTM_PROJECTS_ROOT/<project>/
+    .git/                 bare repository
+    worktrees/<name>/     worktrees
+```
+
+`wtm` only knows this structure; anything project-specific (shared data dirs,
+direnv, tmux/sesh) belongs in hooks, not in `wtm`.
+
+## Commands
+
+```
+wtm project new NAME                                 create an empty project (.git/ + worktrees/)
+wtm project clone URL [NAME]                         clone into a new project (bare)
+wtm clone URL [NAME]                                 shorthand for 'wtm project clone'
+wtm project list                                     list all projects (-t/--tree: with their worktrees)
+wtm worktree create [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
+wtm worktree install [PROJECT] NAME | [DIR]                    run install hooks for a worktree (alias for 'wtm hook run install')
+wtm worktree enter   ([PROJECT] NAME | [DIR]) [-c] [-b BRANCH] [-i]  cd into a worktree; -c creates it first if absent
+wtm worktree leave   [PROJECT] NAME | [DIR] [-c]               run leave hooks for a worktree; -c cds out (non-destructive)
+wtm worktree delete  (PROJECT NAME | DIR) [-f] [-D]            remove a worktree (-f force, -D delete branch too)
+wtm worktree list    [PROJECT]                                 list a project's worktrees (project inferred from cwd if omitted)
+wtm worktree resolve [PROJECT] NAME [-e | --env]               print a worktree's path (--env: emit WTM_* for eval)
+wtm project migrate [SOURCE|PROJECT] [opts]          fold a plain clone into the bare-repo layout
+wtm hook install FILE|DIR [TARGET] [-s SCOPE] [-e EVENT] [--link] [--force]  install a hook into a scope
+wtm hook run HOOK [TARGET] [-s SCOPE] [--strict]      run an event's hooks (all scopes by default)
+wtm hook delete HOOK [TARGET] [-s SCOPE] [-r]         delete a hook (event, or event/entry)
+wtm hook list [TARGET] [--types]                      list installed hooks, grouped by event across scopes
+```
+
+The worktree-level commands each carry a top-level alias, so `wtm create …` is
+shorthand for `wtm worktree create …` (likewise `install`, `enter`, `leave`,
+`delete`, `list`, `resolve`). `wtm migrate …` is likewise an alias for
+`wtm project migrate …`. The two forms are equivalent.
+
+Run `wtm --help` (or `wtm COMMAND --help`) for the authoritative usage.
+
+## Migrating an existing clone
+
+`wtm migrate` folds a legacy plain clone (the *source*) into the bare-repo +
+worktrees layout (the *target*), carrying over remotes, references, tags, and
+the live working checkout (modified + untracked files) recreated as a worktree.
+It automates the manual clone/push recipe.
+
+Run it from inside the source repo (the target project name defaults to the
+source's basename) or from under the projects root (the source is the lone
+positional or `--source`). `--source PATH` / `--project NAME` override.
+
+Target creation when the project is absent:
+
+- default: bare-clone the source **on disk** (fast, offline, hard-linked),
+  then repoint `origin` at the source's real origin URL
+- `--from-origin`: bare-clone the origin URL over the network (full upstream)
+- `--init-bare`: an empty bare repo (references then come from the push)
+
+The bare repo always gets `remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*`,
+the dual-ref layout `create`'s branch resolution relies on. `--fetch` runs a
+final `git fetch origin` afterwards to populate `refs/remotes/origin/*` and
+`origin/HEAD`.
+
+A target whose `.git` already exists is refused unless `--update` is passed
+(migrating into it mutates a project that may already be in active use). With
+`--update`, references are imported by pushing from the source: fast-forward-only
+by default (rejected branches are reported; branches checked out in a target
+worktree are skipped), or `--force` to overlay.
+
+The worktree is recreated on the source's current branch (named after it; pass
+`--name` for a detached HEAD) and its working tree is mirrored with `rsync
+--archive --delete` (uncommitted deletions carry over; `.git` is always
+excluded). Git-ignored files are copied **by default**; with no `--filter-file`
+that includes heavy artefacts (`.venv`, `node_modules`, …), so pass
+`--filter-file PATH` (rsync filter), `--exclude PATTERN`, or `--no-ignored`.
+
+`--all-worktrees` reproduces the source's **whole worktree set** instead of just
+the current checkout: every linked worktree the source has is recreated, each
+named after its **source directory basename** (the main worktree included, so
+its target name is the clone's dirname, not its branch) and placed on its own
+branch. A detached worktree is reproduced by pinning a branch (named after the
+source dir) at its exact commit. Worktrees whose target name already exists, or
+whose branch is already checked out in the target, are **skipped with a warning**
+and the rest still attempted; a hard failure on one worktree is reported and the
+run exits non-zero, but the others are still created. Prunable (missing-on-disk)
+source worktrees are skipped; locked ones are included. `-c/--cd` lands in the
+worktree matching the one you invoked from, else the main one. `--all-worktrees`
+is mutually exclusive with `--name` and `--no-worktree`.
+
+Phases are toggleable: `--no-remotes`, `--no-refs`, `--no-worktree`,
+`--no-tags`, `--no-ignored`; `--fetch`, `--force`, and `--update` are opt-in.
+`-n/--dry-run` prints the plan and a per-worktree `rsync -n` preview with no
+side effects; `-c/--cd` drops you into the new worktree. Migration is
+non-destructive: the source is left intact (only a temporary push remote is
+added and removed).
+
+
+## Targeting a worktree
+
+For `install` / `enter` / `leave` / `delete` / `hook run` / `hook install` / `hook delete`:
+
+- `PROJECT NAME` → `$WTM_PROJECTS_ROOT/PROJECT/worktrees/NAME`
+- `NAME` → `<cwd-project>/worktrees/NAME` (project inferred from the current
+  directory; `NAME` may be nested, e.g. `feature/x`)
+- `DIR` → an explicit path (a single arg is a path only if it starts with `/`,
+  `./`, `../`, or is `.`/`..`)
+- no argument → the current directory (`delete` requires an explicit target)
+
+`create` resolves a branch as: existing local branch → use it; `origin/NAME`
+exists → track it; otherwise create a new branch off `origin/HEAD` (or `HEAD`
+when there is no `origin/HEAD`). If the repository has no commits yet (e.g. a
+freshly-created project), the worktree is bootstrapped on a new orphan branch.
+
+`enter -c` makes entering idempotent: if the target worktree is absent it is
+created first (with `create`'s branch resolution, `-b BRANCH` to override the
+branch), then entered; if it already exists `enter` just cds in. With `-c` the
+target is restricted to `PROJECT NAME` or `NAME` (no `DIR`, no cwd default), and
+`-b` outside `-c` (or when the worktree already exists) is rejected/ignored.
+
+`resolve` is a read-only path query and accepts only `PROJECT NAME` or `NAME`
+(no `DIR`, no cwd default). By default it prints the computed worktree path
+without touching git, so it works for not-yet-created targets — handy for
+`cd "$(wtm resolve PROJECT NAME)"`. With `--env` it instead emits the `WTM_*`
+contract as `export KEY='value'` lines for `eval "$(wtm resolve --env …)"`;
+that mode inspects git, so the worktree must already exist.
+
+## Hooks
+
+`wtm` fires `create`, `install`, `enter`, `leave`, and `delete` events,
+discovered across four scopes:
+
+- **global**    — `$WTM_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
+- **workspace** — `$WTM_WORKSPACE_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
+- **project**   — `$WTM_PROJECT_DIR/.git/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
+- **worktree**  — `$WTM_DIR/.wtm/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
+
+The workspace scope covers every project under the projects root; its hooks dir
+defaults to `$WTM_PROJECTS_ROOT/.wtm/hooks` (override with `$WTM_WORKSPACE_HOOKS_DIR`).
+
+Within a scope the bare `wtm-<event>` file runs before its `wtm-<event>.d/*`
+entries (sorted lexically). Setup events (`create`, `install`, `enter`) run
+most-general first: **global → workspace → project → worktree**; teardown events
+(`leave`, `delete`) reverse to most-specific first: **worktree → project →
+workspace → global**. The `delete` event fires *before* the worktree is removed,
+so per-worktree teardown hooks under `$WTM_DIR/.wtm/hooks` still exist when they
+run; its working directory is therefore `$WTM_DIR`. The `leave` event likewise
+fires while the worktree still exists.
+
+The lifecycle events fire from: `create` on `wtm create`; `install` on
+`wtm install`, `wtm create -i`, or `wtm enter -i`; `enter` whenever `wtm` cds you
+into a worktree (`wtm enter`, and `wtm create -c`); `leave` on `wtm leave`;
+`delete` on `wtm delete`. Within a single `wtm create -c -i` the order is
+`create` → `install` → `enter`; within `wtm enter -i` it is `install` → `enter`.
+
+Hooks receive the worktree directory as `$1` plus a `WTM_*` environment contract
+(`WTM_EVENT`, `WTM_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`). Failures are
+logged but non-fatal unless `--strict` is passed. `wtm` does not track or ignore
+`$WTM_DIR/.wtm/` — whether per-worktree hooks are committed to the branch is left
+to you.
+
+### Managing hooks
+
+- `wtm hook install FILE|DIR [TARGET] [--scope global|workspace|project|worktree] [--event E] [--link] [--force]`
+  installs a hook (default scope `project`). The event is inferred from a
+  `wtm-<event>` / `wtm-<event>.d` source name, or given with `--event`. A **file**
+  joins an existing `wtm-<event>.d/` (keeping its basename) or otherwise becomes
+  the bare `wtm-<event>` file; a **directory**'s contents are merged into
+  `wtm-<event>.d/`. Copies are made executable (0755); `--link` symlinks the
+  source instead. Existing destinations require `--force`. `--scope global` and
+  `--scope workspace` need no target.
+- `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks
+  (all scopes unless `--scope` restricts it). `HOOK` (the event) is the last
+  positional. `wtm install` is a shorthand for `wtm hook run install`.
+- `wtm hook delete [TARGET] HOOK [--scope …] [-r]` removes a hook. `HOOK` is the
+  last positional: an event (removes the bare `wtm-<event>` file; its
+  `wtm-<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
+  `.d` entry).
+- `wtm hook list [TARGET] [--types]` lists installed hooks grouped by event
+  across scopes; `--types` prints a compact per-event summary.
+
+## Shell integration
+
+`wtm` writes diagnostics to stderr and emits the target directory out-of-band so
+the calling shell can `cd` into it. The `wtm` function in `../env` provides this
+wrapper: it passes a `WTM_CD_FILE` temp file to the real binary and `cd`s into
+whatever path the command writes there. This is what makes `wtm enter` and
+`wtm create -c` change the current shell's directory.
+
+`wtm delete` uses the same channel to rescue a stranded shell: when you delete
+the worktree you are standing in (or a subdirectory of it), it `cd`s to
+`$OLDPWD` if that still exists, otherwise to the project dir. Without the
+wrapper it stays silent (it cannot move the parent shell anyway).
+
+## Configuration
+
+`wtm` reads these environment variables:
+
+- `WTM_PROJECTS_ROOT` — projects root (default `~/workspace/projects`)
+- `WTM_HOOKS_DIR` — global hooks directory (default `$XDG_CONFIG_HOME/wtm/hooks`)
+- `WTM_WORKSPACE_HOOKS_DIR` — workspace hooks directory (default
+  `$WTM_PROJECTS_ROOT/.wtm/hooks`)
+
+## Development
+
+`wtm` uses [`uv`](https://docs.astral.sh/uv/) for dependency management and
+[Ruff](https://docs.astral.sh/ruff/) for both formatting and linting (import
+sorting included). The `Makefile` wraps the common tasks:
+
+- `make reformat` — apply safe autofixes (import sorting, pyupgrade rewrites,
+  dead-import removal) and format the code (`ruff check --fix` + `ruff format`)
+- `make lint` — lint (`ruff check`: pyflakes, pycodestyle, isort, pyupgrade,
+  bugbear, comprehensions)
+- `make check` — verify formatting + lint without writing (CI-style gate)
+- `make test` — run the test suite (`pytest`)
+
+The underlying commands are `uv run ruff check --fix src tests`, `uv run ruff
+format src tests`, and `uv run pytest`. Ruff config lives in `pyproject.toml`
+(`[tool.ruff]`): line length 99, target Python 3.10.
