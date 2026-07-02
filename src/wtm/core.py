@@ -13,12 +13,11 @@ __all__ = [
     "abspath",
     "current_dir",
     "derive_context",
+    "project_dir_for",
     "project_dir_for_cwd",
     "reject_traversal",
     "rescue_dir",
     "resolve_project_dir",
-    "resolve_target",
-    "split_project_name",
     "valid_project_name",
     "worktree_name",
 ]
@@ -97,22 +96,18 @@ def reject_traversal(name: str) -> None:
         raise WtmError(f"NAME may not contain '..': {name}")
 
 
-def _looks_like_path(arg: str) -> bool:
-    """A single arg is a path only if it starts with '/', './', '../' or is '.'/'..'."""
-    return (
-        arg.startswith("/") or arg.startswith("./") or arg.startswith("../") or arg in (".", "..")
-    )
-
-
 # --- project resolution ------------------------------------------------------
 
 
-def project_dir_for_cwd(config: Config) -> Path | None:
-    """Return the project dir if cwd is under the projects root, else ``None``."""
-    cur = abspath(os.getcwd())
-    root = config.projects_root
+def project_dir_for(projects_root: Path, cwd: Path) -> Path | None:
+    """Return the project dir if *cwd* is under *projects_root*, else ``None``.
+
+    Pure: takes the projects root and the current directory explicitly so the
+    rule is testable without touching the process cwd. :func:`project_dir_for_cwd`
+    is the config-bound convenience that reads the live cwd.
+    """
     try:
-        rest = cur.relative_to(root)
+        rest = cwd.relative_to(projects_root)
     except ValueError:
         return None
 
@@ -120,7 +115,12 @@ def project_dir_for_cwd(config: Config) -> Path | None:
     if not parts:
         return None
 
-    return root / parts[0]
+    return projects_root / parts[0]
+
+
+def project_dir_for_cwd(config: Config) -> Path | None:
+    """Return the project dir if the live cwd is under the projects root, else ``None``."""
+    return project_dir_for(config.projects_root, abspath(os.getcwd()))
 
 
 def current_dir() -> Path | None:
@@ -161,51 +161,6 @@ def _is_within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
 
 
-def resolve_target(config: Config, args: list[str], *, require_target: bool = False) -> Path:
-    """Resolve a worktree directory from positionals.
-
-    :param config: resolved configuration.
-    :param args: remaining positional arguments.
-    :param require_target: forbid the zero-arg cwd default (e.g. ``delete``).
-    :returns: the resolved worktree directory.
-
-    Grammar:
-
-    - ``PROJECT NAME`` -> ``<projects_root>/PROJECT/worktrees/NAME``
-    - ``NAME`` -> ``<cwd-project>/worktrees/NAME`` (project inferred from cwd);
-      ``NAME`` may be nested. A single arg is an explicit path only if it
-      starts with ``/``, ``./``, ``../`` or is ``.``/``..``.
-    - no args -> cwd (forbidden when ``require_target``).
-    """
-    count = len(args)
-    if count == 0:
-        if require_target:
-            raise WtmError("a target is required (PROJECT NAME | NAME | DIR)")
-
-        return abspath(os.getcwd())
-    if count == 1:
-        arg = args[0]
-        if _looks_like_path(arg):
-            return abspath(arg)
-        reject_traversal(arg)
-        project_dir = project_dir_for_cwd(config)
-        if project_dir is None:
-            raise WtmError(
-                "1-arg NAME given but cwd is not under "
-                f"{config.projects_root} (pass PROJECT NAME or an explicit ./ path)"
-            )
-
-        return project_dir / "worktrees" / arg
-    if count == 2:
-        project, name = args
-        valid_project_name(project)
-        reject_traversal(name)
-
-        return config.projects_root / project / "worktrees" / name
-
-    raise WtmError("too many arguments (expected PROJECT NAME | NAME | DIR)")
-
-
 def resolve_project_dir(config: Config, project: str | None) -> Path:
     """Resolve a project dir from an explicit name or the current directory."""
     if project:
@@ -218,18 +173,6 @@ def resolve_project_dir(config: Config, project: str | None) -> Path:
         raise WtmError(f"no PROJECT given and cwd is not under {config.projects_root}")
 
     return project_dir
-
-
-def split_project_name(args: list[str]) -> tuple[str | None, str]:
-    """Split positionals into (PROJECT, NAME): one arg is NAME, two are PROJECT NAME."""
-    if len(args) == 2:
-        return args[0], args[1]
-    if len(args) == 1:
-        return None, args[0]
-    if len(args) == 0:
-        raise WtmError("usage: a NAME is required")
-
-    raise WtmError("too many arguments")
 
 
 def worktree_name(path: Path, worktrees_dir: Path) -> str | None:

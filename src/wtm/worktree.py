@@ -30,10 +30,9 @@ from wtm.core import (
     derive_context,
     reject_traversal,
     resolve_project_dir,
-    resolve_target,
-    split_project_name,
 )
 from wtm.hooks import run_hooks
+from wtm.target import TargetMode, resolve_target, split_project_name
 
 
 class BranchStrategy(Enum):
@@ -142,7 +141,7 @@ class Worktree:
 
     def install(self, args: list[str], *, strict: bool) -> None:
         """Run install hooks for a worktree."""
-        target = resolve_target(self.config, args)
+        target = resolve_target(self.config, TargetMode.WORKTREE, args)
         context = derive_context(target)
         run_hooks("install", context, self.config, strict=strict)
 
@@ -152,7 +151,7 @@ class Worktree:
         Fires ``install`` first (when *do_install*), then the ``enter`` event.
         The caller (shell wrapper via cli) is responsible for the actual cd.
         """
-        target = resolve_target(self.config, args)
+        target = resolve_target(self.config, TargetMode.WORKTREE, args)
         context = derive_context(target)
         if do_install:
             run_hooks("install", context, self.config, strict=strict)
@@ -167,7 +166,7 @@ class Worktree:
         to ``WTM_DIR``). The cd-out target is ``$OLDPWD`` when it is still a
         directory, else the project dir.
         """
-        target = resolve_target(self.config, args)
+        target = resolve_target(self.config, TargetMode.WORKTREE, args)
         context = derive_context(target)
         run_hooks("leave", context, self.config, strict=strict)
 
@@ -213,7 +212,7 @@ class Worktree:
         # Derive context before removal so hooks (e.g. cache purge) still get
         # paths, and fire delete hooks while the worktree still exists (so
         # per-worktree teardown hooks under $WTM_DIR/.wtm/hooks can run).
-        target = resolve_target(self.config, args, require_target=True)
+        target = resolve_target(self.config, TargetMode.DELETE, args)
         context = derive_context(target)
         branch = context.branch
 
@@ -245,20 +244,13 @@ class Worktree:
         )
 
     def target_path(self, args: list[str]) -> Path:
-        """Compute a worktree path for ``PROJECT NAME`` or ``NAME``.
+        """Compute a worktree path for ``PROJECT NAME`` or ``NAME`` (no git).
 
-        Pure path math (no git): rejects ``DIR`` targets and the cwd default so
-        only the create-style grammar is accepted. Shared by :meth:`resolve_path`
-        and the ``enter --create`` orchestration.
+        The ``NAME_ONLY`` target mode: rejects ``DIR`` targets and the cwd
+        default so only the create-style grammar is accepted. Shared by
+        :meth:`resolve_path` and the ``enter --create`` orchestration.
         """
-        project, name = split_project_name(args)
-        if name.startswith(("/", "./", "../")) or name in (".", ".."):
-            raise WtmError(f"takes a NAME, not a path: {name}")
-        reject_traversal(name)
-
-        project_dir = resolve_project_dir(self.config, project)
-
-        return project_dir / "worktrees" / name
+        return resolve_target(self.config, TargetMode.NAME_ONLY, args)
 
     def resolve_path(self, args: list[str]) -> Path:
         """Return a worktree's computed path without touching git.

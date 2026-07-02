@@ -35,6 +35,7 @@ from wtm.output import (
     worktree_list_lines,
 )
 from wtm.project import Project
+from wtm.target import TargetMode, TokenKind, slot_kind
 from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated
 
 
@@ -108,13 +109,13 @@ def _complete_project(incomplete: str) -> list[str]:
 
 
 def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Complete PROJECT, but only at the first positional slot.
+    """Complete PROJECT for the create-style ('[PROJECT] NAME') commands.
 
-    The '[PROJECT] NAME' commands use a variadic positional whose completion
-    callback fires at every slot (nargs == -1); project names are valid only
-    at the first one, so a present 'args' means we're past PROJECT.
+    These use the ``NAME_ONLY`` target mode: only the first slot completes (a
+    PROJECT); the new NAME being invented has nothing to offer. :func:`slot_kind`
+    encodes that rule so this callback no longer counts args by hand.
     """
-    if ctx.params.get("args"):
+    if TokenKind.PROJECT not in slot_kind(TargetMode.NAME_ONLY, ctx.params.get("args") or []):
         return []
 
     return _complete_project(incomplete)
@@ -146,26 +147,34 @@ def _worktree_names(config: Config, project: str | None, *, strict: bool = False
     return sorted(names)
 
 
+def _target_candidates(kinds: frozenset[TokenKind], config: Config, args: list[str]) -> set[str]:
+    """Map the admissible token kinds at a slot to concrete completion candidates.
+
+    ``PROJECT`` -> project names; ``WORKTREE_NAME`` -> the worktree names of the
+    project already named at slot 0, or (at slot 0) the cwd-inferred project's.
+    """
+    candidates: set[str] = set()
+    if TokenKind.PROJECT in kinds:
+        candidates |= set(Project(config).list())
+    if TokenKind.WORKTREE_NAME in kinds:
+        project = args[0] if args else None
+        candidates |= set(_worktree_names(config, project))
+
+    return candidates
+
+
 def _complete_target(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Complete a worktree target for the existing-target commands.
+    """Complete a worktree target for the existing-target ('WORKTREE' mode) commands.
 
-    At the first positional slot a bare token is ambiguous (PROJECT, or a NAME
-    of the cwd-inferred project), so offer the union of project names and the
-    cwd-project's worktree names. At the second slot the first arg is the
-    PROJECT, so offer that project's worktree names. Beyond that, nothing.
-
-    Runs during shell completion (app callback has not fired), so it builds its
-    own config; :class:`Project` and :meth:`Worktree.list` are lenient, so this
-    never errors.
+    :func:`slot_kind` decides which token kinds are admissible at this slot (a
+    PROJECT and/or a worktree NAME); :func:`_target_candidates` turns them into
+    names. Runs during shell completion (app callback has not fired), so it
+    builds its own config; :class:`Project` and :meth:`Worktree.list` are
+    lenient, so this never errors.
     """
     args = ctx.params.get("args") or []
     config = Config.load()
-    if len(args) == 0:
-        candidates = set(Project(config).list()) | set(_worktree_names(config, None))
-    elif len(args) == 1:
-        candidates = set(_worktree_names(config, args[0]))
-    else:
-        return []
+    candidates = _target_candidates(slot_kind(TargetMode.WORKTREE, args), config, args)
 
     return sorted(name for name in candidates if name.startswith(incomplete))
 
@@ -178,9 +187,11 @@ def _complete_event(incomplete: str) -> list[str]:
 def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[str]:
     """Complete the '[PROJECT] NAME | [DIR] HOOK' variadic for hook run/delete.
 
-    HOOK (the event) is the trailing token, so any slot may be it: at each
-    position offer the event names alongside the target candidates valid there.
-    Once PROJECT NAME is complete (two args) only the event can follow.
+    HOOK (the event) is the trailing token, so any slot may be it: the target
+    candidates admissible at this slot (via ``WORKTREE``-mode :func:`slot_kind`)
+    are unioned with the event names. Once ``PROJECT NAME`` is complete (two
+    args) only the event can follow. The event union lives here, not in
+    :mod:`wtm.target`: the hook-prefix grammar is a cli concern.
 
     Runs during shell completion (app callback has not fired), so it builds its
     own config; :class:`Project` and :meth:`Worktree.list` are lenient, so this
@@ -188,14 +199,10 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[str]:
     """
     args = ctx.params.get("args") or []
     config = Config.load()
-    if len(args) == 0:
-        candidates = set(EVENTS) | set(Project(config).list()) | set(_worktree_names(config, None))
-    elif len(args) == 1:
-        candidates = set(EVENTS) | set(_worktree_names(config, args[0]))
-    elif len(args) == 2:
-        candidates = set(EVENTS)
-    else:
-        return []
+    kinds = slot_kind(TargetMode.WORKTREE, args)
+    candidates = _target_candidates(kinds, config, args)
+    if len(args) <= 2:
+        candidates |= set(EVENTS)
 
     return sorted(name for name in candidates if name.startswith(incomplete))
 
@@ -367,8 +374,8 @@ def hook_install(
         "wtm-<event> name otherwise",
         autocompletion=_complete_event,
     ),
-    link: bool = typer.Option(False, "--link", help="Symlink instead of copy"),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing hook"),
+    link: bool = typer.Option(False, "-l", "--link", help="Symlink instead of copy"),
+    force: bool = typer.Option(False, "-f", "--force", help="Overwrite an existing hook"),
 ) -> None:
     """Install a hook file or directory into a scope."""
     dest = ctx.obj.hooks.install(

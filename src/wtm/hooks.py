@@ -57,9 +57,9 @@ from wtm.core import (
     abspath,
     derive_context,
     resolve_project_dir,
-    resolve_target,
 )
 from wtm.output import log, warn
+from wtm.target import TargetMode, resolve_target
 
 EVENTS = ("create", "install", "enter", "leave", "delete")
 SETUP_EVENTS = ("create", "install", "enter")
@@ -246,7 +246,7 @@ class Hooks:
     ) -> None:
         """Fire *event* hooks for a worktree; *scope* ``None`` runs all scopes."""
         _validate_event(event)
-        context = derive_context(resolve_target(self.config, args))
+        context = derive_context(resolve_target(self.config, TargetMode.WORKTREE, args))
         scopes = None if scope is None else (scope,)
         run_hooks(event, context, self.config, strict=strict, scopes=scopes)
 
@@ -334,7 +334,7 @@ class Hooks:
 
             return git_dir / "hooks"
 
-        context = derive_context(resolve_target(self.config, args))
+        context = derive_context(resolve_target(self.config, TargetMode.WORKTREE, args))
 
         return _scope_hooks_dir(scope, context, self.config)
 
