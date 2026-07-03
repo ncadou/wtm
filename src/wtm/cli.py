@@ -20,6 +20,7 @@ from wtm.core import (
     Config,
     WtmError,
     current_dir,
+    remap_dir,
     rescue_dir,
     resolve_project_dir,
     worktree_name,
@@ -36,7 +37,7 @@ from wtm.output import (
 )
 from wtm.project import Project
 from wtm.target import TargetMode, TokenKind, slot_kind
-from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated
+from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated, WorktreeRenamed
 
 
 @dataclass
@@ -60,7 +61,7 @@ Manage git worktrees laid out as:
 wtm knows only this structure. Anything project-specific (shared data/tools
 dirs, direnv, sesh/tmux) is the concern of hooks, never of wtm itself.
 
-Worktree targeting for install/enter/leave/delete/hook:
+Worktree targeting for install/enter/leave/delete/rename/hook:
   PROJECT NAME -> $WTM_PROJECTS_ROOT/PROJECT/worktrees/NAME
   NAME         -> <cwd-project>/worktrees/NAME (project inferred from cwd);
                   NAME may be nested (e.g. feature/x -> worktrees/feature/x)
@@ -275,7 +276,9 @@ def project_list(
 
 
 worktree_app = typer.Typer(
-    help="Worktree-level operations (create, install, enter, leave, delete, list, resolve).",
+    help=(
+        "Worktree-level operations (create, install, enter, leave, delete, rename, list, resolve)."
+    ),
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -575,6 +578,46 @@ def delete(
 
 worktree_app.command(name="delete")(delete)
 app.command(name="delete")(delete)
+
+
+def rename(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[PROJECT] [OLDNAME] NEWNAME",
+        help="Source worktree target followed by the new NAME (the last positional)",
+        autocompletion=_complete_target,
+    ),
+    branch: bool = typer.Option(False, "-b", "--branch", help="Also rename the branch to NEWNAME"),
+    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
+) -> None:
+    """Rename (move) a worktree; -b also renames its branch to the new name.
+
+    NEWNAME is the last positional; anything before it is the source target
+    (PROJECT NAME | NAME | DIR | cwd).
+    """
+    # Capture cwd before the move so a shell standing in the renamed worktree
+    # can follow it to the new location (the mapped subpath).
+    cwd = current_dir()
+    result = ctx.obj.worktree.rename(args or [], rename_branch=branch, strict=strict)
+    log(_describe_rename(result))
+    if result.branch_renamed:
+        log(f"renamed branch '{result.old_branch}' -> '{result.new_branch}'")
+    remapped = remap_dir(cwd, result.old_dir, result.new_dir)
+    if remapped is not None:
+        emit_cd(remapped, fallback=False)
+
+
+worktree_app.command(name="rename")(rename)
+app.command(name="rename")(rename)
+
+
+def _describe_rename(result: WorktreeRenamed) -> str:
+    """Render the worktree-move diagnostic, naming both ends relative to worktrees/."""
+    old = worktree_name(result.old_dir, result.worktrees_dir) or str(result.old_dir)
+    new = worktree_name(result.new_dir, result.worktrees_dir) or str(result.new_dir)
+
+    return f"renamed worktree '{old}' -> '{new}'"
 
 
 def list_(

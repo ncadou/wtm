@@ -34,7 +34,7 @@ An executable fired on a lifecycle event, discovered across scopes.
 
 **Event**:
 A lifecycle point that fires hooks: `create`, `install`, `enter`, `leave`,
-`delete`.
+`delete`, `rename`.
 
 **Scope**:
 Where a hook is discovered/installed, from most general to most specific:

@@ -583,7 +583,7 @@ def test_resolve_env_emits_exports(root: Path) -> None:
     res = run("resolve", "alpha", "feat", "--env", root=root)
     assert res.returncode == 0, res.stderr
     lines = res.stdout.splitlines()
-    assert any(line.startswith("export WTM_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_WORKTREE_DIR='") for line in lines)
     assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
     assert any(line.startswith("export WTM_BRANCH='feat'") for line in lines)
     assert any(line.startswith("export WTM_GIT_COMMON_DIR='") for line in lines)
@@ -795,6 +795,285 @@ def test_rescue_dir_none_when_outside_or_no_cwd(
     assert rescue_dir(None, wt, project) is None
 
 
+# --- rename ------------------------------------------------------------------
+
+
+def _branch(wt: Path) -> str:
+    """Return the short branch name checked out in worktree *wt*."""
+    return subprocess.run(
+        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_rename_moves_worktree_and_leaves_branch(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    old = root / "alpha" / "worktrees" / "feat"
+    new = root / "alpha" / "worktrees" / "fix"
+    res = run("rename", "alpha", "feat", "fix", root=root)
+    assert res.returncode == 0, res.stderr
+    assert not old.exists()
+    assert (new / "file.txt").exists()
+    # Without -b the branch is untouched: still 'feat', now living at worktrees/fix.
+    assert _branch(new) == "feat"
+    assert "renamed worktree 'feat' -> 'fix'" in res.stderr
+
+
+def test_rename_two_arg_form_infers_project_from_cwd(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("rename", "feat", "fix", root=root, cwd=repo)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "fix").is_dir()
+    assert not (root / "alpha" / "worktrees" / "feat").exists()
+
+
+def test_rename_one_arg_form_renames_cwd_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("rename", "fix", root=root, cwd=wt)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "fix").is_dir()
+    assert not wt.exists()
+
+
+def test_rename_nested_newname_creates_parents(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("rename", "alpha", "feat", "feature/x", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "feature" / "x" / "file.txt").exists()
+
+
+def test_rename_nested_source_prunes_old_parents(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feature/x", root=root)
+    res = run("rename", "alpha", "feature/x", "flat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "flat").is_dir()
+    # The now-empty intermediate worktrees/feature dir should be pruned.
+    assert not (root / "alpha" / "worktrees" / "feature").exists()
+    assert (root / "alpha" / "worktrees").is_dir()
+
+
+def test_rename_branch_flag_renames_branch(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    new = root / "alpha" / "worktrees" / "fix"
+    res = run("rename", "alpha", "feat", "fix", "-b", root=root)
+    assert res.returncode == 0, res.stderr
+    assert _branch(new) == "fix"
+    assert "renamed branch 'feat' -> 'fix'" in res.stderr
+
+
+def test_rename_branch_flag_on_detached_errors(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    # Detach HEAD in the worktree so there is no branch to rename.
+    subprocess.run(["git", "-C", str(wt), "checkout", "--detach"], check=True, capture_output=True)
+    res = run("rename", "alpha", "feat", "fix", "-b", root=root)
+    assert res.returncode == 1
+    assert "detached" in res.stderr
+    # The move must not have happened (validation precedes it).
+    assert wt.exists()
+    assert repo.is_dir()
+
+
+def test_rename_destination_exists_is_hard_error(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "fix", root=root)
+    res = run("rename", "alpha", "feat", "fix", root=root)
+    assert res.returncode == 1
+    assert "destination already exists" in res.stderr
+    # Source is untouched.
+    assert (root / "alpha" / "worktrees" / "feat").is_dir()
+
+
+def test_rename_branch_collision_is_hard_error(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    # A branch named 'fix' already exists (not checked out anywhere).
+    subprocess.run(["git", "-C", str(repo), "branch", "fix"], check=True)
+    res = run("rename", "alpha", "feat", "fix", "-b", root=root)
+    assert res.returncode == 1
+    assert "branch 'fix' already exists" in res.stderr
+
+
+def test_rename_dirty_source_moves_without_force(root: Path) -> None:
+    # git worktree move carries a dirty worktree without any force flag; the
+    # uncommitted change rides along to the new location.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    (wt / "file.txt").write_text("dirty\n")  # uncommitted change
+    res = run("rename", "alpha", "feat", "fix", root=root)
+    assert res.returncode == 0, res.stderr
+    new = root / "alpha" / "worktrees" / "fix"
+    assert new.is_dir()
+    assert (new / "file.txt").read_text() == "dirty\n"
+
+
+def test_rename_locked_source_refused(root: Path) -> None:
+    # A locked worktree is refused by git (it would need --force twice); wtm has
+    # no force flag, so the user must 'git worktree unlock' first.
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "lock", str(wt)], check=True, capture_output=True
+    )
+    res = run("rename", "alpha", "feat", "fix", root=root)
+    assert res.returncode == 1
+    assert wt.exists()  # refused, still in place
+
+
+def test_rename_rejects_path_newname(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("rename", "alpha", "feat", "./fix", root=root)
+    assert res.returncode == 1
+    assert "not a path" in res.stderr
+
+
+def test_rename_rejects_traversal_newname(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    # A non-path NAME that still smuggles '..' inside a nested component.
+    res = run("rename", "alpha", "feat", "foo/../escape", root=root)
+    assert res.returncode == 1
+    assert "may not contain '..'" in res.stderr
+
+
+# --- rename: follow the moved shell ------------------------------------------
+
+
+def test_rename_cds_to_mapped_path_when_standing_in_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run("rename", "alpha", "feat", "fix", root=root, cwd=wt, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix")
+
+
+def test_rename_cds_to_mapped_subpath_from_subdir(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    sub = wt / "sub"
+    sub.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    res = run("rename", "alpha", "feat", "fix", root=root, cwd=sub, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix" / "sub")
+
+
+def test_rename_no_cd_when_outside_renamed_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "other", root=root)
+    other = root / "alpha" / "worktrees" / "other"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    # Standing in a different worktree: renaming 'feat' must not move the shell.
+    res = run("rename", "alpha", "feat", "fix", root=root, cwd=other, cd_file=cd_file)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text() == ""
+
+
+# --- rename: the rename event ------------------------------------------------
+
+
+def test_rename_event_fires_after_move_with_old_and_new(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    _write_hook(
+        hooks / "wtm-rename",
+        'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" "$WTM_OLD_DIR"'
+        f' "$WTM_BRANCH" "$WTM_OLD_BRANCH" > "{out}"\n',
+    )
+    res = run("rename", "alpha", "feat", "fix", "-b", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    event, dir_, old_dir, branch, old_branch = out.read_text().strip().split("|")
+    assert event == "rename"
+    assert dir_ == str(root / "alpha" / "worktrees" / "fix")  # fires from the new dir
+    assert old_dir == str(root / "alpha" / "worktrees" / "feat")
+    assert branch == "fix"
+    assert old_branch == "feat"
+
+
+def test_rename_event_old_branch_equals_new_when_unchanged(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    # No -b: branch unchanged, so WTM_OLD_BRANCH == WTM_BRANCH == 'feat'.
+    body = f'printf "%s|%s" "$WTM_BRANCH" "$WTM_OLD_BRANCH" > "{out}"\n'
+    _write_hook(hooks / "wtm-rename", body)
+    res = run("rename", "alpha", "feat", "fix", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "feat|feat"
+
+
+def test_rename_event_setup_scope_order(root: Path, tmp_path: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    workspace = tmp_path / "workspace-hooks"
+    order = tmp_path / "order"
+    wt = root / "alpha" / "worktrees" / "feat"
+    # rename is a setup event: fires global -> workspace -> project -> worktree.
+    _write_hook(hooks / "wtm-rename", f'echo global >> "{order}"\n')
+    _write_hook(workspace / "wtm-rename", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-rename", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-rename", f'echo worktree >> "{order}"\n')
+    res = run(
+        "rename",
+        "alpha",
+        "feat",
+        "fix",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["global", "workspace", "project", "worktree"]
+
+
+# --- core.remap_dir (unit) ---------------------------------------------------
+
+
+def test_remap_dir_maps_subpath(tmp_path: Path) -> None:
+    from wtm.core import remap_dir
+
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    # cwd is the worktree itself, or a subdir -> mapped onto the new location.
+    assert remap_dir(old, old, new) == new
+    assert remap_dir(old / "src" / "pkg", old, new) == new / "src" / "pkg"
+
+
+def test_remap_dir_none_when_outside_or_no_cwd(tmp_path: Path) -> None:
+    from wtm.core import remap_dir
+
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    assert remap_dir(tmp_path / "elsewhere", old, new) is None
+    assert remap_dir(None, old, new) is None
+
+
 # --- hooks -------------------------------------------------------------------
 
 
@@ -935,7 +1214,7 @@ def test_delete_hook_runs_before_worktree_removal(root: Path, tmp_path: Path) ->
     out = tmp_path / "alive"
     _write_hook(
         wt / ".wtm" / "hooks" / "wtm-delete",
-        f'test -f "$WTM_DIR/file.txt" && echo alive > "{out}"\n',
+        f'test -f "$WTM_WORKTREE_DIR/file.txt" && echo alive > "{out}"\n',
     )
     res = run("delete", "alpha", "feat", "-f", root=root)
     assert res.returncode == 0, res.stderr
@@ -1302,7 +1581,7 @@ def test_leave_event_fires_with_cwd_default(root: Path, tmp_path: Path) -> None:
     # cwd default: bare 'wtm leave' acts on the worktree you stand in.
     _write_hook(
         hooks / "wtm-leave",
-        f'printf "%s|%s\\n" "$WTM_EVENT" "$WTM_DIR" > "{out}"\n',
+        f'printf "%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" > "{out}"\n',
     )
     res = run("leave", root=root, cwd=wt, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
@@ -1416,6 +1695,15 @@ def test_worktree_delete_removes_worktree(root: Path) -> None:
     res = run("worktree", "delete", "alpha", "feat", root=root)
     assert res.returncode == 0, res.stderr
     assert not wt.exists()
+
+
+def test_worktree_rename_matches_alias(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("worktree", "rename", "alpha", "feat", "fix", root=root)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "fix").is_dir()
+    assert not (root / "alpha" / "worktrees" / "feat").exists()
 
 
 # --- migrate -----------------------------------------------------------------

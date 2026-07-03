@@ -14,6 +14,7 @@ __all__ = [
     "WorktreeCreated",
     "WorktreeDeleted",
     "WorktreeLeft",
+    "WorktreeRenamed",
 ]
 
 import os
@@ -32,7 +33,7 @@ from wtm.core import (
     resolve_project_dir,
 )
 from wtm.hooks import run_hooks
-from wtm.target import TargetMode, resolve_target, split_project_name
+from wtm.target import TargetMode, looks_like_path, resolve_target, split_project_name
 
 
 class BranchStrategy(Enum):
@@ -72,6 +73,18 @@ class WorktreeLeft:
     cd_dir: Path  # where a cd-out should land ($OLDPWD or the project dir)
 
 
+@dataclass(frozen=True)
+class WorktreeRenamed:
+    """Result of :meth:`Worktree.rename`: the moved paths and branch outcome."""
+
+    old_dir: Path  # the worktree's location before the move
+    new_dir: Path  # its location after the move
+    worktrees_dir: Path  # the project's worktrees/ (for relative naming)
+    branch_renamed: bool  # whether the branch was renamed (-b)
+    old_branch: str | None  # branch before the rename, when renamed
+    new_branch: str | None  # branch after the rename, when renamed
+
+
 class Worktree:
     """Worktree-level operations bound to a resolved :class:`Config`."""
 
@@ -95,6 +108,7 @@ class Worktree:
         """
         if not args:
             raise WtmError("usage: wtm create [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]")
+
         project, name = split_project_name(args)
         reject_traversal(name)
 
@@ -107,6 +121,7 @@ class Worktree:
         dest = abspath(destdir) if destdir else project_dir / "worktrees" / name
         if dest.exists():
             raise WtmError(f"destination already exists: {dest}")
+
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Branch resolution: local exists -> use; origin has it -> track; else create.
@@ -163,7 +178,7 @@ class Worktree:
         """Fire ``leave`` hooks for a worktree; return where a cd-out should land.
 
         Non-destructive: the worktree still exists (leave hooks run with cwd set
-        to ``WTM_DIR``). The cd-out target is ``$OLDPWD`` when it is still a
+        to ``WTM_WORKTREE_DIR``). The cd-out target is ``$OLDPWD`` when it is still a
         directory, else the project dir.
         """
         target = resolve_target(self.config, TargetMode.WORKTREE, args)
@@ -211,7 +226,7 @@ class Worktree:
         """
         # Derive context before removal so hooks (e.g. cache purge) still get
         # paths, and fire delete hooks while the worktree still exists (so
-        # per-worktree teardown hooks under $WTM_DIR/.wtm/hooks can run).
+        # per-worktree teardown hooks under $WTM_WORKTREE_DIR/.wtm/hooks can run).
         target = resolve_target(self.config, TargetMode.DELETE, args)
         context = derive_context(target)
         branch = context.branch
@@ -241,6 +256,68 @@ class Worktree:
             project_dir=context.project_dir,
             branch=attempted_branch,
             branch_delete_failed=branch_delete_failed,
+        )
+
+    def rename(self, args: list[str], *, rename_branch: bool, strict: bool) -> WorktreeRenamed:
+        """Rename (move) a worktree; optionally rename its branch to the new name.
+
+        The new name is the trailing positional; anything before it is a
+        ``WORKTREE``-mode source target (``PROJECT NAME | NAME | DIR | cwd``).
+        The directory is always moved to ``<project>/worktrees/NEWNAME``; with
+        *rename_branch* the branch is renamed to NEWNAME too (rejected on a
+        detached HEAD, skipped as a no-op when it already matches). Fires the
+        ``rename`` event after the move, from the new worktree, exposing the
+        prior state as ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``.
+        """
+        if not args:
+            raise WtmError("usage: wtm rename [PROJECT] [OLDNAME] NEWNAME [-b]")
+
+        *source_args, newname = args
+        if looks_like_path(newname):
+            raise WtmError(f"NEWNAME takes a name, not a path: {newname}")
+
+        reject_traversal(newname)
+
+        source = resolve_target(self.config, TargetMode.WORKTREE, source_args)
+        context = derive_context(source)
+        dest = context.worktrees_dir / newname
+        if dest.exists():
+            raise WtmError(f"destination already exists: {dest}")
+
+        if rename_branch and not context.branch:
+            raise WtmError("cannot rename branch: worktree is detached")
+
+        # Move the directory, then (optionally) the branch: git branch -m fails
+        # if NEWNAME is already taken, which we surface as a hard error.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        git.move_worktree(context.git_common_dir, context.dir, dest)
+
+        did_rename_branch = False
+        old_branch = context.branch
+        if rename_branch and old_branch != newname:
+            if git.branch_exists(context.git_common_dir, newname):
+                raise WtmError(f"branch '{newname}' already exists")
+
+            git.rename_branch(context.git_common_dir, old_branch, newname)
+            did_rename_branch = True
+
+        new_context = derive_context(dest)
+        run_hooks(
+            "rename",
+            new_context,
+            self.config,
+            strict=strict,
+            extra_env={"WTM_OLD_DIR": str(context.dir), "WTM_OLD_BRANCH": old_branch},
+        )
+        _prune_empty_parents(context.dir, context.worktrees_dir)
+
+        return WorktreeRenamed(
+            old_dir=context.dir,
+            new_dir=dest,
+            worktrees_dir=context.worktrees_dir,
+            branch_renamed=did_rename_branch,
+            old_branch=old_branch if did_rename_branch else None,
+            new_branch=newname if did_rename_branch else None,
         )
 
     def target_path(self, args: list[str]) -> Path:

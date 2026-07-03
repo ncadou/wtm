@@ -22,6 +22,7 @@ from __future__ import annotations
 __all__ = [
     "TargetMode",
     "TokenKind",
+    "looks_like_path",
     "resolve",
     "resolve_target",
     "slot_kind",
@@ -77,7 +78,7 @@ def resolve(mode: TargetMode, args: list[str], *, projects_root: Path, cwd: Path
     """
     if mode is TargetMode.NAME_ONLY:
         project, name = split_project_name(args)
-        if _looks_like_path(name):
+        if looks_like_path(name):
             raise WtmError(f"takes a NAME, not a path: {name}")
         reject_traversal(name)
 
@@ -93,7 +94,7 @@ def resolve(mode: TargetMode, args: list[str], *, projects_root: Path, cwd: Path
         return abspath(str(cwd))
     if count == 1:
         arg = args[0]
-        if _looks_like_path(arg):
+        if looks_like_path(arg):
             return abspath(arg)
         reject_traversal(arg)
         project_dir = project_dir_for(projects_root, cwd)
@@ -162,7 +163,7 @@ def resolve_target(config: Config, mode: TargetMode, args: list[str]) -> Path:
 # --- helpers -----------------------------------------------------------------
 
 
-def _looks_like_path(arg: str) -> bool:
+def looks_like_path(arg: str) -> bool:
     """A single arg is a path only if it starts with '/', './', '../' or is '.'/'..'."""
     return (
         arg.startswith("/") or arg.startswith("./") or arg.startswith("../") or arg in (".", "..")

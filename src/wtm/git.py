@@ -23,11 +23,13 @@ __all__ = [
     "init",
     "is_repo",
     "list_remotes",
+    "move_worktree",
     "push_refs",
     "ref_exists",
     "remote_url",
     "remove_remote",
     "remove_worktree",
+    "rename_branch",
     "set_config_fetch",
     "set_head",
     "set_remote_url",
@@ -305,9 +307,24 @@ def remove_worktree(repo_dir: str | Path, worktree: str | Path, *, force: bool) 
     _stream(repo_dir, *args)
 
 
+def move_worktree(repo_dir: str | Path, worktree: str | Path, new_path: str | Path) -> None:
+    """Move a worktree to *new_path*.
+
+    A dirty worktree moves fine; a *locked* worktree is refused by git (it would
+    require ``--force`` twice), so the caller surfaces that git error and the
+    user runs ``git worktree unlock`` first.
+    """
+    _stream(repo_dir, "worktree", "move", "--", str(worktree), str(new_path))
+
+
 def delete_branch(repo_dir: str | Path, branch: str) -> None:
     """Force-delete a branch."""
     _stream(repo_dir, "branch", "-D", branch)
+
+
+def rename_branch(repo_dir: str | Path, old: str, new: str) -> None:
+    """Rename branch *old* to *new* (fails if *new* already exists)."""
+    _stream(repo_dir, "branch", "-m", old, new)
 
 
 def add_remote(repo_dir: str | Path, name: str, url: str) -> None:

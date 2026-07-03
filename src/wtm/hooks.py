@@ -1,15 +1,15 @@
 """wtm hook engine and hook management.
 
-Hooks (events: create, install, enter, leave, delete) are discovered across
-four scopes::
+Hooks (events: create, install, enter, leave, delete, rename) are discovered
+across four scopes::
 
     global:    $WTM_HOOKS_DIR/wtm-<event>                       and  .../wtm-<event>.d/*
     workspace: $WTM_WORKSPACE_HOOKS_DIR/wtm-<event>             and  .../wtm-<event>.d/*
     project:   $WTM_PROJECT_DIR/.git/hooks/wtm-<event>          and  .../wtm-<event>.d/*
-    worktree:  $WTM_DIR/.wtm/hooks/wtm-<event>                  and  .../wtm-<event>.d/*
+    worktree:  $WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>                  and  .../wtm-<event>.d/*
 
-Setup events (create, install, enter) run most-general-first: global, then
-workspace, then project, then worktree. Teardown events (leave, delete) run
+Setup events (create, install, enter, rename) run most-general-first: global,
+then workspace, then project, then worktree. Teardown events (leave, delete) run
 most-specific-first: worktree, then project, then workspace, then global.
 Within a scope a bare ``wtm-<event>`` file runs before its ``wtm-<event>.d/``
 directory (entries sorted lexically). Non-zero hook exits are logged but
@@ -17,13 +17,18 @@ non-fatal unless strict is set; under strict a present-but-non-executable hook
 is also fatal.
 
 The delete event fires *before* the worktree is removed, so per-worktree
-teardown hooks still exist when they run; its cwd is therefore ``WTM_DIR``. The
-leave event likewise fires while the worktree still exists.
+teardown hooks still exist when they run; its cwd is therefore ``WTM_WORKTREE_DIR``. The
+leave event likewise fires while the worktree still exists. The rename event
+fires *after* the move, with the new worktree as context (its per-worktree hooks
+have moved with it), plus ``WTM_OLD_DIR``/``WTM_OLD_BRANCH`` for the prior state.
 
 Hook environment contract (all events)::
 
-    WTM_EVENT WTM_DIR(=$1) WTM_BRANCH WTM_PROJECT WTM_PROJECT_DIR
+    WTM_EVENT WTM_WORKTREE_DIR(=$1) WTM_BRANCH WTM_PROJECT WTM_PROJECT_DIR
     WTM_WORKTREES_DIR WTM_GIT_COMMON_DIR WTM_PROJECTS_ROOT
+
+The rename event adds ``WTM_OLD_DIR`` and ``WTM_OLD_BRANCH`` (equal to the new
+values when unchanged).
 
 Beyond firing hooks, this module manages them: :class:`Hooks` installs, runs,
 lists, and deletes hook files across the scopes, staying CLI-agnostic (it
@@ -61,8 +66,8 @@ from wtm.core import (
 from wtm.output import log, warn
 from wtm.target import TargetMode, resolve_target
 
-EVENTS = ("create", "install", "enter", "leave", "delete")
-SETUP_EVENTS = ("create", "install", "enter")
+EVENTS = ("create", "install", "enter", "leave", "delete", "rename")
+SETUP_EVENTS = ("create", "install", "enter", "rename")
 TEARDOWN_EVENTS = ("leave", "delete")
 
 
@@ -90,6 +95,7 @@ def run_hooks(
     *,
     strict: bool,
     scopes: tuple[Scope, ...] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Fire hooks for *event* using *context*, honouring ordering and strict.
 
@@ -99,6 +105,8 @@ def run_hooks(
     :param strict: when true, hook failures and non-executable hooks are fatal.
     :param scopes: restrict firing to these scopes (default: all four, in the
         event's natural order).
+    :param extra_env: extra environment variables layered on top of the standard
+        contract (e.g. the ``rename`` event's ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``).
     """
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = order if scopes is None else tuple(s for s in order if s in scopes)
@@ -110,6 +118,8 @@ def run_hooks(
     env["WTM_EVENT"] = event
     env.update(context.env())
     env["WTM_PROJECTS_ROOT"] = str(config.projects_root)
+    if extra_env:
+        env.update(extra_env)
 
     for scope in selected:
         base = _scope_base(scope, context, config, event)

@@ -16,6 +16,7 @@ __all__ = [
     "project_dir_for",
     "project_dir_for_cwd",
     "reject_traversal",
+    "remap_dir",
     "rescue_dir",
     "resolve_project_dir",
     "valid_project_name",
@@ -161,6 +162,27 @@ def _is_within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
 
 
+def remap_dir(cwd: Path | None, old_dir: Path, new_dir: Path) -> Path | None:
+    """Map *cwd* from under a renamed worktree *old_dir* onto *new_dir*.
+
+    :param cwd: the shell's directory captured before the move (see
+        :func:`current_dir`), or ``None`` if it was already unavailable.
+    :param old_dir: the worktree's location before the rename.
+    :param new_dir: its location after the rename.
+    :returns: ``None`` unless *cwd* is *old_dir* or nested below it; otherwise
+        the corresponding path under *new_dir* (the same relative subpath), so a
+        shell standing in the moved tree follows it to the new location.
+    """
+    if cwd is None:
+        return None
+
+    old_real = Path(os.path.realpath(old_dir))
+    if not _is_within(cwd, old_real):
+        return None
+
+    return new_dir / cwd.relative_to(old_real)
+
+
 def resolve_project_dir(config: Config, project: str | None) -> Path:
     """Resolve a project dir from an explicit name or the current directory."""
     if project:
@@ -211,7 +233,7 @@ class Context:
     def env(self) -> dict[str, str]:
         """Return the exported ``WTM_*`` environment contract."""
         return {
-            "WTM_DIR": str(self.dir),
+            "WTM_WORKTREE_DIR": str(self.dir),
             "WTM_BRANCH": self.branch,
             "WTM_PROJECT": self.project,
             "WTM_PROJECT_DIR": str(self.project_dir),
