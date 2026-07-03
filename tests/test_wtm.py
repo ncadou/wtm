@@ -605,6 +605,89 @@ def test_resolve_env_quote_escaping(root: Path) -> None:
     assert "export WTM_PROJECT='o'\\''brien'" in res.stdout
 
 
+def test_resolve_no_arg_uses_cwd_worktree(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("resolve", root=root, cwd=wt)  # no target -> the cwd worktree
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(wt)
+
+
+def test_resolve_no_arg_from_subdir_gives_worktree_root(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    sub = wt / "sub" / "dir"
+    sub.mkdir(parents=True)
+    res = run("resolve", root=root, cwd=sub)  # from a subdir -> worktree toplevel
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(wt)
+
+
+def test_resolve_no_arg_outside_worktree_errors(root: Path, tmp_path: Path) -> None:
+    res = run("resolve", root=root, cwd=tmp_path)  # not inside a worktree
+    assert res.returncode == 1
+    assert "not inside a worktree" in res.stderr
+
+
+def test_resolve_no_arg_env_emits_full_contract(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("resolve", "--env", root=root, cwd=wt)  # no target, cwd worktree
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_WORKTREE_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_BRANCH='feat'") for line in lines)
+    assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+
+
+# --- project resolve ---------------------------------------------------------
+
+
+def test_project_resolve_prints_dir_without_git(root: Path) -> None:
+    # Pure path math: no project need exist on disk.
+    res = run("project", "resolve", "alpha", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha")
+
+
+def test_project_resolve_infers_project_from_cwd(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    res = run("project", "resolve", root=root, cwd=repo)  # no PROJECT arg
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha")
+
+
+def test_project_resolve_outside_root_errors(root: Path, tmp_path: Path) -> None:
+    res = run("project", "resolve", root=root, cwd=tmp_path)  # cwd not under root
+    assert res.returncode == 1
+    assert "not under" in res.stderr
+
+
+def test_project_resolve_env_emits_project_subset(root: Path) -> None:
+    res = run("project", "resolve", "alpha", "--env", root=root)
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+    assert any(line.startswith("export WTM_PROJECT_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_WORKTREES_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_GIT_COMMON_DIR='") for line in lines)
+    assert any(line.startswith("export WTM_PROJECTS_ROOT='") for line in lines)
+    # A project has no single worktree/branch: those keys must be absent.
+    assert not any("WTM_WORKTREE_DIR" in line for line in lines)
+    assert not any("WTM_BRANCH" in line for line in lines)
+
+
+def test_project_resolve_completion_emits_projects(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    (root / "stray").mkdir()  # no .git/, must be excluded
+    out = _complete(root, words="wtm project resolve ", cword="3")
+    assert out.split() == ["alpha", "beta"]
+
+
 # --- delete ------------------------------------------------------------------
 
 

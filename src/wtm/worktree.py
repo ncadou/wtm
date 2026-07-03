@@ -330,13 +330,23 @@ class Worktree:
         return resolve_target(self.config, TargetMode.NAME_ONLY, args)
 
     def resolve_path(self, args: list[str]) -> Path:
-        """Return a worktree's computed path without touching git.
+        """Return a worktree's computed path.
 
-        Works for not-yet-created targets. Accepts only ``PROJECT NAME`` or
-        ``NAME`` (no ``DIR``, no cwd default).
+        With an explicit target (``PROJECT NAME`` or ``NAME``; no ``DIR``) this
+        is pure path math, so it works for a not-yet-created worktree. With no
+        target it resolves the worktree the cwd is in (inspecting git for the
+        toplevel); absent a worktree it asks for a NAME.
         """
         if not args:
-            raise WtmError("usage: wtm resolve [PROJECT] NAME [-e | --env]")
+            # No target: resolve the worktree we're standing in (touches git,
+            # unlike the explicit-NAME forms). Absent a worktree, ask for a NAME.
+            cwd = abspath(os.getcwd())
+            if not git.is_repo(cwd):
+                raise WtmError(
+                    "no NAME given and cwd is not inside a worktree (pass PROJECT NAME or NAME)"
+                )
+
+            return derive_context(cwd).dir
 
         return self.target_path(args)
 

@@ -24,6 +24,7 @@ worktree-level command also has a top-level alias (`wtm create …` ==
 new     NAME                      create an empty project (.git/ + worktrees/)
 clone   URL [NAME]                clone into a new project (bare); alias: wtm clone
 list    [-t|--tree]               list all projects (--tree: with their worktrees)
+resolve [PROJECT] [-e]            print a project's dir (--env: emit project WTM_* for eval)
 migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm migrate
 ```
 
@@ -37,7 +38,7 @@ leave   ([PROJECT] NAME | DIR) [-c]                    run leave hooks for a wor
 delete  (PROJECT NAME | DIR) [-f] [-D]                 remove a worktree (-f force, -D delete branch too)
 rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]       rename/move a worktree; -b renames its branch too
 list    [PROJECT]                                      list a project's worktrees (project inferred from cwd if omitted)
-resolve [PROJECT] NAME [-e]                            print a worktree's path (--env: emit WTM_* for eval)
+resolve [[PROJECT] NAME]                               print a worktree's path (no arg: the cwd worktree; --env: emit WTM_* for eval)
 ```
 
 **Hooks** (`wtm hook …`):
@@ -130,12 +131,23 @@ branch), then entered; if it already exists `enter` just cds in. With `-c` the
 target is restricted to `PROJECT NAME` or `NAME` (no `DIR`, no cwd default), and
 `-b` outside `-c` (or when the worktree already exists) is rejected/ignored.
 
-`resolve` is a read-only path query and accepts only `PROJECT NAME` or `NAME`
-(no `DIR`, no cwd default). By default it prints the computed worktree path
-without touching git, so it works for not-yet-created targets — handy for
-`cd "$(wtm resolve PROJECT NAME)"`. With `--env` it instead emits the `WTM_*`
-contract as `export KEY='value'` lines for `eval "$(wtm resolve --env …)"`;
-that mode inspects git, so the worktree must already exist.
+`resolve` is a read-only path query. Given `PROJECT NAME` or `NAME` (no `DIR`)
+it prints the computed worktree path without touching git, so it works for
+not-yet-created targets — handy for `cd "$(wtm resolve PROJECT NAME)"`. Given no
+argument it resolves the worktree you are standing in (inspecting git for its
+toplevel), so a bare `wtm resolve` prints the current worktree's root; run
+outside any worktree it errors, asking for a NAME. With `--env` it instead emits
+the `WTM_*` contract as `export KEY='value'` lines for
+`eval "$(wtm resolve --env …)"`; that mode always inspects git, so the worktree
+must already exist.
+
+`wtm project resolve [PROJECT]` is the project-level counterpart: it prints the
+project directory (`$WTM_PROJECTS_ROOT/PROJECT`), inferring PROJECT from the cwd
+when omitted — `cd "$(wtm project resolve alpha)"`. It is pure path math (no git,
+no existence check, so it works for an absent project). With `--env` it emits
+only the project-level slice of the contract (`WTM_PROJECT`, `WTM_PROJECT_DIR`,
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`) — there is no
+`WTM_WORKTREE_DIR` or `WTM_BRANCH`, since a project has no single worktree.
 
 `rename` moves a worktree to a new name. Its positionals are parsed right-to-left:
 the **last** positional is `NEWNAME`, and everything before it is an ordinary

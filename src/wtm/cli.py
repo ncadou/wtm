@@ -209,7 +209,7 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[str]:
 
 
 project_app = typer.Typer(
-    help="Project-level operations (new, clone, list).",
+    help="Project-level operations (new, clone, list, resolve).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -266,6 +266,29 @@ def project_list(
             continue
         for line in tree_children_lines(children):
             print(line)
+
+
+@project_app.command(name="resolve")
+def project_resolve(
+    ctx: typer.Context,
+    project: str | None = typer.Argument(
+        None,
+        help="Project (default: inferred from cwd)",
+        autocompletion=_complete_project,
+    ),
+    emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the project WTM_* contract"),
+) -> None:
+    """Print a project's directory (--env: emit project-level WTM_* exports for eval).
+
+    A read-only path query: computes the path without touching git, so it works
+    for a not-yet-created project. --env emits only the project-level contract
+    (no WTM_WORKTREE_DIR / WTM_BRANCH), likewise by path math.
+    """
+    if emit_env:
+        for key, value in ctx.obj.project.resolve_env(project).items():
+            print(emit_env_line(key, value))
+    else:
+        print(ctx.obj.project.resolve_path(project))
 
 
 # --- worktree management -----------------------------------------------------
@@ -653,17 +676,18 @@ def resolve(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME",
-        help="Target: NAME or PROJECT NAME",
+        metavar="[[PROJECT] NAME]",
+        help="Target: NAME, PROJECT NAME, or none (the cwd worktree)",
         autocompletion=_complete_target,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the WTM_* contract for eval"),
 ) -> None:
     """Print a worktree's path (--env: emit WTM_* exports for eval).
 
-    By default prints the computed path without touching git, so it works for
-    not-yet-created targets. With --env it inspects git, so the worktree must
-    already exist.
+    With an explicit target it prints the computed path without touching git, so
+    it works for not-yet-created targets; with no target it resolves the worktree
+    the cwd is in (inspecting git). With --env it always inspects git, so the
+    worktree must already exist.
     """
     if emit_env:
         for key, value in ctx.obj.worktree.resolve_env(args or []).items():

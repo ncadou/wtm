@@ -12,7 +12,7 @@ __all__ = ["Project"]
 from pathlib import Path
 
 from wtm import git
-from wtm.core import Config, WtmError, valid_project_name
+from wtm.core import Config, WtmError, resolve_project_dir, valid_project_name
 
 
 class Project:
@@ -62,6 +62,31 @@ class Project:
             for entry in sorted(root.iterdir(), key=lambda p: p.name)
             if entry.is_dir() and (entry / ".git").is_dir()
         ]
+
+    def resolve_path(self, project: str | None) -> Path:
+        """Return a project's computed directory (explicit name or cwd-inferred).
+
+        Pure path math: it never checks that the project exists, so it works for
+        a not-yet-created project (mirroring :meth:`Worktree.resolve_path`).
+        """
+        return resolve_project_dir(self.config, project)
+
+    def resolve_env(self, project: str | None) -> dict[str, str]:
+        """Return the project-level ``WTM_*`` contract (a subset of a worktree's).
+
+        Every key is derived by path math from the resolved project dir, so no
+        git query is needed: there is no ``WTM_WORKTREE_DIR`` / ``WTM_BRANCH``
+        (a project has no single worktree or branch).
+        """
+        project_dir = resolve_project_dir(self.config, project)
+
+        return {
+            "WTM_PROJECT": project_dir.name,
+            "WTM_PROJECT_DIR": str(project_dir),
+            "WTM_WORKTREES_DIR": str(project_dir / "worktrees"),
+            "WTM_GIT_COMMON_DIR": str(project_dir / ".git"),
+            "WTM_PROJECTS_ROOT": str(self.config.projects_root),
+        }
 
 
 # --- helpers -----------------------------------------------------------------
