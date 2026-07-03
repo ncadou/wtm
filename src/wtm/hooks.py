@@ -1,16 +1,18 @@
 """wtm hook engine and hook management.
 
 Hooks (events: create, install, enter, leave, delete, rename) are discovered
-across four scopes::
+across five scopes::
 
-    global:    $WTM_HOOKS_DIR/wtm-<event>                       and  .../wtm-<event>.d/*
-    workspace: $WTM_WORKSPACE_HOOKS_DIR/wtm-<event>             and  .../wtm-<event>.d/*
-    project:   $WTM_PROJECT_DIR/.git/hooks/wtm-<event>          and  .../wtm-<event>.d/*
-    worktree:  $WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>                  and  .../wtm-<event>.d/*
+    system:    $WTM_SYSTEM_HOOKS_DIR/wtm-<event>               and  .../wtm-<event>.d/*
+    user:      $WTM_USER_HOOKS_DIR/wtm-<event>                 and  .../wtm-<event>.d/*
+    workspace: $WTM_WORKSPACE_HOOKS_DIR/wtm-<event>            and  .../wtm-<event>.d/*
+    project:   $WTM_PROJECT_DIR/.git/hooks/wtm-<event>         and  .../wtm-<event>.d/*
+    worktree:  $WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>        and  .../wtm-<event>.d/*
 
-Setup events (create, install, enter, rename) run most-general-first: global,
-then workspace, then project, then worktree. Teardown events (leave, delete) run
-most-specific-first: worktree, then project, then workspace, then global.
+Setup events (create, install, enter, rename) run most-general-first: system,
+then user, then workspace, then project, then worktree. Teardown events (leave,
+delete) run most-specific-first: worktree, then project, then workspace, then
+user, then system.
 Within a scope a bare ``wtm-<event>`` file runs before its ``wtm-<event>.d/``
 directory (entries sorted lexically). Non-zero hook exits are logged but
 non-fatal unless strict is set; under strict a present-but-non-executable hook
@@ -74,14 +76,15 @@ TEARDOWN_EVENTS = ("leave", "delete")
 class Scope(str, Enum):
     """A hook discovery/installation scope, from most general to most specific."""
 
-    GLOBAL = "global"
+    SYSTEM = "system"
+    USER = "user"
     WORKSPACE = "workspace"
     PROJECT = "project"
     WORKTREE = "worktree"
 
 
 # Setup runs general->specific; teardown reverses to specific->general.
-_SETUP_ORDER = (Scope.GLOBAL, Scope.WORKSPACE, Scope.PROJECT, Scope.WORKTREE)
+_SETUP_ORDER = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE, Scope.PROJECT, Scope.WORKTREE)
 _TEARDOWN_ORDER = tuple(reversed(_SETUP_ORDER))
 
 
@@ -101,9 +104,9 @@ def run_hooks(
 
     :param event: one of the :data:`EVENTS`.
     :param context: derived worktree context supplying the env contract.
-    :param config: resolved configuration (for the global/workspace hooks dirs).
+    :param config: resolved configuration (for the system/user/workspace hooks dirs).
     :param strict: when true, hook failures and non-executable hooks are fatal.
-    :param scopes: restrict firing to these scopes (default: all four, in the
+    :param scopes: restrict firing to these scopes (default: all five, in the
         event's natural order).
     :param extra_env: extra environment variables layered on top of the standard
         contract (e.g. the ``rename`` event's ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``).
@@ -134,11 +137,14 @@ def _scope_base(scope: Scope, context: Context, config: Config, event: str) -> P
 def _scope_hooks_dir(scope: Scope, context: Context | None, config: Config) -> Path:
     """Return the hooks directory for *scope*.
 
-    Only the global and workspace scopes work without a *context*; the project
-    and worktree scopes derive their directories from the worktree's git layout.
+    Only the system, user, and workspace scopes work without a *context*; the
+    project and worktree scopes derive their directories from the worktree's git
+    layout.
     """
-    if scope is Scope.GLOBAL:
-        return config.hooks_dir
+    if scope is Scope.SYSTEM:
+        return config.system_hooks_dir
+    if scope is Scope.USER:
+        return config.user_hooks_dir
     if scope is Scope.WORKSPACE:
         return config.workspace_hooks_dir
     if context is None:
@@ -327,12 +333,14 @@ class Hooks:
     def _scope_dir(self, scope: Scope, args: list[str]) -> Path:
         """Resolve the hooks directory for a write operation in *scope*.
 
-        Global and workspace need no target; project resolves to
+        System, user, and workspace need no target; project resolves to
         ``<project>/.git/hooks`` without requiring a worktree to exist; worktree
         needs a live worktree.
         """
-        if scope is Scope.GLOBAL:
-            return self.config.hooks_dir
+        if scope is Scope.SYSTEM:
+            return self.config.system_hooks_dir
+        if scope is Scope.USER:
+            return self.config.user_hooks_dir
         if scope is Scope.WORKSPACE:
             return self.config.workspace_hooks_dir
         if scope is Scope.PROJECT:

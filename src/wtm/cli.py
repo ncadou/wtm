@@ -365,7 +365,7 @@ def hook_install(
     args: list[str] = typer.Argument(
         None,
         metavar="[PROJECT] NAME | [DIR]",
-        help="Worktree target (unused for --scope global)",
+        help="Worktree target (unused for --scope system/user/workspace)",
         autocompletion=_complete_target,
     ),
     scope: Scope = typer.Option(Scope.PROJECT, "-s", "--scope", help="Where to install the hook"),
@@ -419,7 +419,7 @@ def hook_delete(
         None,
         metavar="[PROJECT] NAME | [DIR] HOOK",
         help="Worktree target followed by the event (or event/entry) to delete "
-        "(target unused for --scope global)",
+        "(target unused for --scope system/user/workspace)",
         autocompletion=_complete_hook_target,
     ),
     scope: Scope = typer.Option(

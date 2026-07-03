@@ -23,6 +23,7 @@ def run(
     root: Path,
     cwd: Path | None = None,
     hooks_dir: Path | None = None,
+    system_hooks_dir: Path | None = None,
     cd_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -30,9 +31,13 @@ def run(
     env = dict(os.environ)
     env["WTM_PROJECTS_ROOT"] = str(root)
     if hooks_dir is not None:
-        env["WTM_HOOKS_DIR"] = str(hooks_dir)
+        env["WTM_USER_HOOKS_DIR"] = str(hooks_dir)
     else:
-        env["WTM_HOOKS_DIR"] = str(root / "_no_global_hooks")
+        env["WTM_USER_HOOKS_DIR"] = str(root / "_no_user_hooks")
+    if system_hooks_dir is not None:
+        env["WTM_SYSTEM_HOOKS_DIR"] = str(system_hooks_dir)
+    else:
+        env["WTM_SYSTEM_HOOKS_DIR"] = str(root / "_no_system_hooks")
     if cd_file is not None:
         env["WTM_CD_FILE"] = str(cd_file)
     # Deterministic git identity / no user config leakage.
@@ -1028,12 +1033,14 @@ def test_rename_event_old_branch_equals_new_when_unchanged(root: Path, tmp_path:
 def test_rename_event_setup_scope_order(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
+    system = tmp_path / "system-hooks"
     hooks = tmp_path / "hooks"
     workspace = tmp_path / "workspace-hooks"
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
-    # rename is a setup event: fires global -> workspace -> project -> worktree.
-    _write_hook(hooks / "wtm-rename", f'echo global >> "{order}"\n')
+    # rename is a setup event: fires system -> user -> workspace -> project -> worktree.
+    _write_hook(system / "wtm-rename", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-rename", f'echo user >> "{order}"\n')
     _write_hook(workspace / "wtm-rename", f'echo workspace >> "{order}"\n')
     _write_hook(repo / "hooks" / "wtm-rename", f'echo project >> "{order}"\n')
     _write_hook(wt / ".wtm" / "hooks" / "wtm-rename", f'echo worktree >> "{order}"\n')
@@ -1044,10 +1051,11 @@ def test_rename_event_setup_scope_order(root: Path, tmp_path: Path) -> None:
         "fix",
         root=root,
         hooks_dir=hooks,
+        system_hooks_dir=system,
         extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
     )
     assert res.returncode == 0, res.stderr
-    assert order.read_text().split() == ["global", "workspace", "project", "worktree"]
+    assert order.read_text().split() == ["system", "user", "workspace", "project", "worktree"]
 
 
 # --- core.remap_dir (unit) ---------------------------------------------------
@@ -1156,13 +1164,15 @@ def test_init_command_removed(root: Path) -> None:
 def test_delete_hook_teardown_order(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
+    system = tmp_path / "system-hooks"
     hooks = tmp_path / "hooks"
     workspace = tmp_path / "workspace-hooks"
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
     # One delete hook per scope; teardown fires worktree -> project -> workspace
-    # -> global (most specific first).
-    _write_hook(hooks / "wtm-delete", f'echo global >> "{order}"\n')
+    # -> user -> system (most specific first).
+    _write_hook(system / "wtm-delete", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-delete", f'echo user >> "{order}"\n')
     _write_hook(workspace / "wtm-delete", f'echo workspace >> "{order}"\n')
     _write_hook(repo / "hooks" / "wtm-delete", f'echo project >> "{order}"\n')
     _write_hook(wt / ".wtm" / "hooks" / "wtm-delete", f'echo worktree >> "{order}"\n')
@@ -1173,21 +1183,24 @@ def test_delete_hook_teardown_order(root: Path, tmp_path: Path) -> None:
         "-f",
         root=root,
         hooks_dir=hooks,
+        system_hooks_dir=system,
         extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
     )
     assert res.returncode == 0, res.stderr
-    assert order.read_text().split() == ["worktree", "project", "workspace", "global"]
+    assert order.read_text().split() == ["worktree", "project", "workspace", "user", "system"]
 
 
 def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
+    system = tmp_path / "system-hooks"
     hooks = tmp_path / "hooks"
     workspace = tmp_path / "workspace-hooks"
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
-    # Setup fires global -> workspace -> project -> worktree (most general first).
-    _write_hook(hooks / "wtm-create", f'echo global >> "{order}"\n')
+    # Setup fires system -> user -> workspace -> project -> worktree (most general first).
+    _write_hook(system / "wtm-create", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-create", f'echo user >> "{order}"\n')
     _write_hook(workspace / "wtm-create", f'echo workspace >> "{order}"\n')
     _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{order}"\n')
     _write_hook(wt / ".wtm" / "hooks" / "wtm-create", f'echo worktree >> "{order}"\n')
@@ -1199,10 +1212,11 @@ def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
         "create",
         root=root,
         hooks_dir=hooks,
+        system_hooks_dir=system,
         extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
     )
     assert res.returncode == 0, res.stderr
-    assert order.read_text().split() == ["global", "workspace", "project", "worktree"]
+    assert order.read_text().split() == ["system", "user", "workspace", "project", "worktree"]
 
 
 def test_delete_hook_runs_before_worktree_removal(root: Path, tmp_path: Path) -> None:
@@ -1230,7 +1244,7 @@ def test_hook_run_scope_filters_to_one_scope(root: Path, tmp_path: Path) -> None
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     ran = tmp_path / "ran"
-    _write_hook(hooks / "wtm-create", f'echo global >> "{ran}"\n')
+    _write_hook(hooks / "wtm-create", f'echo user >> "{ran}"\n')
     _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{ran}"\n')
     res = run(
         "hook",
@@ -1373,14 +1387,24 @@ def test_hook_install_worktree_scope(root: Path, tmp_path: Path) -> None:
     assert dest.is_file()
 
 
-def test_hook_install_global_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
+def test_hook_install_user_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     hooks.mkdir()
     src = tmp_path / "wtm-create"
     _write_hook(src, "true\n")
-    res = run("hook", "install", str(src), "--scope", "global", root=root, hooks_dir=hooks)
+    res = run("hook", "install", str(src), "--scope", "user", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     assert (hooks / "wtm-create").is_file()
+
+
+def test_hook_install_system_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
+    system = tmp_path / "system-hooks"
+    system.mkdir()
+    src = tmp_path / "wtm-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "--scope", "system", root=root, system_hooks_dir=system)
+    assert res.returncode == 0, res.stderr
+    assert (system / "wtm-create").is_file()
 
 
 def test_hook_delete_bare_file(root: Path, tmp_path: Path) -> None:

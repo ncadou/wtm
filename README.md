@@ -143,21 +143,24 @@ your shell follows the move to the corresponding subpath under the new location.
 ## Hooks
 
 `wtm` fires `create`, `install`, `enter`, `leave`, `delete`, and `rename`
-events, discovered across four scopes:
+events, discovered across five scopes:
 
-- **global**    — `$WTM_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
+- **system**    — `$WTM_SYSTEM_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
+- **user**      — `$WTM_USER_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
 - **workspace** — `$WTM_WORKSPACE_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
 - **project**   — `$WTM_PROJECT_DIR/.git/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
 - **worktree**  — `$WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
 
-The workspace scope covers every project under the projects root; its hooks dir
-defaults to `$WTM_PROJECTS_ROOT/.wtm/hooks` (override with `$WTM_WORKSPACE_HOOKS_DIR`).
+The system scope covers every user on the machine; its hooks dir defaults to
+`/etc/wtm/hooks` (override with `$WTM_SYSTEM_HOOKS_DIR`). The workspace scope
+covers every project under the projects root; its hooks dir defaults to
+`$WTM_PROJECTS_ROOT/.wtm/hooks` (override with `$WTM_WORKSPACE_HOOKS_DIR`).
 
 Within a scope the bare `wtm-<event>` file runs before its `wtm-<event>.d/*`
 entries (sorted lexically). Setup events (`create`, `install`, `enter`,
-`rename`) run most-general first: **global → workspace → project → worktree**;
-teardown events (`leave`, `delete`) reverse to most-specific first: **worktree →
-project → workspace → global**. The `delete` event fires *before* the worktree
+`rename`) run most-general first: **system → user → workspace → project →
+worktree**; teardown events (`leave`, `delete`) reverse to most-specific first:
+**worktree → project → workspace → user → system**. The `delete` event fires *before* the worktree
 is removed, so per-worktree teardown hooks under `$WTM_WORKTREE_DIR/.wtm/hooks` still
 exist when they run; its working directory is therefore `$WTM_WORKTREE_DIR`. The `leave`
 event likewise fires while the worktree still exists. The `rename` event fires
@@ -183,14 +186,14 @@ to you.
 
 ### Managing hooks
 
-- `wtm hook install FILE|DIR [TARGET] [--scope global|workspace|project|worktree] [--event E] [--link] [--force]`
+- `wtm hook install FILE|DIR [TARGET] [--scope system|user|workspace|project|worktree] [--event E] [--link] [--force]`
   installs a hook (default scope `project`). The event is inferred from a
   `wtm-<event>` / `wtm-<event>.d` source name, or given with `--event`. A **file**
   joins an existing `wtm-<event>.d/` (keeping its basename) or otherwise becomes
   the bare `wtm-<event>` file; a **directory**'s contents are merged into
   `wtm-<event>.d/`. Copies are made executable (0755); `--link` symlinks the
-  source instead. Existing destinations require `--force`. `--scope global` and
-  `--scope workspace` need no target.
+  source instead. Existing destinations require `--force`. `--scope system`,
+  `--scope user`, and `--scope workspace` need no target.
 - `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks
   (all scopes unless `--scope` restricts it). `HOOK` (the event) is the last
   positional. `wtm install` is a shorthand for `wtm hook run install`.
@@ -219,7 +222,8 @@ wrapper it stays silent (it cannot move the parent shell anyway).
 `wtm` reads these environment variables:
 
 - `WTM_PROJECTS_ROOT` — projects root (default `~/workspace/projects`)
-- `WTM_HOOKS_DIR` — global hooks directory (default `$XDG_CONFIG_HOME/wtm/hooks`)
+- `WTM_SYSTEM_HOOKS_DIR` — system hooks directory (default `/etc/wtm/hooks`)
+- `WTM_USER_HOOKS_DIR` — user hooks directory (default `$XDG_CONFIG_HOME/wtm/hooks`)
 - `WTM_WORKSPACE_HOOKS_DIR` — workspace hooks directory (default
   `$WTM_PROJECTS_ROOT/.wtm/hooks`)
 

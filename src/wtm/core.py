@@ -42,7 +42,8 @@ class Config:
     """Resolved configuration: the projects root and the hook scope directories."""
 
     projects_root: Path
-    hooks_dir: Path
+    system_hooks_dir: Path
+    user_hooks_dir: Path
     workspace_hooks_dir: Path
 
     @classmethod
@@ -52,14 +53,16 @@ class Config:
         projects_root = Path(
             os.environ.get("WTM_PROJECTS_ROOT") or Path.home() / "workspace" / "projects"
         )
-        hooks_dir = Path(os.environ.get("WTM_HOOKS_DIR") or xdg_config / "wtm" / "hooks")
+        system_hooks_dir = Path(os.environ.get("WTM_SYSTEM_HOOKS_DIR") or "/etc/wtm/hooks")
+        user_hooks_dir = Path(os.environ.get("WTM_USER_HOOKS_DIR") or xdg_config / "wtm" / "hooks")
         workspace_hooks_dir = Path(
             os.environ.get("WTM_WORKSPACE_HOOKS_DIR") or projects_root / ".wtm" / "hooks"
         )
 
         return cls(
             projects_root=projects_root,
-            hooks_dir=hooks_dir,
+            system_hooks_dir=system_hooks_dir,
+            user_hooks_dir=user_hooks_dir,
             workspace_hooks_dir=workspace_hooks_dir,
         )
 

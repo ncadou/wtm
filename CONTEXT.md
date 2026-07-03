@@ -38,7 +38,7 @@ A lifecycle point that fires hooks: `create`, `install`, `enter`, `leave`,
 
 **Scope**:
 Where a hook is discovered/installed, from most general to most specific:
-`global`, `workspace`, `project`, `worktree`.
+`system`, `user`, `workspace`, `project`, `worktree`.
 
 **Source / Target** (migration):
 `wtm migrate` folds a legacy plain clone (the *source*) into the bare-repo
