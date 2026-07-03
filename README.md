@@ -13,30 +13,41 @@ direnv, tmux/sesh) belongs in hooks, not in `wtm`.
 
 ## Commands
 
+Commands are grouped under `project`, `worktree`, and `hook`. Each
+worktree-level command also has a top-level alias (`wtm create …` ==
+`wtm worktree create …`), and `wtm clone …` / `wtm migrate …` alias the matching
+`project` commands. The two forms are equivalent.
+
+**Projects** (`wtm project …`):
+
 ```
-wtm project new NAME                                 create an empty project (.git/ + worktrees/)
-wtm project clone URL [NAME]                         clone into a new project (bare)
-wtm clone URL [NAME]                                 shorthand for 'wtm project clone'
-wtm project list                                     list all projects (-t/--tree: with their worktrees)
-wtm worktree create [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
-wtm worktree install [PROJECT] NAME | [DIR]                    run install hooks for a worktree (alias for 'wtm hook run install')
-wtm worktree enter   ([PROJECT] NAME | [DIR]) [-c] [-b BRANCH] [-i]  cd into a worktree; -c creates it first if absent
-wtm worktree leave   [PROJECT] NAME | [DIR] [-c]               run leave hooks for a worktree; -c cds out (non-destructive)
-wtm worktree delete  (PROJECT NAME | DIR) [-f] [-D]            remove a worktree (-f force, -D delete branch too)
-wtm worktree rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]  rename/move a worktree; -b renames its branch too
-wtm worktree list    [PROJECT]                                 list a project's worktrees (project inferred from cwd if omitted)
-wtm worktree resolve [PROJECT] NAME [-e | --env]               print a worktree's path (--env: emit WTM_* for eval)
-wtm project migrate [SOURCE|PROJECT] [opts]          fold a plain clone into the bare-repo layout
-wtm hook install FILE|DIR [TARGET] [-s SCOPE] [-e EVENT] [--link] [--force]  install a hook into a scope
-wtm hook run HOOK [TARGET] [-s SCOPE] [--strict]      run an event's hooks (all scopes by default)
-wtm hook delete HOOK [TARGET] [-s SCOPE] [-r]         delete a hook (event, or event/entry)
-wtm hook list [TARGET] [--types]                      list installed hooks, grouped by event across scopes
+new     NAME                      create an empty project (.git/ + worktrees/)
+clone   URL [NAME]                clone into a new project (bare); alias: wtm clone
+list    [-t|--tree]               list all projects (--tree: with their worktrees)
+migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm migrate
 ```
 
-The worktree-level commands each carry a top-level alias, so `wtm create …` is
-shorthand for `wtm worktree create …` (likewise `install`, `enter`, `leave`,
-`delete`, `rename`, `list`, `resolve`). `wtm migrate …` is likewise an alias for
-`wtm project migrate …`. The two forms are equivalent.
+**Worktrees** (`wtm worktree …`, each also a top-level alias):
+
+```
+create  [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
+install ([PROJECT] NAME | DIR)                         run install hooks for a worktree (alias for 'wtm hook run install')
+enter   ([PROJECT] NAME | DIR) [-c] [-b BRANCH] [-i]   cd into a worktree; -c creates it first if absent
+leave   ([PROJECT] NAME | DIR) [-c]                    run leave hooks for a worktree; -c cds out (non-destructive)
+delete  (PROJECT NAME | DIR) [-f] [-D]                 remove a worktree (-f force, -D delete branch too)
+rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]       rename/move a worktree; -b renames its branch too
+list    [PROJECT]                                      list a project's worktrees (project inferred from cwd if omitted)
+resolve [PROJECT] NAME [-e]                            print a worktree's path (--env: emit WTM_* for eval)
+```
+
+**Hooks** (`wtm hook …`):
+
+```
+install FILE|DIR [TARGET] [-s SCOPE] [-e EVENT] [-l] [-f]  install a hook into a scope
+run     HOOK [TARGET] [-s SCOPE] [--strict]                run an event's hooks (all scopes by default)
+delete  HOOK [TARGET] [-s SCOPE] [-r]                      delete a hook (event, or event/entry)
+list    [TARGET] [--types]                                 list installed hooks, grouped by event across scopes
+```
 
 Run `wtm --help` (or `wtm COMMAND --help`) for the authoritative usage.
 
