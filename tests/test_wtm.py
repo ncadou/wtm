@@ -1685,12 +1685,14 @@ def test_leave_event_fires_with_cwd_default(root: Path, tmp_path: Path) -> None:
     wt = root / "alpha" / "worktrees" / "feat"
     hooks = tmp_path / "hooks"
     out = tmp_path / "ran"
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
     # cwd default: bare 'wtm leave' acts on the worktree you stand in.
     _write_hook(
         hooks / "wtm-leave",
         f'printf "%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" > "{out}"\n',
     )
-    res = run("leave", root=root, cwd=wt, hooks_dir=hooks)
+    res = run("leave", root=root, cwd=wt, hooks_dir=hooks, cd_file=cd_file)
     assert res.returncode == 0, res.stderr
     event, dir_ = out.read_text().strip().split("|")
     assert event == "leave"
@@ -1708,7 +1710,6 @@ def test_leave_cd_lands_in_oldpwd(root: Path, tmp_path: Path) -> None:
     cd_file.touch()
     res = run(
         "leave",
-        "-c",
         root=root,
         cwd=wt,
         cd_file=cd_file,
@@ -1727,7 +1728,6 @@ def test_leave_cd_falls_back_to_project_dir(root: Path, tmp_path: Path) -> None:
     cd_file.touch()
     res = run(
         "leave",
-        "-c",
         root=root,
         cwd=wt,
         cd_file=cd_file,
@@ -1735,6 +1735,27 @@ def test_leave_cd_falls_back_to_project_dir(root: Path, tmp_path: Path) -> None:
     )
     assert res.returncode == 0, res.stderr
     assert cd_file.read_text().strip() == str(root / "alpha")
+
+
+def test_leave_no_cd_stays_put(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    cd_file = tmp_path / "cd"
+    cd_file.touch()
+    # -C/--no-cd runs leave hooks but leaves the shell where it stands.
+    res = run(
+        "leave",
+        "-C",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        extra_env={"OLDPWD": str(prev)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text() == ""
 
 
 # --- usage / dispatch --------------------------------------------------------

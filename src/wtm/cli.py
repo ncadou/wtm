@@ -558,14 +558,14 @@ def leave(
         help="Worktree target (default: cwd)",
         autocompletion=_complete_target,
     ),
-    do_cd: bool = typer.Option(
-        False, "-c", "--cd", help="cd out of the worktree ($OLDPWD or project dir)"
+    no_cd: bool = typer.Option(
+        False, "-C", "--no-cd", help="don't cd out (just run leave hooks; stay in the worktree)"
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Run leave hooks for a worktree; -c cds out (non-destructive)."""
+    """Run leave hooks for a worktree; cds out ($OLDPWD or project dir) unless -C."""
     result = ctx.obj.worktree.leave(args or [], strict=strict)
-    if do_cd:
+    if not no_cd:
         emit_cd(result.cd_dir)
 
 

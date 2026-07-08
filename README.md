@@ -34,7 +34,7 @@ migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; 
 create  [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
 install ([PROJECT] NAME | DIR)                         run install hooks for a worktree (alias for 'wtm hook run install')
 enter   ([PROJECT] NAME | DIR) [-c] [-b BRANCH] [-i]   cd into a worktree; -c creates it first if absent
-leave   ([PROJECT] NAME | DIR) [-c]                    run leave hooks for a worktree; -c cds out (non-destructive)
+leave   ([PROJECT] NAME | DIR) [-C]                    run leave hooks for a worktree; cds out unless -C (non-destructive)
 delete  (PROJECT NAME | DIR) [-f] [-D]                 remove a worktree (-f force, -D delete branch too)
 rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]       rename/move a worktree; -b renames its branch too
 list    [PROJECT]                                      list a project's worktrees (project inferred from cwd if omitted)
