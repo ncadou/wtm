@@ -224,6 +224,87 @@ def test_project_list_default_unchanged(root: Path) -> None:
     assert res.stdout == "alpha\n"
 
 
+# --- project list --worktrees -----------------------------------------------
+
+
+def test_project_list_worktrees_flat(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    run("create", "alpha", "feature/x", root=root)  # nested NAME -> flat leaf
+    _seed_repo(root, "beta")
+    run("create", "beta", "main", root=root)
+    res = run("project", "list", "--worktrees", root=root)
+    assert res.returncode == 0, res.stderr
+
+    rows = [line.split("\t") for line in res.stdout.splitlines()]
+    # Sorted by project, then by name within a project.
+    assert [(r[0], r[1]) for r in rows] == [
+        ("alpha", "feat"),
+        ("alpha", "feature/x"),
+        ("beta", "main"),
+    ]
+    # Five fields; path is absolute under the project's worktrees/; head short.
+    for r in rows:
+        assert len(r) == 5
+        project, name, path, branch, head = r
+        assert path == str(root / project / "worktrees" / name)
+        assert branch == name  # -b defaults to NAME
+        assert head and len(head) == 8
+
+
+def test_project_list_worktrees_short_flag(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("project", "list", "-w", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.split("\t")[:2] == ["alpha", "feat"]
+
+
+def test_project_list_worktrees_json(root: Path) -> None:
+    import json
+
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("project", "list", "--worktrees", "--json", root=root)
+    assert res.returncode == 0, res.stderr
+
+    data = json.loads(res.stdout)
+    assert data == [
+        {
+            "project": "alpha",
+            "name": "feat",
+            "path": str(root / "alpha" / "worktrees" / "feat"),
+            "branch": "feat",
+            "head": data[0]["head"],
+        }
+    ]
+    assert len(data[0]["head"]) == 8
+
+
+def test_project_list_worktrees_detached_has_empty_branch(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    subprocess.run(["git", "-C", str(wt), "checkout", "--detach"], check=True, capture_output=True)
+    res = run("project", "list", "--worktrees", root=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines()[0].split("\t")[3] == ""  # branch column empty
+
+
+def test_project_list_worktrees_and_tree_exclusive(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("project", "list", "--worktrees", "--tree", root=root)
+    assert res.returncode == 1
+    assert "mutually exclusive" in res.stderr
+
+
+def test_project_list_json_requires_worktrees(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("project", "list", "--json", root=root)
+    assert res.returncode == 1
+    assert "--json requires --worktrees" in res.stderr
+
+
 def test_worktree_list_strict_raises_on_broken_project(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

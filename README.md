@@ -23,8 +23,10 @@ worktree-level command also has a top-level alias (`wtm create …` ==
 ```
 new     NAME                      create an empty project (.git/ + worktrees/)
 clone   URL [NAME]                clone into a new project (bare); alias: wtm clone
-list    [-t|--tree]               list all projects (--tree: with their worktrees)
-resolve [PROJECT] [-e]            print a project's dir (--env: emit project WTM_* for eval)
+list    [-t|--tree] [-w|--worktrees] [-j|--json]
+                                  list all projects (--tree: with their worktrees;
+                                  --worktrees: flat one-worktree-per-line, tab-separated
+                                  project/name/path/branch/head; --json: those rows as JSON)
 migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm migrate
 ```
 

@@ -13,12 +13,18 @@ __all__ = [
     "log",
     "tree_children_lines",
     "warn",
+    "worktree_flat_json",
+    "worktree_flat_lines",
     "worktree_list_lines",
 ]
 
+import json
 import os
 import sys
 from pathlib import Path
+
+FlatRow = tuple[str, str, str, str, str]  # (project, name, path, branch, head)
+_FLAT_KEYS = ("project", "name", "path", "branch", "head")
 
 
 def log(message: str) -> None:
@@ -66,6 +72,26 @@ def tree_children_lines(children: list[str]) -> list[str]:
         lines.append(f"{connector}{child}")
 
     return lines
+
+
+def worktree_flat_lines(rows: list[FlatRow]) -> list[str]:
+    """Render flat cross-project worktree rows as tab-separated lines.
+
+    Machine-readable projection for the ``project list --worktrees`` mode: one
+    worktree per line, fields ``project\\tname\\tpath\\tbranch\\thead`` (branch
+    empty when detached). Tab is safe: none of the fields can contain one.
+    Policy-free — no session naming or path munging (a consumer's concern).
+    """
+    return ["\t".join(row) for row in rows]
+
+
+def worktree_flat_json(rows: list[FlatRow]) -> str:
+    """Render flat cross-project worktree rows as a JSON array of objects.
+
+    The ``--json`` counterpart of :func:`worktree_flat_lines`: each row becomes
+    ``{"project","name","path","branch","head"}``, key order preserved.
+    """
+    return json.dumps([dict(zip(_FLAT_KEYS, row, strict=True)) for row in rows])
 
 
 def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:

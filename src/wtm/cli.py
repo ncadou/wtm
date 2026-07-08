@@ -33,6 +33,8 @@ from wtm.output import (
     log,
     tree_children_lines,
     warn,
+    worktree_flat_json,
+    worktree_flat_lines,
     worktree_list_lines,
 )
 from wtm.project import Project
@@ -279,18 +281,50 @@ def project_list(
     tree: bool = typer.Option(
         False, "-t", "--tree", help="Show each project's worktrees beneath it"
     ),
+    worktrees: bool = typer.Option(
+        False,
+        "-w",
+        "--worktrees",
+        help="Flatten to one worktree per line across all projects (tab-separated)",
+    ),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Emit --worktrees rows as JSON"),
 ) -> None:
-    """List all projects under the projects root (-t: show worktrees as a tree)."""
+    """List all projects under the projects root.
+
+    Default: one project name per line. ``--tree`` nests each project's
+    worktrees beneath it. ``--worktrees`` instead flattens to one worktree per
+    line across every project as tab-separated ``project name path branch
+    head`` (branch empty when detached; head is a short sha), with ``--json``
+    for the same records as a JSON array. The listing carries only worktree
+    facts — session naming and path rules are a consumer's concern.
+    """
+    if tree and worktrees:
+        raise WtmError("--tree and --worktrees are mutually exclusive")
+    if as_json and not worktrees:
+        raise WtmError("--json requires --worktrees")
+
     project = ctx.obj.project
+    config = project.config
+
+    if worktrees:
+        rows = _flat_worktree_rows(ctx.obj.worktree, config, project.list())
+        if as_json:
+            print(worktree_flat_json(rows))
+        else:
+            for line in worktree_flat_lines(rows):
+                print(line)
+
+        return
+
     if not tree:
         for name in project.list():
             print(name)
+
         return
 
     # Tree view: a project name per block, its worktree names as child leaves.
     # _worktree_names(strict=True) re-raises on a failed git query, letting us
     # tell a genuinely empty project apart from a broken one.
-    config = ctx.obj.project.config
     for name in project.list():
         print(name)
         try:
@@ -300,6 +334,41 @@ def project_list(
             continue
         for line in tree_children_lines(children):
             print(line)
+
+
+def _flat_worktree_rows(
+    worktree: Worktree, config: Config, projects: list[str]
+) -> list[tuple[str, str, str, str, str]]:
+    """Collect ``(project, name, path, branch, head)`` rows for every worktree.
+
+    The flat projection behind ``project list --worktrees``: each project's
+    worktrees named relative to its ``worktrees/`` (an out-of-tree ``-d``
+    destination keeps its absolute path), branch blank when detached, head a
+    short sha. Rows are sorted by name within each project. A project whose git
+    query fails is warned about on stderr and skipped, so a single broken repo
+    never aborts the machine-readable listing.
+    """
+    rows: list[tuple[str, str, str, str, str]] = []
+    for name in projects:
+        worktrees_dir = resolve_project_dir(config, name) / "worktrees"
+        try:
+            entries = worktree.list(name, strict=True)
+        except git.GitError:
+            warn(f"skipping '{name}': could not read worktrees")
+            continue
+        project_rows = [
+            (
+                name,
+                worktree_name(entry.path, worktrees_dir) or str(entry.path),
+                str(entry.path),
+                entry.branch or "",
+                entry.head[:8],
+            )
+            for entry in entries
+        ]
+        rows.extend(sorted(project_rows, key=lambda row: row[1]))
+
+    return rows
 
 
 @project_app.command(name="resolve")
