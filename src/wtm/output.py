@@ -73,7 +73,7 @@ def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:
 
     A pure formatter, like :func:`tree_children_lines`: the caller pre-derives
     each row (name relative to ``worktrees/`` or a fallback path, plus an
-    annotation such as ``[branch] abc1234``); this only left-aligns the name
+    annotation such as ``abc1234 [branch]``); this only left-aligns the name
     column to its widest entry. An empty list yields no lines.
     """
     if not rows:

@@ -698,9 +698,9 @@ def list_(
     for entry in ctx.obj.worktree.list(project, strict=True):
         name = worktree_name(entry.path, worktrees_dir) or str(entry.path)
         if entry.detached:
-            annotation = f"(detached) {entry.head[:8]}"
+            annotation = f"{entry.head[:8]} (detached)"
         elif entry.branch:
-            annotation = f"[{entry.branch}] {entry.head[:8]}"
+            annotation = f"{entry.head[:8]} [{entry.branch}]"
         else:
             annotation = entry.head[:8]
         rows.append((name, annotation))
