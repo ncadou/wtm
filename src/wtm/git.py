@@ -22,6 +22,7 @@ __all__ = [
     "fetch",
     "init",
     "is_repo",
+    "list_branches",
     "list_remotes",
     "move_worktree",
     "push_refs",
@@ -160,6 +161,31 @@ def remote_url(repo_dir: str | Path, name: str) -> str | None:
     out = result.stdout.strip()
 
     return out or None
+
+
+def list_branches(repo_dir: str | Path) -> list[str]:
+    """Return the branch names ``create`` can target (local + origin), bare and sorted.
+
+    A single ``for-each-ref`` over ``refs/heads`` and ``refs/remotes/origin``:
+    local heads keep their name, origin remotes are stripped to their bare name
+    (``origin/foo`` -> ``foo``), and the ``origin/HEAD`` symref is dropped. The
+    result is deduplicated (a branch present both locally and on origin appears
+    once) and sorted. Mirrors :meth:`wtm.worktree.Worktree.create`'s resolution,
+    which checks ``refs/heads/<b>`` then ``refs/remotes/origin/<b>`` by bare name.
+    """
+    result = _run(
+        repo_dir, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"
+    )
+    names: set[str] = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("refs/heads/"):
+            names.add(line[len("refs/heads/") :])
+        elif line.startswith("refs/remotes/origin/"):
+            name = line[len("refs/remotes/origin/") :]
+            if name != "HEAD":
+                names.add(name)
+
+    return sorted(names)
 
 
 def worktree_branches(repo_dir: str | Path) -> set[str]:

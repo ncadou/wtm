@@ -122,6 +122,27 @@ def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[str]:
     return _complete_project(incomplete)
 
 
+def _complete_branch(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Complete -b/--branch for create/enter: the project's local + origin branches.
+
+    The project is create's own: two positionals -> ``PROJECT NAME`` (the project
+    is the first); zero or one -> the cwd-inferred project (a lone arg is the
+    NAME). When ``-b`` precedes the positionals none are visible yet, so only the
+    cwd project is offered. Builds its own config (the app callback has not
+    fired) and is lenient (:func:`_branch_names`), so it never errors.
+    """
+    # Completing an option value, click leaves the positionals unparsed in
+    # ``ctx.args`` (``ctx.params["args"]`` is empty then); a positional callback
+    # instead finds them in ``ctx.params``. Prefer whichever is populated, then
+    # apply create's grammar: two positionals -> PROJECT NAME (project is the
+    # first); zero or one -> the cwd-inferred project (a lone arg is the NAME).
+    args = list(ctx.params.get("args") or ctx.args or [])
+    project = args[0] if len(args) >= 2 else None
+    names = _branch_names(Config.load(), project)
+
+    return [name for name in names if name.startswith(incomplete)]
+
+
 def _worktree_names(config: Config, project: str | None, *, strict: bool = False) -> list[str]:
     """Return a project's in-tree worktree names, sorted, for completion/tree.
 
@@ -146,6 +167,19 @@ def _worktree_names(config: Config, project: str | None, *, strict: bool = False
     ]
 
     return sorted(names)
+
+
+def _branch_names(config: Config, project: str | None) -> list[str]:
+    """Return a project's ``create``-targetable branch names (local + origin), for completion.
+
+    The presentation-side wrapper of :func:`wtm.git.list_branches`. Lenient: any
+    failure (unknown project, missing git dir, git error) yields ``[]`` so shell
+    completion never errors. Mirrors :func:`_worktree_names`.
+    """
+    try:
+        return git.list_branches(resolve_project_dir(config, project) / ".git")
+    except Exception:
+        return []
 
 
 def _target_candidates(kinds: frozenset[TokenKind], config: Config, args: list[str]) -> set[str]:
@@ -316,7 +350,9 @@ def create(
         help="Target: NAME or PROJECT NAME",
         autocompletion=_complete_project_arg,
     ),
-    branch: str | None = typer.Option(None, "-b", "--branch", help="Branch name"),
+    branch: str | None = typer.Option(
+        None, "-b", "--branch", help="Branch name", autocompletion=_complete_branch
+    ),
     destdir: str | None = typer.Option(None, "-d", "--dir", help="Destination dir"),
     do_cd: bool = typer.Option(False, "-c", "--cd", help="cd into the new worktree"),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks too"),
@@ -514,7 +550,11 @@ def enter(
         False, "-c", "--create", help="Create the worktree if it doesn't exist"
     ),
     branch: str | None = typer.Option(
-        None, "-b", "--branch", help="Branch for --create (default: NAME)"
+        None,
+        "-b",
+        "--branch",
+        help="Branch for --create (default: NAME)",
+        autocompletion=_complete_branch,
     ),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks first"),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),

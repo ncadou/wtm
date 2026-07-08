@@ -405,6 +405,61 @@ def test_first_slot_outside_root_projects_only(root: Path, tmp_path: Path) -> No
     assert out.split() == ["alpha"]
 
 
+# --- branch completion (-b) --------------------------------------------------
+
+
+def test_complete_branch_unit(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")  # local head: main
+    run("create", "alpha", "feat", root=root)  # local head: feat
+    run("create", "alpha", "fix", root=root)  # local head: fix
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    from wtm.cli import _complete_branch
+
+    class _Ctx:  # minimal stand-in: .args (option-value completion) + .params
+        def __init__(self, args: tuple[str, ...]) -> None:
+            self.args = list(args)
+            self.params = {"args": ()}
+
+    # Two positionals -> PROJECT NAME: branches come from the first ('alpha').
+    assert _complete_branch(_Ctx(("alpha", "new")), "") == ["feat", "fix", "main"]
+    assert _complete_branch(_Ctx(("alpha", "new")), "f") == ["feat", "fix"]
+    # A single positional is the NAME -> cwd inference; the test cwd is outside
+    # the root, so it degrades leniently to nothing.
+    assert _complete_branch(_Ctx(("feat",)), "") == []
+
+
+def test_complete_branch_e2e_project_form(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    # `wtm create alpha newwt -b <TAB>`: two positionals -> PROJECT NAME, so the
+    # option value completes with 'alpha' visible and branches come from it. This
+    # verifies click populates ctx.params['args'] for an option value.
+    out = _complete(root, words="wtm create alpha newwt -b ", cword="5")
+    assert out.split() == ["feat", "main"]
+
+
+def test_complete_branch_e2e_origin_bare_names(root: Path) -> None:
+    git_dir = _seed_repo(root, "alpha")
+    # Add a branch on the source and fetch it into refs/remotes/origin/*.
+    source = root / "_sources" / "alpha"
+    _git(source, "branch", "release", root=root)
+    _git(git_dir, "fetch", "origin", root=root)
+    out = _complete(root, words="wtm create alpha newwt -b ", cword="5").split()
+    # origin/release shows as the bare name 'release'; origin/HEAD is dropped.
+    assert "release" in out
+    assert "main" in out
+    assert "HEAD" not in out
+
+
+def test_complete_branch_e2e_cwd_inference(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    project_dir = root / "alpha"
+    # `-b` before any positional: only cwd inference is available.
+    out = _complete(root, words="wtm create -b ", cword="3", cwd=project_dir)
+    assert out.split() == ["feat", "main"]
+
+
 # --- create ------------------------------------------------------------------
 
 
