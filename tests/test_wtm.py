@@ -1222,14 +1222,14 @@ def test_rename_event_fires_after_move_with_old_and_new(root: Path, tmp_path: Pa
     hooks = tmp_path / "hooks"
     out = tmp_path / "ran"
     _write_hook(
-        hooks / "wtm-rename",
+        hooks / "wtm-post-rename",
         'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" "$WTM_OLD_DIR"'
         f' "$WTM_BRANCH" "$WTM_OLD_BRANCH" > "{out}"\n',
     )
     res = run("rename", "alpha", "feat", "fix", "-b", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     event, dir_, old_dir, branch, old_branch = out.read_text().strip().split("|")
-    assert event == "rename"
+    assert event == "post-rename"
     assert dir_ == str(root / "alpha" / "worktrees" / "fix")  # fires from the new dir
     assert old_dir == str(root / "alpha" / "worktrees" / "feat")
     assert branch == "fix"
@@ -1243,7 +1243,7 @@ def test_rename_event_old_branch_equals_new_when_unchanged(root: Path, tmp_path:
     out = tmp_path / "ran"
     # No -b: branch unchanged, so WTM_OLD_BRANCH == WTM_BRANCH == 'feat'.
     body = f'printf "%s|%s" "$WTM_BRANCH" "$WTM_OLD_BRANCH" > "{out}"\n'
-    _write_hook(hooks / "wtm-rename", body)
+    _write_hook(hooks / "wtm-post-rename", body)
     res = run("rename", "alpha", "feat", "fix", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "feat|feat"
@@ -1257,12 +1257,12 @@ def test_rename_event_setup_scope_order(root: Path, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-hooks"
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
-    # rename is a setup event: fires system -> user -> workspace -> project -> worktree.
-    _write_hook(system / "wtm-rename", f'echo system >> "{order}"\n')
-    _write_hook(hooks / "wtm-rename", f'echo user >> "{order}"\n')
-    _write_hook(workspace / "wtm-rename", f'echo workspace >> "{order}"\n')
-    _write_hook(repo / "hooks" / "wtm-rename", f'echo project >> "{order}"\n')
-    _write_hook(wt / ".wtm" / "hooks" / "wtm-rename", f'echo worktree >> "{order}"\n')
+    # post-rename is a setup event: fires system -> user -> workspace -> project -> worktree.
+    _write_hook(system / "wtm-post-rename", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-rename", f'echo user >> "{order}"\n')
+    _write_hook(workspace / "wtm-post-rename", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-post-rename", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-post-rename", f'echo worktree >> "{order}"\n')
     res = run(
         "rename",
         "alpha",
@@ -1317,14 +1317,14 @@ def test_create_hook_fires_with_contract(root: Path, tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     out = tmp_path / "hook.out"
     _write_hook(
-        hooks / "wtm-create",
+        hooks / "wtm-post-create",
         'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$1" "$WTM_PROJECT" "$WTM_BRANCH"'
         f' "$WTM_PROJECTS_ROOT" > "{out}"\n',
     )
-    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    res = run("hook", "run", "alpha", "feat", "post-create", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     event, dir_, project, branch, projects_root = out.read_text().strip().split("|")
-    assert event == "create"
+    assert event == "post-create"
     assert dir_ == str(root / "alpha" / "worktrees" / "feat")
     assert project == "alpha"
     assert branch == "feat"
@@ -1336,10 +1336,10 @@ def test_hook_ordering_file_before_dir(root: Path, tmp_path: Path) -> None:
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     order = tmp_path / "order"
-    _write_hook(hooks / "wtm-create", f'echo file >> "{order}"\n')
-    _write_hook(hooks / "wtm-create.d" / "20-b", f'echo b >> "{order}"\n')
-    _write_hook(hooks / "wtm-create.d" / "10-a", f'echo a >> "{order}"\n')
-    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    _write_hook(hooks / "wtm-post-create", f'echo file >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-create.d" / "20-b", f'echo b >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-create.d" / "10-a", f'echo a >> "{order}"\n')
+    res = run("hook", "run", "alpha", "feat", "post-create", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["file", "a", "b"]
 
@@ -1348,8 +1348,8 @@ def test_hook_failure_nonfatal_without_strict(root: Path, tmp_path: Path) -> Non
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
-    _write_hook(hooks / "wtm-create", "exit 3\n")
-    res = run("hook", "run", "alpha", "feat", "create", root=root, hooks_dir=hooks)
+    _write_hook(hooks / "wtm-post-create", "exit 3\n")
+    res = run("hook", "run", "alpha", "feat", "post-create", root=root, hooks_dir=hooks)
     assert res.returncode == 0
     assert "hook failed" in res.stderr
 
@@ -1358,8 +1358,10 @@ def test_hook_failure_fatal_with_strict(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
-    _write_hook(hooks / "wtm-create", "exit 3\n")
-    res = run("hook", "run", "alpha", "feat", "create", "--strict", root=root, hooks_dir=hooks)
+    _write_hook(hooks / "wtm-post-create", "exit 3\n")
+    res = run(
+        "hook", "run", "alpha", "feat", "post-create", "--strict", root=root, hooks_dir=hooks
+    )
     assert res.returncode == 1
     assert "hook failed" in res.stderr
 
@@ -1368,14 +1370,16 @@ def test_non_executable_hook_fatal_under_strict(root: Path, tmp_path: Path) -> N
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
-    _write_hook(hooks / "wtm-create", "true\n", executable=False)
-    res = run("hook", "run", "alpha", "feat", "create", "--strict", root=root, hooks_dir=hooks)
+    _write_hook(hooks / "wtm-post-create", "true\n", executable=False)
+    res = run(
+        "hook", "run", "alpha", "feat", "post-create", "--strict", root=root, hooks_dir=hooks
+    )
     assert res.returncode == 1
     assert "not executable" in res.stderr
 
 
 def test_init_command_removed(root: Path) -> None:
-    # 'wtm init' is gone; running the create event's hooks is 'wtm hook run create'.
+    # 'wtm init' is gone; running the create event's hooks is 'wtm hook run post-create'.
     res = run("init", "alpha", "feat", root=root)
     assert res.returncode == 2
 
@@ -1388,13 +1392,13 @@ def test_delete_hook_teardown_order(root: Path, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-hooks"
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
-    # One delete hook per scope; teardown fires worktree -> project -> workspace
-    # -> user -> system (most specific first).
-    _write_hook(system / "wtm-delete", f'echo system >> "{order}"\n')
-    _write_hook(hooks / "wtm-delete", f'echo user >> "{order}"\n')
-    _write_hook(workspace / "wtm-delete", f'echo workspace >> "{order}"\n')
-    _write_hook(repo / "hooks" / "wtm-delete", f'echo project >> "{order}"\n')
-    _write_hook(wt / ".wtm" / "hooks" / "wtm-delete", f'echo worktree >> "{order}"\n')
+    # One pre-delete hook per scope; teardown fires worktree -> project ->
+    # workspace -> user -> system (most specific first).
+    _write_hook(system / "wtm-pre-delete", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-pre-delete", f'echo user >> "{order}"\n')
+    _write_hook(workspace / "wtm-pre-delete", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-pre-delete", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-pre-delete", f'echo worktree >> "{order}"\n')
     res = run(
         "delete",
         "alpha",
@@ -1418,17 +1422,17 @@ def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
     order = tmp_path / "order"
     wt = root / "alpha" / "worktrees" / "feat"
     # Setup fires system -> user -> workspace -> project -> worktree (most general first).
-    _write_hook(system / "wtm-create", f'echo system >> "{order}"\n')
-    _write_hook(hooks / "wtm-create", f'echo user >> "{order}"\n')
-    _write_hook(workspace / "wtm-create", f'echo workspace >> "{order}"\n')
-    _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{order}"\n')
-    _write_hook(wt / ".wtm" / "hooks" / "wtm-create", f'echo worktree >> "{order}"\n')
+    _write_hook(system / "wtm-post-create", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-create", f'echo user >> "{order}"\n')
+    _write_hook(workspace / "wtm-post-create", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-post-create", f'echo project >> "{order}"\n')
+    _write_hook(wt / ".wtm" / "hooks" / "wtm-post-create", f'echo worktree >> "{order}"\n')
     res = run(
         "hook",
         "run",
         "alpha",
         "feat",
-        "create",
+        "post-create",
         root=root,
         hooks_dir=hooks,
         system_hooks_dir=system,
@@ -1439,20 +1443,160 @@ def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
 
 
 def test_delete_hook_runs_before_worktree_removal(root: Path, tmp_path: Path) -> None:
-    # A per-worktree delete hook must see the live worktree: the delete event
-    # fires before 'git worktree remove'.
+    # A per-worktree pre-delete hook must see the live worktree: the pre-delete
+    # event fires before 'git worktree remove'.
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     wt = root / "alpha" / "worktrees" / "feat"
     out = tmp_path / "alive"
     _write_hook(
-        wt / ".wtm" / "hooks" / "wtm-delete",
+        wt / ".wtm" / "hooks" / "wtm-pre-delete",
         f'test -f "$WTM_WORKTREE_DIR/file.txt" && echo alive > "{out}"\n',
     )
     res = run("delete", "alpha", "feat", "-f", root=root)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "alive"
     assert not wt.exists()
+
+
+# --- pre/post event pairs ----------------------------------------------------
+
+
+def test_post_delete_fires_after_worktree_removal(root: Path, tmp_path: Path) -> None:
+    # The post-delete event fires after 'git worktree remove', so the worktree
+    # is already gone when the hook observes it (the inverse of pre-delete).
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "gone"
+    _write_hook(
+        hooks / "wtm-post-delete",
+        f'test ! -e "$WTM_WORKTREE_DIR" && echo gone > "{out}"\n',
+    )
+    res = run("delete", "alpha", "feat", "-f", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "gone"
+    assert not wt.exists()
+
+
+def test_post_delete_runs_from_project_dir(root: Path, tmp_path: Path) -> None:
+    # post-delete's cwd is the project dir (the worktree dir is gone), so the
+    # subprocess must not fail with a missing cwd.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "pwd"
+    _write_hook(hooks / "wtm-post-delete", f'pwd -P > "{out}"\n')
+    res = run("delete", "alpha", "feat", "-f", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert Path(out.read_text().strip()).resolve() == (root / "alpha").resolve()
+
+
+def test_pre_create_fires_before_creation(root: Path, tmp_path: Path) -> None:
+    # pre-create fires before the worktree exists: WTM_WORKTREE_DIR is not yet a
+    # directory, and the hook runs from the project dir.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "seen"
+    _write_hook(
+        hooks / "wtm-pre-create",
+        f'printf "%s|%s|%s\\n" "$WTM_EVENT" '
+        f'"$(test -e "$WTM_WORKTREE_DIR" && echo exists || echo absent)" '
+        f'"$(pwd -P)" > "{out}"\n',
+    )
+    res = run("create", "alpha", "feat", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    event, presence, cwd = out.read_text().strip().split("|")
+    assert event == "pre-create"
+    assert presence == "absent"
+    assert Path(cwd).resolve() == (root / "alpha").resolve()
+
+
+def test_pre_create_veto_under_strict_leaves_no_dir(root: Path, tmp_path: Path) -> None:
+    # A failing pre-create hook aborts creation under --strict, before any
+    # filesystem mutation: no worktree dir, no stray parent.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-pre-create", "exit 1\n")
+    res = run("create", "alpha", "feature/x", "--strict", root=root, hooks_dir=hooks)
+    assert res.returncode == 1
+    assert not (root / "alpha" / "worktrees" / "feature").exists()
+
+
+def test_pre_create_failure_nonfatal_without_strict(root: Path, tmp_path: Path) -> None:
+    # Without --strict a failing pre-create is advisory: creation proceeds.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-pre-create", "exit 1\n")
+    res = run("create", "alpha", "feat", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert (root / "alpha" / "worktrees" / "feat" / "file.txt").exists()
+
+
+def test_pre_rename_fires_before_move_with_new_env(root: Path, tmp_path: Path) -> None:
+    # pre-rename fires before the move: the old dir still exists and the
+    # forward-looking WTM_NEW_DIR/WTM_NEW_BRANCH point at the destination.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    old = root / "alpha" / "worktrees" / "feat"
+    new = root / "alpha" / "worktrees" / "fix"
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "seen"
+    _write_hook(
+        hooks / "wtm-pre-rename",
+        f'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" "$WTM_NEW_DIR"'
+        f' "$WTM_BRANCH" "$WTM_NEW_BRANCH" > "{out}"\n',
+    )
+    res = run("rename", "alpha", "feat", "fix", "-b", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    event, dir_, new_dir, branch, new_branch = out.read_text().strip().split("|")
+    assert event == "pre-rename"
+    assert dir_ == str(old)  # fires from the still-present old dir
+    assert new_dir == str(new)
+    assert branch == "feat"
+    assert new_branch == "fix"
+
+
+def test_pre_rename_veto_under_strict_aborts_move(root: Path, tmp_path: Path) -> None:
+    # A failing pre-rename under --strict aborts before the move: old dir intact.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    old = root / "alpha" / "worktrees" / "feat"
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-pre-rename", "exit 1\n")
+    res = run("rename", "alpha", "feat", "fix", "--strict", root=root, hooks_dir=hooks)
+    assert res.returncode == 1
+    assert old.exists()
+    assert not (root / "alpha" / "worktrees" / "fix").exists()
+
+
+def test_post_delete_teardown_scope_order(root: Path, tmp_path: Path) -> None:
+    # post-delete is a teardown event: fires most-specific-first. The worktree
+    # scope is unavailable (worktree removed), so the order is
+    # project -> workspace -> user -> system.
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    system = tmp_path / "system-hooks"
+    hooks = tmp_path / "hooks"
+    workspace = tmp_path / "workspace-hooks"
+    order = tmp_path / "order"
+    _write_hook(system / "wtm-post-delete", f'echo system >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-delete", f'echo user >> "{order}"\n')
+    _write_hook(workspace / "wtm-post-delete", f'echo workspace >> "{order}"\n')
+    _write_hook(repo / "hooks" / "wtm-post-delete", f'echo project >> "{order}"\n')
+    res = run(
+        "delete",
+        "alpha",
+        "feat",
+        "-f",
+        root=root,
+        hooks_dir=hooks,
+        system_hooks_dir=system,
+        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert order.read_text().split() == ["project", "workspace", "user", "system"]
 
 
 # --- hook run scope filter ---------------------------------------------------
@@ -1463,14 +1607,14 @@ def test_hook_run_scope_filters_to_one_scope(root: Path, tmp_path: Path) -> None
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     ran = tmp_path / "ran"
-    _write_hook(hooks / "wtm-create", f'echo user >> "{ran}"\n')
-    _write_hook(repo / "hooks" / "wtm-create", f'echo project >> "{ran}"\n')
+    _write_hook(hooks / "wtm-post-create", f'echo user >> "{ran}"\n')
+    _write_hook(repo / "hooks" / "wtm-post-create", f'echo project >> "{ran}"\n')
     res = run(
         "hook",
         "run",
         "alpha",
         "feat",
-        "create",
+        "post-create",
         "--scope",
         "project",
         root=root,
@@ -1486,6 +1630,16 @@ def test_hook_run_rejects_unknown_event(root: Path) -> None:
     res = run("hook", "run", "alpha", "feat", "bogus", root=root)
     assert res.returncode == 1
     assert "unknown event" in res.stderr
+
+
+def test_hook_run_rejects_retired_event_names(root: Path) -> None:
+    # The pre/post rename retired the bare 'create'/'delete'/'rename' events.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    for retired in ("create", "delete", "rename"):
+        res = run("hook", "run", "alpha", "feat", retired, root=root)
+        assert res.returncode == 1, retired
+        assert "unknown event" in res.stderr
 
 
 def test_install_alias_runs_install_hooks(root: Path, tmp_path: Path) -> None:
@@ -1504,11 +1658,11 @@ def test_install_alias_runs_install_hooks(root: Path, tmp_path: Path) -> None:
 
 def test_hook_install_bare_file_infers_event(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run("hook", "install", str(src), "alpha", "feat", root=root)
     assert res.returncode == 0, res.stderr
-    dest = root / "alpha" / ".git" / "hooks" / "wtm-create"
+    dest = root / "alpha" / ".git" / "hooks" / "wtm-post-create"
     assert dest.is_file()
     assert os.access(dest, os.X_OK)  # copies are chmod 0755
 
@@ -1516,7 +1670,7 @@ def test_hook_install_bare_file_infers_event(root: Path, tmp_path: Path) -> None
 def test_hook_install_named_file_needs_event_and_lands_in_dotd(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     # Pre-create the .d so a plain-named file joins it as an entry.
-    (repo / "hooks" / "wtm-delete.d").mkdir(parents=True)
+    (repo / "hooks" / "wtm-pre-delete.d").mkdir(parents=True)
     src = tmp_path / "50-purge"
     _write_hook(src, "true\n")
     res = run(
@@ -1526,11 +1680,11 @@ def test_hook_install_named_file_needs_event_and_lands_in_dotd(root: Path, tmp_p
         "alpha",
         "feat",
         "--event",
-        "delete",
+        "pre-delete",
         root=root,
     )
     assert res.returncode == 0, res.stderr
-    assert (repo / "hooks" / "wtm-delete.d" / "50-purge").is_file()
+    assert (repo / "hooks" / "wtm-pre-delete.d" / "50-purge").is_file()
 
 
 def test_hook_install_requires_event_when_uninferrable(root: Path, tmp_path: Path) -> None:
@@ -1554,18 +1708,18 @@ def test_hook_install_dir_merges_into_dotd(root: Path, tmp_path: Path) -> None:
         "alpha",
         "feat",
         "--event",
-        "delete",
+        "pre-delete",
         root=root,
     )
     assert res.returncode == 0, res.stderr
-    dotd = repo / "hooks" / "wtm-delete.d"
+    dotd = repo / "hooks" / "wtm-pre-delete.d"
     assert (dotd / "10-a").is_file()
     assert (dotd / "20-b").is_file()
 
 
 def test_hook_install_collision_needs_force(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     assert run("hook", "install", str(src), "alpha", "feat", root=root).returncode == 0
     res = run("hook", "install", str(src), "alpha", "feat", root=root)
@@ -1577,11 +1731,11 @@ def test_hook_install_collision_needs_force(root: Path, tmp_path: Path) -> None:
 
 def test_hook_install_link_symlinks(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run("hook", "install", str(src), "alpha", "feat", "--link", root=root)
     assert res.returncode == 0, res.stderr
-    dest = root / "alpha" / ".git" / "hooks" / "wtm-create"
+    dest = root / "alpha" / ".git" / "hooks" / "wtm-post-create"
     assert dest.is_symlink()
     assert dest.resolve() == src.resolve()
 
@@ -1589,7 +1743,7 @@ def test_hook_install_link_symlinks(root: Path, tmp_path: Path) -> None:
 def test_hook_install_worktree_scope(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    src = tmp_path / "wtm-delete"
+    src = tmp_path / "wtm-pre-delete"
     _write_hook(src, "true\n")
     res = run(
         "hook",
@@ -1602,82 +1756,82 @@ def test_hook_install_worktree_scope(root: Path, tmp_path: Path) -> None:
         root=root,
     )
     assert res.returncode == 0, res.stderr
-    dest = root / "alpha" / "worktrees" / "feat" / ".wtm" / "hooks" / "wtm-delete"
+    dest = root / "alpha" / "worktrees" / "feat" / ".wtm" / "hooks" / "wtm-pre-delete"
     assert dest.is_file()
 
 
 def test_hook_install_user_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     hooks.mkdir()
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run("hook", "install", str(src), "--scope", "user", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
-    assert (hooks / "wtm-create").is_file()
+    assert (hooks / "wtm-post-create").is_file()
 
 
 def test_hook_install_system_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
     system = tmp_path / "system-hooks"
     system.mkdir()
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run("hook", "install", str(src), "--scope", "system", root=root, system_hooks_dir=system)
     assert res.returncode == 0, res.stderr
-    assert (system / "wtm-create").is_file()
+    assert (system / "wtm-post-create").is_file()
 
 
 def test_hook_delete_bare_file(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
-    _write_hook(repo / "hooks" / "wtm-create", "true\n")
-    res = run("hook", "delete", "alpha", "feat", "create", root=root)
+    _write_hook(repo / "hooks" / "wtm-post-create", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "post-create", root=root)
     assert res.returncode == 0, res.stderr
-    assert not (repo / "hooks" / "wtm-create").exists()
+    assert not (repo / "hooks" / "wtm-post-create").exists()
 
 
 def test_hook_delete_dotd_requires_recursive(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
-    res = run("hook", "delete", "alpha", "feat", "delete", root=root)
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "10-a", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "pre-delete", root=root)
     assert res.returncode == 1
     assert "recursive" in res.stderr
-    assert (repo / "hooks" / "wtm-delete.d").is_dir()
-    res = run("hook", "delete", "alpha", "feat", "delete", "-r", root=root)
+    assert (repo / "hooks" / "wtm-pre-delete.d").is_dir()
+    res = run("hook", "delete", "alpha", "feat", "pre-delete", "-r", root=root)
     assert res.returncode == 0, res.stderr
-    assert not (repo / "hooks" / "wtm-delete.d").exists()
+    assert not (repo / "hooks" / "wtm-pre-delete.d").exists()
 
 
 def test_hook_delete_entry_level(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "20-b", "true\n")
-    res = run("hook", "delete", "alpha", "feat", "delete/10-a", root=root)
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "10-a", "true\n")
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "20-b", "true\n")
+    res = run("hook", "delete", "alpha", "feat", "pre-delete/10-a", root=root)
     assert res.returncode == 0, res.stderr
-    assert not (repo / "hooks" / "wtm-delete.d" / "10-a").exists()
-    assert (repo / "hooks" / "wtm-delete.d" / "20-b").is_file()
+    assert not (repo / "hooks" / "wtm-pre-delete.d" / "10-a").exists()
+    assert (repo / "hooks" / "wtm-pre-delete.d" / "20-b").is_file()
 
 
 def test_hook_list_groups_by_event(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    _write_hook(repo / "hooks" / "wtm-create", "true\n")
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
+    _write_hook(repo / "hooks" / "wtm-post-create", "true\n")
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "10-a", "true\n")
     res = run("hook", "list", "alpha", "feat", root=root)
     assert res.returncode == 0, res.stderr
-    assert "create:" in res.stdout
-    assert "delete:" in res.stdout
-    assert "wtm-create" in res.stdout
+    assert "post-create:" in res.stdout
+    assert "pre-delete:" in res.stdout
+    assert "wtm-post-create" in res.stdout
     assert "10-a" in res.stdout
 
 
 def test_hook_list_types_summary(root: Path, tmp_path: Path) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "10-a", "true\n")
-    _write_hook(repo / "hooks" / "wtm-delete.d" / "20-b", "true\n")
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "10-a", "true\n")
+    _write_hook(repo / "hooks" / "wtm-pre-delete.d" / "20-b", "true\n")
     res = run("hook", "list", "alpha", "feat", "--types", root=root)
     assert res.returncode == 0, res.stderr
-    assert "delete: 2 hook(s)" in res.stdout
-    assert "create: 0 hook(s)" in res.stdout
+    assert "pre-delete: 2 hook(s)" in res.stdout
+    assert "post-create: 0 hook(s)" in res.stdout
 
 
 # --- workspace scope ---------------------------------------------------------
@@ -1685,7 +1839,7 @@ def test_hook_list_types_summary(root: Path, tmp_path: Path) -> None:
 
 def test_hook_install_workspace_scope_needs_no_target(root: Path, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-hooks"
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run(
         "hook",
@@ -1697,16 +1851,16 @@ def test_hook_install_workspace_scope_needs_no_target(root: Path, tmp_path: Path
         extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
     )
     assert res.returncode == 0, res.stderr
-    assert (workspace / "wtm-create").is_file()
+    assert (workspace / "wtm-post-create").is_file()
 
 
 def test_workspace_scope_default_location(root: Path, tmp_path: Path) -> None:
     # With WTM_WORKSPACE_HOOKS_DIR unset the workspace dir is $root/.wtm/hooks.
-    src = tmp_path / "wtm-create"
+    src = tmp_path / "wtm-post-create"
     _write_hook(src, "true\n")
     res = run("hook", "install", str(src), "--scope", "workspace", root=root)
     assert res.returncode == 0, res.stderr
-    assert (root / ".wtm" / "hooks" / "wtm-create").is_file()
+    assert (root / ".wtm" / "hooks" / "wtm-post-create").is_file()
 
 
 def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
@@ -1714,20 +1868,20 @@ def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
     run("create", "alpha", "feat", root=root)
     workspace = tmp_path / "workspace-hooks"
     out = tmp_path / "ran"
-    _write_hook(workspace / "wtm-create", f'echo "$WTM_EVENT" > "{out}"\n')
+    _write_hook(workspace / "wtm-post-create", f'echo "$WTM_EVENT" > "{out}"\n')
     res = run(
         "hook",
         "run",
         "alpha",
         "feat",
-        "create",
+        "post-create",
         "--scope",
         "workspace",
         root=root,
         extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
     )
     assert res.returncode == 0, res.stderr
-    assert out.read_text().strip() == "create"
+    assert out.read_text().strip() == "post-create"
     listed = run(
         "hook",
         "list",
@@ -1792,13 +1946,13 @@ def test_enter_install_then_enter_order(root: Path, tmp_path: Path) -> None:
 
 
 def test_create_cd_install_order(root: Path, tmp_path: Path) -> None:
-    # 'wtm create -c -i' fires create -> install -> enter.
+    # 'wtm create -c -i' fires post-create -> install -> enter.
     _seed_repo(root, "alpha")
     hooks = tmp_path / "hooks"
     order = tmp_path / "order"
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    _write_hook(hooks / "wtm-create", f'echo create >> "{order}"\n')
+    _write_hook(hooks / "wtm-post-create", f'echo post-create >> "{order}"\n')
     _write_hook(hooks / "wtm-install", f'echo install >> "{order}"\n')
     _write_hook(hooks / "wtm-enter", f'echo enter >> "{order}"\n')
     res = run(
@@ -1812,7 +1966,7 @@ def test_create_cd_install_order(root: Path, tmp_path: Path) -> None:
         cd_file=cd_file,
     )
     assert res.returncode == 0, res.stderr
-    assert order.read_text().split() == ["create", "install", "enter"]
+    assert order.read_text().split() == ["post-create", "install", "enter"]
 
 
 def test_leave_event_fires_with_cwd_default(root: Path, tmp_path: Path) -> None:

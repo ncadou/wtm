@@ -1,7 +1,9 @@
 """wtm hook engine and hook management.
 
-Hooks (events: create, install, enter, leave, delete, rename) are discovered
-across five scopes::
+Events follow a ``pre-``/``post-`` naming convention: a prefix marks the side of
+a state mutation (``pre-create``/``post-create``, ``pre-delete``/``post-delete``,
+``pre-rename``/``post-rename``); a bare name is a mutation-free lifecycle moment
+(``install``, ``enter``, ``leave``). Hooks are discovered across five scopes::
 
     system:    $WTM_SYSTEM_HOOKS_DIR/wtm-<event>               and  .../wtm-<event>.d/*
     user:      $WTM_USER_HOOKS_DIR/wtm-<event>                 and  .../wtm-<event>.d/*
@@ -9,28 +11,37 @@ across five scopes::
     project:   $WTM_PROJECT_DIR/.git/hooks/wtm-<event>         and  .../wtm-<event>.d/*
     worktree:  $WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>        and  .../wtm-<event>.d/*
 
-Setup events (create, install, enter, rename) run most-general-first: system,
-then user, then workspace, then project, then worktree. Teardown events (leave,
-delete) run most-specific-first: worktree, then project, then workspace, then
-user, then system.
+Setup events (pre-create, post-create, install, enter, pre-rename, post-rename)
+run most-general-first: system, then user, then workspace, then project, then
+worktree. Teardown events (leave, pre-delete, post-delete) run
+most-specific-first: worktree, then project, then workspace, then user, then
+system.
 Within a scope a bare ``wtm-<event>`` file runs before its ``wtm-<event>.d/``
 directory (entries sorted lexically). Non-zero hook exits are logged but
 non-fatal unless strict is set; under strict a present-but-non-executable hook
-is also fatal.
+is also fatal — so a failing ``pre-*`` hook aborts its operation only under
+strict.
 
-The delete event fires *before* the worktree is removed, so per-worktree
-teardown hooks still exist when they run; its cwd is therefore ``WTM_WORKTREE_DIR``. The
-leave event likewise fires while the worktree still exists. The rename event
-fires *after* the move, with the new worktree as context (its per-worktree hooks
-have moved with it), plus ``WTM_OLD_DIR``/``WTM_OLD_BRANCH`` for the prior state.
+The pre-delete event fires *before* the worktree is removed, so per-worktree
+teardown hooks still exist when they run; its cwd is ``WTM_WORKTREE_DIR``. The
+post-delete event fires *after* removal (worktree gone, empty parents pruned,
+branch handled), so its ``WTM_WORKTREE_DIR`` no longer exists and its cwd is the
+project dir. The leave event fires while the worktree still exists. The
+pre-create event fires *before* the worktree is created, so its
+``WTM_WORKTREE_DIR`` does not exist yet and its cwd is the project dir. The
+pre-rename event fires *before* the move (from the old worktree), the
+post-rename event *after* it (from the new worktree, whose per-worktree hooks
+moved with it). Worktree scope is inapplicable to pre-create and post-delete
+(there is no live worktree to hold ``.wtm/hooks``).
 
 Hook environment contract (all events)::
 
     WTM_EVENT WTM_WORKTREE_DIR(=$1) WTM_BRANCH WTM_PROJECT WTM_PROJECT_DIR
     WTM_WORKTREES_DIR WTM_GIT_COMMON_DIR WTM_PROJECTS_ROOT
 
-The rename event adds ``WTM_OLD_DIR`` and ``WTM_OLD_BRANCH`` (equal to the new
-values when unchanged).
+The pre-rename event adds ``WTM_NEW_DIR``/``WTM_NEW_BRANCH`` (the destination);
+the post-rename event adds ``WTM_OLD_DIR``/``WTM_OLD_BRANCH`` (the prior state;
+equal to the new values when unchanged).
 
 Beyond firing hooks, this module manages them: :class:`Hooks` installs, runs,
 lists, and deletes hook files across the scopes, staying CLI-agnostic (it
@@ -68,9 +79,19 @@ from wtm.core import (
 from wtm.output import log, warn
 from wtm.target import TargetMode, resolve_target
 
-EVENTS = ("create", "install", "enter", "leave", "delete", "rename")
-SETUP_EVENTS = ("create", "install", "enter", "rename")
-TEARDOWN_EVENTS = ("leave", "delete")
+EVENTS = (
+    "pre-create",
+    "post-create",
+    "install",
+    "enter",
+    "leave",
+    "pre-delete",
+    "post-delete",
+    "pre-rename",
+    "post-rename",
+)
+SETUP_EVENTS = ("pre-create", "post-create", "install", "enter", "pre-rename", "post-rename")
+TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete")
 
 
 class Scope(str, Enum):
@@ -99,6 +120,7 @@ def run_hooks(
     strict: bool,
     scopes: tuple[Scope, ...] | None = None,
     extra_env: dict[str, str] | None = None,
+    hcwd: Path | None = None,
 ) -> None:
     """Fire hooks for *event* using *context*, honouring ordering and strict.
 
@@ -109,13 +131,17 @@ def run_hooks(
     :param scopes: restrict firing to these scopes (default: all five, in the
         event's natural order).
     :param extra_env: extra environment variables layered on top of the standard
-        contract (e.g. the ``rename`` event's ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``).
+        contract (e.g. the ``pre-rename`` event's ``WTM_NEW_DIR``/``WTM_NEW_BRANCH``).
+    :param hcwd: the subprocess working directory (default: ``context.dir``).
+        Events whose worktree dir is not a live directory — ``pre-create`` (not
+        created yet) and ``post-delete`` (already removed) — pass the project dir.
     """
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = order if scopes is None else tuple(s for s in order if s in scopes)
 
-    # teardown events fire before removal, so the worktree still exists: run there.
-    hcwd = context.dir
+    # Default to the worktree dir; callers whose worktree dir is absent override.
+    if hcwd is None:
+        hcwd = context.dir
 
     env = dict(os.environ)
     env["WTM_EVENT"] = event

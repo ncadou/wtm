@@ -33,8 +33,10 @@ name or a `WORKTREE_NAME`.
 An executable fired on a lifecycle event, discovered across scopes.
 
 **Event**:
-A lifecycle point that fires hooks: `create`, `install`, `enter`, `leave`,
-`delete`, `rename`.
+A lifecycle point that fires hooks. Names follow a `pre-`/`post-` convention: a
+prefix marks the side of a state mutation, a bare name is a mutation-free
+moment. The nine events are `pre-create`, `post-create`, `install`, `enter`,
+`leave`, `pre-delete`, `post-delete`, `pre-rename`, `post-rename`.
 
 **Scope**:
 Where a hook is discovered/installed, from most general to most specific:

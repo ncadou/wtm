@@ -103,7 +103,8 @@ class Worktree:
     ) -> WorktreeCreated:
         """Add a worktree (and branch); return how the branch was resolved.
 
-        Fires the ``create`` event, then ``install`` (when *do_install*), then
+        Fires ``pre-create`` before any filesystem mutation, then (post-move)
+        the ``post-create`` event, then ``install`` (when *do_install*), then
         ``enter`` (when *do_enter*, i.e. the caller cds into the new worktree).
         """
         if not args:
@@ -121,6 +122,19 @@ class Worktree:
         dest = abspath(destdir) if destdir else project_dir / "worktrees" / name
         if dest.exists():
             raise WtmError(f"destination already exists: {dest}")
+
+        # pre-create fires before any filesystem mutation: the worktree does not
+        # exist yet, so its context is synthesised by path math (no git call) and
+        # hooks run from the project dir. A --strict veto aborts here, cleanly.
+        pre_context = Context(
+            dir=dest,
+            branch=branch,
+            project=project_dir.name,
+            project_dir=project_dir,
+            worktrees_dir=project_dir / "worktrees",
+            git_common_dir=git_dir,
+        )
+        run_hooks("pre-create", pre_context, self.config, strict=strict, hcwd=project_dir)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +160,7 @@ class Worktree:
                 base = None
 
         context = derive_context(dest)
-        run_hooks("create", context, self.config, strict=strict)
+        run_hooks("post-create", context, self.config, strict=strict)
         if do_install:
             run_hooks("install", context, self.config, strict=strict)
         if do_enter:
@@ -225,13 +239,13 @@ class Worktree:
         Return the deleted paths and the branch-deletion outcome.
         """
         # Derive context before removal so hooks (e.g. cache purge) still get
-        # paths, and fire delete hooks while the worktree still exists (so
+        # paths, and fire pre-delete hooks while the worktree still exists (so
         # per-worktree teardown hooks under $WTM_WORKTREE_DIR/.wtm/hooks can run).
         target = resolve_target(self.config, TargetMode.DELETE, args)
         context = derive_context(target)
         branch = context.branch
 
-        run_hooks("delete", context, self.config, strict=strict)
+        run_hooks("pre-delete", context, self.config, strict=strict)
 
         try:
             git.remove_worktree(context.git_common_dir, context.dir, force=force)
@@ -251,6 +265,11 @@ class Worktree:
             except git.GitError:
                 branch_delete_failed = True
 
+        # post-delete fires once the deletion is fully settled (worktree gone,
+        # empty parents pruned, branch handled). Its worktree dir no longer
+        # exists, so hooks run from the project dir.
+        run_hooks("post-delete", context, self.config, strict=strict, hcwd=context.project_dir)
+
         return WorktreeDeleted(
             worktree_dir=context.dir,
             project_dir=context.project_dir,
@@ -265,9 +284,11 @@ class Worktree:
         ``WORKTREE``-mode source target (``PROJECT NAME | NAME | DIR | cwd``).
         The directory is always moved to ``<project>/worktrees/NEWNAME``; with
         *rename_branch* the branch is renamed to NEWNAME too (rejected on a
-        detached HEAD, skipped as a no-op when it already matches). Fires the
-        ``rename`` event after the move, from the new worktree, exposing the
-        prior state as ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``.
+        detached HEAD, skipped as a no-op when it already matches). Fires
+        ``pre-rename`` before the move (from the old worktree, exposing the
+        destination as ``WTM_NEW_DIR``/``WTM_NEW_BRANCH``), then ``post-rename``
+        after it (from the new worktree, exposing the prior state as
+        ``WTM_OLD_DIR``/``WTM_OLD_BRANCH``).
         """
         if not args:
             raise WtmError("usage: wtm rename [PROJECT] [OLDNAME] NEWNAME [-b]")
@@ -284,26 +305,40 @@ class Worktree:
         if dest.exists():
             raise WtmError(f"destination already exists: {dest}")
 
-        if rename_branch and not context.branch:
+        old_branch = context.branch
+        will_rename_branch = rename_branch and old_branch != newname
+        if rename_branch and not old_branch:
             raise WtmError("cannot rename branch: worktree is detached")
 
-        # Move the directory, then (optionally) the branch: git branch -m fails
-        # if NEWNAME is already taken, which we surface as a hard error.
+        # All validation precedes both the pre-rename fire and the move: git
+        # branch -m fails if NEWNAME is already taken, so surface it up front.
+        if will_rename_branch and git.branch_exists(context.git_common_dir, newname):
+            raise WtmError(f"branch '{newname}' already exists")
+
+        # pre-rename fires before the move, from the still-present old worktree;
+        # a --strict veto aborts before anything moves.
+        run_hooks(
+            "pre-rename",
+            context,
+            self.config,
+            strict=strict,
+            extra_env={
+                "WTM_NEW_DIR": str(dest),
+                "WTM_NEW_BRANCH": newname if rename_branch else old_branch,
+            },
+        )
+
         dest.parent.mkdir(parents=True, exist_ok=True)
         git.move_worktree(context.git_common_dir, context.dir, dest)
 
         did_rename_branch = False
-        old_branch = context.branch
-        if rename_branch and old_branch != newname:
-            if git.branch_exists(context.git_common_dir, newname):
-                raise WtmError(f"branch '{newname}' already exists")
-
+        if will_rename_branch:
             git.rename_branch(context.git_common_dir, old_branch, newname)
             did_rename_branch = True
 
         new_context = derive_context(dest)
         run_hooks(
-            "rename",
+            "post-rename",
             new_context,
             self.config,
             strict=strict,

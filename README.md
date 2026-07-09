@@ -167,8 +167,10 @@ your shell follows the move to the corresponding subpath under the new location.
 
 ## Hooks
 
-`wtm` fires `create`, `install`, `enter`, `leave`, `delete`, and `rename`
-events, discovered across five scopes:
+`wtm` fires nine events, discovered across five scopes. Event names follow a
+`pre-`/`post-` convention: a prefix marks the side of a state mutation
+(`pre-create`/`post-create`, `pre-delete`/`post-delete`, `pre-rename`/`post-rename`),
+a bare name is a mutation-free moment (`install`, `enter`, `leave`).
 
 - **system**    — `$WTM_SYSTEM_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
 - **user**      — `$WTM_USER_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
@@ -182,32 +184,50 @@ covers every project under the projects root; its hooks dir defaults to
 `$WTM_PROJECTS_ROOT/.wtm/hooks` (override with `$WTM_WORKSPACE_HOOKS_DIR`).
 
 Within a scope the bare `wtm-<event>` file runs before its `wtm-<event>.d/*`
-entries (sorted lexically). Setup events (`create`, `install`, `enter`,
-`rename`) run most-general first: **system → user → workspace → project →
-worktree**; teardown events (`leave`, `delete`) reverse to most-specific first:
-**worktree → project → workspace → user → system**. The `delete` event fires *before* the worktree
-is removed, so per-worktree teardown hooks under `$WTM_WORKTREE_DIR/.wtm/hooks` still
-exist when they run; its working directory is therefore `$WTM_WORKTREE_DIR`. The `leave`
-event likewise fires while the worktree still exists. The `rename` event fires
-*after* the move, from the **new** worktree (its per-worktree hooks moved with
-it), so its working directory is the new `$WTM_WORKTREE_DIR`.
+entries (sorted lexically). Setup events (`pre-create`, `post-create`,
+`install`, `enter`, `pre-rename`, `post-rename`) run most-general first:
+**system → user → workspace → project → worktree**; teardown events (`leave`,
+`pre-delete`, `post-delete`) reverse to most-specific first: **worktree →
+project → workspace → user → system**.
 
-The lifecycle events fire from: `create` on `wtm create`; `install` on
-`wtm install`, `wtm create -i`, or `wtm enter -i`; `enter` whenever `wtm` cds you
-into a worktree (`wtm enter`, and `wtm create -c`); `leave` on `wtm leave`;
-`delete` on `wtm delete`; `rename` on `wtm rename`. Within a single
-`wtm create -c -i` the order is `create` → `install` → `enter`; within
-`wtm enter -i` it is `install` → `enter`.
+Timing relative to the state change:
+
+- `pre-create` fires *before* the worktree is created, so its
+  `$WTM_WORKTREE_DIR` does not exist yet and its working directory is the
+  project dir. A `--strict` veto (non-zero exit) aborts creation before any
+  filesystem change.
+- `post-create` fires *after* the worktree exists, from that worktree.
+- `pre-delete` fires *before* the worktree is removed, so per-worktree teardown
+  hooks under `$WTM_WORKTREE_DIR/.wtm/hooks` still exist when they run; its
+  working directory is `$WTM_WORKTREE_DIR`.
+- `post-delete` fires *after* removal is fully settled (worktree gone, empty
+  parents pruned, branch handled). Its `$WTM_WORKTREE_DIR` no longer exists, so
+  its working directory is the project dir.
+- `pre-rename` fires *before* the move, from the old worktree; `post-rename`
+  fires *after* it, from the **new** worktree (its per-worktree hooks moved with
+  it). `leave` fires while the worktree still exists.
+
+Worktree scope is inapplicable to `pre-create` and `post-delete` — there is no
+live worktree to hold `.wtm/hooks`.
+
+The lifecycle events fire from: `pre-create`/`post-create` on `wtm create`;
+`install` on `wtm install`, `wtm create -i`, or `wtm enter -i`; `enter` whenever
+`wtm` cds you into a worktree (`wtm enter`, and `wtm create -c`); `leave` on
+`wtm leave`; `pre-delete`/`post-delete` on `wtm delete`; `pre-rename`/`post-rename`
+on `wtm rename`. Within a single `wtm create -c -i` the order is `pre-create` →
+`post-create` → `install` → `enter`; within `wtm enter -i` it is
+`install` → `enter`.
 
 Hooks receive the worktree directory as `$1` plus a `WTM_*` environment contract
 (`WTM_EVENT`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
-`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`). The `rename`
-event additionally sets `WTM_OLD_DIR` and `WTM_OLD_BRANCH` (the pre-rename path
-and branch; equal to the new values when unchanged), so a hook can reconcile
-path-keyed state, e.g. `sesh rename "$WTM_OLD_DIR" "$WTM_WORKTREE_DIR"`. Failures are
-logged but non-fatal unless `--strict` is passed. `wtm` does not track or ignore
-`$WTM_WORKTREE_DIR/.wtm/` — whether per-worktree hooks are committed to the branch is left
-to you.
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`). The `pre-rename`
+event adds `WTM_NEW_DIR`/`WTM_NEW_BRANCH` (the destination); the `post-rename`
+event adds `WTM_OLD_DIR`/`WTM_OLD_BRANCH` (the pre-rename path and branch; equal
+to the new values when unchanged), so a hook can reconcile path-keyed state, e.g.
+`sesh rename "$WTM_OLD_DIR" "$WTM_WORKTREE_DIR"`. Failures are logged but
+non-fatal unless `--strict` is passed (under which a failing `pre-*` hook aborts
+its operation). `wtm` does not track or ignore `$WTM_WORKTREE_DIR/.wtm/` —
+whether per-worktree hooks are committed to the branch is left to you.
 
 ### Managing hooks
 
