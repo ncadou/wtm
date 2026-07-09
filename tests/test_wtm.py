@@ -383,7 +383,7 @@ def _complete(root: Path, *, words: str, cword: str, cwd: Path | None = None) ->
     return res.stdout
 
 
-def test_complete_project_filters_by_prefix(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_project_names_and_label(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(root, "alpha")
     _seed_repo(root, "alto")
     _seed_repo(root, "beta")
@@ -391,8 +391,11 @@ def test_complete_project_filters_by_prefix(root: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
     from wtm.cli import _complete_project
 
-    assert _complete_project("") == ["alpha", "alto", "beta"]
-    assert _complete_project("al") == ["alpha", "alto"]
+    # The callback returns (value, label) tuples for every project; Typer applies
+    # the prefix filter, so the callback itself is not prefix-scoped.
+    items = _complete_project("")
+    assert [value for value, _ in items] == ["alpha", "alto", "beta"]
+    assert {label for _, label in items} == {"project"}
 
 
 def test_list_completion_emits_projects(root: Path) -> None:
@@ -414,8 +417,11 @@ def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.Mo
         def __init__(self, args: tuple[str, ...]) -> None:
             self.params = {"args": args}
 
-    # First positional slot -> PROJECT completion (prefix-filtered).
-    assert _complete_project_arg(_Ctx(()), "al") == ["alpha", "alto"]
+    # First positional slot -> PROJECT completion (labelled). Prefix filtering
+    # is Typer's job, so the callback returns all projects here.
+    items = _complete_project_arg(_Ctx(()), "al")
+    assert [value for value, _ in items] == ["alpha", "alto", "beta"]
+    assert {label for _, label in items} == {"project"}
     # A positional already given -> NAME/DIR slot, no project completion.
     assert _complete_project_arg(_Ctx(("alpha",)), "") == []
 
@@ -484,6 +490,116 @@ def test_first_slot_outside_root_projects_only(root: Path, tmp_path: Path) -> No
     # cwd not under the projects root: no cwd worktrees, just projects.
     out = _complete(root, words="wtm enter ", cword="2", cwd=tmp_path)
     assert out.split() == ["alpha"]
+
+
+# --- completion kind labels --------------------------------------------------
+
+
+class _Ctx:
+    """Minimal typer.Context stand-in for positional completion callbacks."""
+
+    def __init__(self, args: tuple[str, ...]) -> None:
+        self.params = {"args": args}
+
+
+def _labels(items: list[tuple[str, str]]) -> dict[str, str]:
+    """Collapse (value, help) completion tuples to a {value: help} map."""
+    return dict(items)
+
+
+def test_target_labels_project_and_worktree(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "feat", root=root)
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    monkeypatch.chdir(repo)  # inside 'alpha' -> its worktrees join the projects
+    from wtm.cli import _complete_target
+
+    # Slot 0: projects (alpha, beta) labelled 'project', cwd worktree 'feat'
+    # labelled 'worktree'.
+    assert _labels(_complete_target(_Ctx(()), "")) == {
+        "alpha": "project",
+        "beta": "project",
+        "feat": "worktree",
+    }
+    # Slot 1: the named project's worktrees only -> homogeneous 'worktree'.
+    assert _labels(_complete_target(_Ctx(("alpha",)), "")) == {"feat": "worktree"}
+
+
+def test_target_label_collision_worktree_wins(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "beta", root=root)  # worktree named like project 'beta'
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    monkeypatch.chdir(repo)
+    from wtm.cli import _complete_target
+
+    # A lone 'beta' resolves to alpha's worktree, so worktree heads; the project
+    # role (reachable only with a second token) is shadowed.
+    assert _labels(_complete_target(_Ctx(()), ""))["beta"] == "worktree (also project)"
+
+
+def test_hook_target_labels_event(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    monkeypatch.chdir(repo)
+    from wtm.cli import _complete_hook_target
+
+    labels = _labels(_complete_hook_target(_Ctx(()), ""))
+    assert labels["alpha"] == "project"
+    assert labels["feat"] == "worktree"
+    assert labels["pre-create"] == "event"
+
+
+def test_hook_target_label_collision_event_wins(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _seed_repo(root, "alpha")
+    run("create", "alpha", "install", root=root)  # worktree named like an event
+    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    monkeypatch.chdir(repo)
+    from wtm.cli import _complete_hook_target
+
+    # A lone 'install' resolves to the event (last positional is the HOOK), so
+    # event heads; the worktree role trails.
+    assert _labels(_complete_hook_target(_Ctx(()), ""))["install"] == "event (also worktree)"
+
+
+def _complete_zsh(root: Path, *, args: str, cwd: Path | None = None) -> str:
+    """Drive the real zsh completion protocol and return stdout.
+
+    Unlike the bash protocol, the zsh formatter renders each item as
+    ``"value":"help"``, so this is the seam that proves the kind label surfaces.
+    """
+    wtm_bin = Path(sys.executable).parent / "wtm"
+    env = {
+        **os.environ,
+        "WTM_PROJECTS_ROOT": str(root),
+        "_WTM_COMPLETE": "complete_zsh",
+        "_TYPER_COMPLETE_ARGS": args,
+    }
+    res = subprocess.run(
+        [str(wtm_bin)],
+        env=env,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+
+    return res.stdout
+
+
+def test_zsh_completion_renders_kind_labels(root: Path) -> None:
+    repo = _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "feat", root=root)
+    out = _complete_zsh(root, args="wtm enter ", cwd=repo)
+    # zsh format is "value":"help"; each candidate carries its kind label.
+    assert '"alpha":"project"' in out
+    assert '"beta":"project"' in out
+    assert '"feat":"worktree"' in out
 
 
 # --- branch completion (-b) --------------------------------------------------

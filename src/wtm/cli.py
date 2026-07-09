@@ -94,9 +94,46 @@ def _bootstrap(ctx: typer.Context) -> None:
 
 
 # --- completion helpers ------------------------------------------------------
+#
+# Completion candidates carry a kind label (shown as "-- <label>" in zsh/fish):
+# a lone token's resolution winner heads the label, any roles it shadows follow
+# in "(also ...)". The precedences below are descending resolution order, a cli
+# presentation concern (events are not a target TokenKind), so the labelling
+# lives here rather than in wtm.target.
+#
+# Typer's autocompletion contract attaches the label via a (value, help) tuple;
+# it does the prefix filtering and CompletionItem wrapping itself.
+
+_TARGET_PRECEDENCE = ("worktree", "project")
+_HOOK_PRECEDENCE = ("event", "worktree", "project")
 
 
-def _complete_project(incomplete: str) -> list[str]:
+def _render_label(kinds: set[str], precedence: tuple[str, ...]) -> str:
+    """Render a candidate's kind set as a label: winner heads, shadows in parens.
+
+    *kinds* is ordered by *precedence* (descending resolution order); the first
+    present kind is what a lone token resolves to and heads the label, the rest
+    (reachable only by typing further tokens) trail as ``(also X, Y)``.
+    """
+    head, *rest = [kind for kind in precedence if kind in kinds]
+
+    return head if not rest else f"{head} (also {', '.join(rest)})"
+
+
+def _labelled(
+    candidates: dict[str, set[str]], precedence: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    """Turn a name->kinds map into sorted ``(value, label)`` completion tuples.
+
+    The single seam that attaches metadata: each name pairs with its
+    :func:`_render_label`. Returning ``(value, help)`` tuples (not bare strings)
+    is what makes Typer keep the help text; zsh/fish then show ``value -- help``.
+    Prefix filtering is Typer's job, so it is not repeated here.
+    """
+    return [(name, _render_label(candidates[name], precedence)) for name in sorted(candidates)]
+
+
+def _complete_project(incomplete: str) -> list[tuple[str, str]]:
     """Autocompletion: project names under the root, prefix-filtered.
 
     Runs during shell completion, where the app callback has not fired, so it
@@ -108,10 +145,10 @@ def _complete_project(incomplete: str) -> list[str]:
     except Exception:
         return []
 
-    return [name for name in names if name.startswith(incomplete)]
+    return _labelled({name: {"project"} for name in names}, _TARGET_PRECEDENCE)
 
 
-def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[str]:
+def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
     """Complete PROJECT for the create-style ('[PROJECT] NAME') commands.
 
     These use the ``NAME_ONLY`` target mode: only the first slot completes (a
@@ -184,36 +221,42 @@ def _branch_names(config: Config, project: str | None) -> list[str]:
         return []
 
 
-def _target_candidates(kinds: frozenset[TokenKind], config: Config, args: list[str]) -> set[str]:
-    """Map the admissible token kinds at a slot to concrete completion candidates.
+def _target_candidates(
+    kinds: frozenset[TokenKind], config: Config, args: list[str]
+) -> dict[str, set[str]]:
+    """Map the admissible token kinds at a slot to labelled completion candidates.
 
-    ``PROJECT`` -> project names; ``WORKTREE_NAME`` -> the worktree names of the
-    project already named at slot 0, or (at slot 0) the cwd-inferred project's.
+    Returns a name -> kind-label set map (a name reachable as both a project and
+    a worktree carries both). ``PROJECT`` -> project names (label ``project``);
+    ``WORKTREE_NAME`` -> the worktree names of the project already named at slot
+    0, or (at slot 0) the cwd-inferred project's (label ``worktree``).
     """
-    candidates: set[str] = set()
+    candidates: dict[str, set[str]] = {}
     if TokenKind.PROJECT in kinds:
-        candidates |= set(Project(config).list())
+        for name in Project(config).list():
+            candidates.setdefault(name, set()).add("project")
     if TokenKind.WORKTREE_NAME in kinds:
         project = args[0] if args else None
-        candidates |= set(_worktree_names(config, project))
+        for name in _worktree_names(config, project):
+            candidates.setdefault(name, set()).add("worktree")
 
     return candidates
 
 
-def _complete_target(ctx: typer.Context, incomplete: str) -> list[str]:
+def _complete_target(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
     """Complete a worktree target for the existing-target ('WORKTREE' mode) commands.
 
     :func:`slot_kind` decides which token kinds are admissible at this slot (a
     PROJECT and/or a worktree NAME); :func:`_target_candidates` turns them into
-    names. Runs during shell completion (app callback has not fired), so it
-    builds its own config; :class:`Project` and :meth:`Worktree.list` are
+    labelled names. Runs during shell completion (app callback has not fired), so
+    it builds its own config; :class:`Project` and :meth:`Worktree.list` are
     lenient, so this never errors.
     """
     args = ctx.params.get("args") or []
     config = Config.load()
     candidates = _target_candidates(slot_kind(TargetMode.WORKTREE, args), config, args)
 
-    return sorted(name for name in candidates if name.startswith(incomplete))
+    return _labelled(candidates, _TARGET_PRECEDENCE)
 
 
 def _complete_event(incomplete: str) -> list[str]:
@@ -221,14 +264,14 @@ def _complete_event(incomplete: str) -> list[str]:
     return [event for event in EVENTS if event.startswith(incomplete)]
 
 
-def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[str]:
+def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
     """Complete the '[PROJECT] NAME | [DIR] HOOK' variadic for hook run/delete.
 
     HOOK (the event) is the trailing token, so any slot may be it: the target
     candidates admissible at this slot (via ``WORKTREE``-mode :func:`slot_kind`)
-    are unioned with the event names. Once ``PROJECT NAME`` is complete (two
-    args) only the event can follow. The event union lives here, not in
-    :mod:`wtm.target`: the hook-prefix grammar is a cli concern.
+    are merged with the event names (label ``event``). Once ``PROJECT NAME`` is
+    complete (two args) only the event can follow. The event union lives here,
+    not in :mod:`wtm.target`: the hook-prefix grammar is a cli concern.
 
     Runs during shell completion (app callback has not fired), so it builds its
     own config; :class:`Project` and :meth:`Worktree.list` are lenient, so this
@@ -239,9 +282,10 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[str]:
     kinds = slot_kind(TargetMode.WORKTREE, args)
     candidates = _target_candidates(kinds, config, args)
     if len(args) <= 2:
-        candidates |= set(EVENTS)
+        for event in EVENTS:
+            candidates.setdefault(event, set()).add("event")
 
-    return sorted(name for name in candidates if name.startswith(incomplete))
+    return _labelled(candidates, _HOOK_PRECEDENCE)
 
 
 project_app = typer.Typer(
