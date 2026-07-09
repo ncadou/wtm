@@ -1,21 +1,73 @@
 """End-to-end integration tests for wtm.
 
-Each test builds a throwaway projects root and exercises the real ``wtm``
-console script as a subprocess, so the typer wiring, exit codes, stdout/stderr
-discipline, git side effects, and hook firing are all covered.
+Each test builds a throwaway projects root and exercises the real ``wtm`` entry
+point, so the typer wiring, exit codes, stdout/stderr discipline, git side
+effects, and hook firing are all covered.
+
+Commands run in-process by default (:func:`run`): the harness sets the isolated
+environment, redirects the streams, and calls :func:`wtm.cli.main` directly, so
+``main``'s top-level ``WtmError``/``GitError`` handler and click's usage errors
+are exercised faithfully without paying interpreter + typer import startup per
+call. The handful of tests that strand the shell -- the running process stands
+inside a worktree the command deletes or moves -- use :func:`run_proc` instead,
+which spawns a real child so destroying its cwd cannot disturb the test runner.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from wtm import cli
+
 WTM = [sys.executable, "-m", "wtm.cli"]
+
+
+@dataclass(frozen=True)
+class _Result:
+    """A subprocess-compatible view of an in-process wtm invocation."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _isolated_env(
+    root: Path,
+    hooks_dir: Path | None,
+    system_hooks_dir: Path | None,
+    cd_file: Path | None,
+    extra_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Build the WTM_*/GIT_* environment deltas for one invocation."""
+    env = {
+        "WTM_PROJECTS_ROOT": str(root),
+        "WTM_USER_HOOKS_DIR": str(hooks_dir if hooks_dir is not None else root / "_no_user_hooks"),
+        "WTM_SYSTEM_HOOKS_DIR": str(
+            system_hooks_dir if system_hooks_dir is not None else root / "_no_system_hooks"
+        ),
+        # Deterministic git identity / no user config leakage.
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    if cd_file is not None:
+        env["WTM_CD_FILE"] = str(cd_file)
+    if extra_env:
+        env.update(extra_env)
+
+    return env
 
 
 def run(
@@ -26,33 +78,56 @@ def run(
     system_hooks_dir: Path | None = None,
     cd_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
+) -> _Result:
+    """Invoke wtm in-process via :func:`wtm.cli.main`, isolated from the host.
+
+    Sets the WTM_*/GIT_* environment, chdirs into *cwd*, redirects the streams,
+    and runs the real entry point -- so exit codes, the ``wtm: ...`` error
+    handler, and usage errors match a real invocation -- then restores the
+    process state. Use :func:`run_proc` when the command destroys *cwd*.
+    """
+    env_delta = _isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env)
+
+    prev_environ = dict(os.environ)
+    prev_argv = sys.argv
+    prev_cwd = os.getcwd()
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        os.environ.update(env_delta)
+        os.chdir(cwd or root)
+        sys.argv = ["wtm", *args]
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    finally:
+        os.chdir(prev_cwd)
+        sys.argv = prev_argv
+        os.environ.clear()
+        os.environ.update(prev_environ)
+
+    return _Result(returncode=code, stdout=out.getvalue(), stderr=err.getvalue())
+
+
+def run_proc(
+    *args: str,
+    root: Path,
+    cwd: Path | None = None,
+    hooks_dir: Path | None = None,
+    system_hooks_dir: Path | None = None,
+    cd_file: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke wtm with an isolated environment."""
+    """Invoke wtm as a real subprocess with an isolated environment.
+
+    Reserved for tests that strand the shell (the process stands inside a
+    worktree the command deletes or moves): a child process keeps the doomed
+    cwd off the test runner.
+    """
     env = dict(os.environ)
-    env["WTM_PROJECTS_ROOT"] = str(root)
-    if hooks_dir is not None:
-        env["WTM_USER_HOOKS_DIR"] = str(hooks_dir)
-    else:
-        env["WTM_USER_HOOKS_DIR"] = str(root / "_no_user_hooks")
-    if system_hooks_dir is not None:
-        env["WTM_SYSTEM_HOOKS_DIR"] = str(system_hooks_dir)
-    else:
-        env["WTM_SYSTEM_HOOKS_DIR"] = str(root / "_no_system_hooks")
-    if cd_file is not None:
-        env["WTM_CD_FILE"] = str(cd_file)
-    # Deterministic git identity / no user config leakage.
-    env.update(
-        {
-            "GIT_AUTHOR_NAME": "t",
-            "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t",
-            "GIT_COMMITTER_EMAIL": "t@t",
-            "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-        }
-    )
-    if extra_env:
-        env.update(extra_env)
+    env.update(_isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env))
 
     return subprocess.run(
         WTM + list(args),
@@ -996,7 +1071,9 @@ def test_delete_cds_to_oldpwd_when_standing_in_worktree(root: Path, tmp_path: Pa
     prev.mkdir()
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    res = run(
+    # Shell stands in the deleted worktree: run as a real subprocess so the
+    # doomed cwd cannot strand the test runner.
+    res = run_proc(
         "delete",
         "alpha",
         "feat",
@@ -1015,7 +1092,7 @@ def test_delete_cds_to_project_dir_when_oldpwd_gone(root: Path, tmp_path: Path) 
     wt = root / "alpha" / "worktrees" / "feat"
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    res = run(
+    res = run_proc(
         "delete",
         "alpha",
         "feat",
@@ -1038,7 +1115,7 @@ def test_delete_cds_from_subdir_of_worktree(root: Path, tmp_path: Path) -> None:
     prev.mkdir()
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    res = run(
+    res = run_proc(
         "delete",
         "alpha",
         "feat",
@@ -1081,7 +1158,7 @@ def test_delete_silent_without_shell_wrapper(root: Path, tmp_path: Path) -> None
     prev = tmp_path / "prev"
     prev.mkdir()
     # No WTM_CD_FILE (cd_file unset): no cd channel, so stay silent on stdout.
-    res = run("delete", "alpha", "feat", root=root, cwd=wt, extra_env={"OLDPWD": str(prev)})
+    res = run_proc("delete", "alpha", "feat", root=root, cwd=wt, extra_env={"OLDPWD": str(prev)})
     assert res.returncode == 0, res.stderr
     assert res.stdout == ""
     assert "cd manually" not in res.stderr
@@ -1298,7 +1375,7 @@ def test_rename_cds_to_mapped_path_when_standing_in_worktree(root: Path, tmp_pat
     wt = root / "alpha" / "worktrees" / "feat"
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    res = run("rename", "alpha", "feat", "fix", root=root, cwd=wt, cd_file=cd_file)
+    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=wt, cd_file=cd_file)
     assert res.returncode == 0, res.stderr
     assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix")
 
@@ -1311,7 +1388,7 @@ def test_rename_cds_to_mapped_subpath_from_subdir(root: Path, tmp_path: Path) ->
     sub.mkdir()
     cd_file = tmp_path / "cd"
     cd_file.touch()
-    res = run("rename", "alpha", "feat", "fix", root=root, cwd=sub, cd_file=cd_file)
+    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=sub, cd_file=cd_file)
     assert res.returncode == 0, res.stderr
     assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix" / "sub")
 

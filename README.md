@@ -283,7 +283,7 @@ sorting included). The `Makefile` wraps the common tasks:
 - `make lint` — lint (`ruff check`: pyflakes, pycodestyle, isort, pyupgrade,
   bugbear, comprehensions)
 - `make check` — verify formatting + lint without writing (CI-style gate)
-- `make test` — run the test suite (`pytest`)
+- `make tests` — run the test suite (`pytest`)
 
 The underlying commands are `uv run ruff check --fix src tests`, `uv run ruff
 format src tests`, and `uv run pytest`. Ruff config lives in `pyproject.toml`
