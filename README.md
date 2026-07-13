@@ -1,41 +1,64 @@
 # wtm — git worktree manager
 
-`wtm` manages git worktrees laid out under a single projects root:
+`wtm` manages git worktrees laid out under one or more named **workspaces**
+(each a projects root):
 
 ```
-$WTM_PROJECTS_ROOT/<project>/
+<workspace>/<project>/
     .git/                 bare repository
     worktrees/<name>/     worktrees
 ```
 
-`wtm` only knows this structure; anything project-specific (shared data dirs,
-direnv, tmux/sesh) belongs in hooks, not in `wtm`.
+Workspaces are *declared* in config; projects are *discovered* on disk (a
+`<name>/.git`) and only *annotated* by config. `wtm` knows only this structure;
+anything project-specific (shared data dirs, direnv, tmux/sesh) belongs in
+hooks, not in `wtm`.
+
+Every command runs against one **active workspace**, resolved `-w/--workspace >
+$WTM_WORKSPACE > cwd (longest path match) > default_workspace > the sole
+declared workspace > error`. There is no built-in default: with no workspace
+declared or selected, `wtm` errors and asks you to declare/select one.
 
 ## Commands
 
-Commands are grouped under `project`, `worktree`, and `hook`. Each
-worktree-level command also has a top-level alias (`wtm create …` ==
-`wtm worktree create …`), and `wtm clone …` / `wtm migrate …` alias the matching
-`project` commands. The two forms are equivalent.
+Commands are grouped under `workspace`, `project`, `worktree`, `hook`, and
+`config`. Each worktree-level command also has a top-level alias (`wtm create …`
+== `wtm worktree create …`), and `wtm clone …` / `wtm migrate …` alias the
+matching `project` commands. The two forms are equivalent. A global
+`-w/--workspace NAME` (before the subcommand) selects the active workspace.
+
+**Workspaces** (`wtm workspace …`):
+
+```
+list                      declared workspaces (name, path, active marker '*', description)
+resolve [NAME] [-e|--env] print a workspace's path (default: active); --env emits WTM_WORKSPACE(_DIR)
+```
+
+**Config** (`wtm config …`):
+
+```
+show [--sources]          the effective merged config (--sources: declaring scope + inert-annotation flags)
+```
 
 **Projects** (`wtm project …`):
 
 ```
 new     NAME                      create an empty project (.git/ + worktrees/)
 clone   URL [NAME]                clone into a new project (bare); alias: wtm clone
-list    [-t|--tree] [-w|--worktrees] [-j|--json]
-                                  list all projects (--tree: with their worktrees;
+list    [-t|--tree] [-w|--worktrees] [-j|--json] [-a|--all]
+                                  list projects in the active workspace (--tree: with their worktrees;
                                   --worktrees: flat one-worktree-per-line, tab-separated
-                                  project/name/path/branch/head; --json: those rows as JSON)
+                                  project/name/path/branch/head; --json: those rows as JSON;
+                                  --all: span every declared workspace, prepending a workspace column)
 migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm migrate
 ```
 
 **Worktrees** (`wtm worktree …`, each also a top-level alias):
 
 ```
-create  [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
+create  [PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
 install ([PROJECT] NAME | DIR)                         run install hooks for a worktree (alias for 'wtm hook run install')
-enter   ([PROJECT] NAME | DIR) [-c] [-b BRANCH] [-i]   cd into a worktree; -c creates it first if absent
+enter   ([PROJECT] NAME | DIR) [-c] [-b BRANCH] [--base REF] [-i]   cd into a worktree; -c creates it first if absent
 leave   ([PROJECT] NAME | DIR) [-C]                    run leave hooks for a worktree; cds out unless -C (non-destructive)
 delete  (PROJECT NAME | DIR) [-f] [-D]                 remove a worktree (-f force, -D delete branch too)
 rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]       rename/move a worktree; -b renames its branch too
@@ -115,7 +138,7 @@ added and removed).
 
 For `install` / `enter` / `leave` / `delete` / `hook run` / `hook install` / `hook delete`:
 
-- `PROJECT NAME` → `$WTM_PROJECTS_ROOT/PROJECT/worktrees/NAME`
+- `PROJECT NAME` → `<active-workspace>/PROJECT/worktrees/NAME`
 - `NAME` → `<cwd-project>/worktrees/NAME` (project inferred from the current
   directory; `NAME` may be nested, e.g. `feature/x`)
 - `DIR` → an explicit path (a single arg is a path only if it starts with `/`,
@@ -123,9 +146,12 @@ For `install` / `enter` / `leave` / `delete` / `hook run` / `hook install` / `ho
 - no argument → the current directory (`delete` requires an explicit target)
 
 `create` resolves a branch as: existing local branch → use it; `origin/NAME`
-exists → track it; otherwise create a new branch off `origin/HEAD` (or `HEAD`
-when there is no `origin/HEAD`). If the repository has no commits yet (e.g. a
-freshly-created project), the worktree is bootstrapped on a new orphan branch.
+exists → track it; otherwise create a new branch off a base ref (`--base/--off
+REF` > the project's configured `base_branch` > `origin/HEAD` > `HEAD`). A
+configured/requested base is resolved as `origin/REF` then local `REF`; in a
+populated repo a base that resolves to nothing is a hard error. If the
+repository has no commits yet (e.g. a freshly-created project), the worktree is
+bootstrapped on a new orphan branch regardless of any configured base.
 
 `enter -c` makes entering idempotent: if the target worktree is absent it is
 created first (with `create`'s branch resolution, `-b BRANCH` to override the
@@ -144,12 +170,13 @@ the `WTM_*` contract as `export KEY='value'` lines for
 must already exist.
 
 `wtm project resolve [PROJECT]` is the project-level counterpart: it prints the
-project directory (`$WTM_PROJECTS_ROOT/PROJECT`), inferring PROJECT from the cwd
+project directory (`<workspace>/PROJECT`), inferring PROJECT from the cwd
 when omitted — `cd "$(wtm project resolve alpha)"`. It is pure path math (no git,
 no existence check, so it works for an absent project). With `--env` it emits
 only the project-level slice of the contract (`WTM_PROJECT`, `WTM_PROJECT_DIR`,
-`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`) — there is no
-`WTM_WORKTREE_DIR` or `WTM_BRANCH`, since a project has no single worktree.
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`)
+— there is no `WTM_WORKTREE_DIR` or `WTM_BRANCH`, since a project has no single
+worktree.
 
 `rename` moves a worktree to a new name. Its positionals are parsed right-to-left:
 the **last** positional is `NEWNAME`, and everything before it is an ordinary
@@ -167,28 +194,37 @@ your shell follows the move to the corresponding subpath under the new location.
 
 ## Hooks
 
-`wtm` fires nine events, discovered across five scopes. Event names follow a
-`pre-`/`post-` convention: a prefix marks the side of a state mutation
+`wtm` fires nine events across five scopes. A hook is either a **builtin**
+discovered file or an **inline** `sh -c` command declared in config; explicit
+inline hooks *add to* the builtins. Event names follow a `pre-`/`post-`
+convention: a prefix marks the side of a state mutation
 (`pre-create`/`post-create`, `pre-delete`/`post-delete`, `pre-rename`/`post-rename`),
 a bare name is a mutation-free moment (`install`, `enter`, `leave`).
 
-- **system**    — `$WTM_SYSTEM_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
-- **user**      — `$WTM_USER_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
-- **workspace** — `$WTM_WORKSPACE_HOOKS_DIR/wtm-<event>` and `…/wtm-<event>.d/*`
-- **project**   — `$WTM_PROJECT_DIR/.git/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
-- **worktree**  — `$WTM_WORKTREE_DIR/.wtm/hooks/wtm-<event>` and `…/wtm-<event>.d/*`
+Builtin file discovery per scope (bare file + `wtm-<event>.d/*`):
 
-The system scope covers every user on the machine; its hooks dir defaults to
-`/etc/wtm/hooks` (override with `$WTM_SYSTEM_HOOKS_DIR`). The workspace scope
-covers every project under the projects root; its hooks dir defaults to
-`$WTM_PROJECTS_ROOT/.wtm/hooks` (override with `$WTM_WORKSPACE_HOOKS_DIR`).
+- **system**    — `/etc/wtm/hooks` (override: `$WTM_SYSTEM_HOOKS_DIR`, or config `[hooks] dir`)
+- **user**      — `$XDG_CONFIG_HOME/wtm/hooks` (override: `$WTM_USER_HOOKS_DIR`, or config `[hooks] dir`)
+- **workspace** — `<workspace>/.wtm/hooks` (override: workspace config `[hooks] dir`)
+- **project**   — `<project>/.git/hooks` (override: project config `[project.hooks] dir`)
+- **worktree**  — `<worktree>/.wtm/hooks` (override: worktree config `[hooks] dir`)
 
-Within a scope the bare `wtm-<event>` file runs before its `wtm-<event>.d/*`
-entries (sorted lexically). Setup events (`pre-create`, `post-create`,
-`install`, `enter`, `pre-rename`, `post-rename`) run most-general first:
-**system → user → workspace → project → worktree**; teardown events (`leave`,
-`pre-delete`, `post-delete`) reverse to most-specific first: **worktree →
-project → workspace → user → system**.
+Inline hooks are declared as an event→command(s) map in the matching config
+scope (see *Configuration*): a scope's own `[hooks.on]`, a workspace entry's
+`[workspaces.NAME.hooks.on]`, a project's `[project.hooks.on]` /
+`[workspaces.NAME.projects.PNAME.hooks.on]`. A command may be a string or a
+list of strings; each runs via `/bin/sh -c` with the same `$1` + `WTM_*`
+contract and `--strict` semantics as file hooks. Set `builtins = false` in a
+scope's `[hooks]` table to disable *that scope's* builtin file discovery (inline
+hooks still fire).
+
+Within a scope, builtin files run first (the bare `wtm-<event>` file before its
+`wtm-<event>.d/*` entries, sorted lexically), then inline commands in declared
+order. Setup events (`pre-create`, `post-create`, `install`, `enter`,
+`pre-rename`, `post-rename`) run most-general first: **system → user →
+workspace → project → worktree**; teardown events (`leave`, `pre-delete`,
+`post-delete`) reverse to most-specific first: **worktree → project → workspace
+→ user → system**.
 
 Timing relative to the state change:
 
@@ -220,7 +256,10 @@ on `wtm rename`. Within a single `wtm create -c -i` the order is `pre-create` �
 
 Hooks receive the worktree directory as `$1` plus a `WTM_*` environment contract
 (`WTM_EVENT`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
-`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_PROJECTS_ROOT`). The `pre-rename`
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`).
+`WTM_WORKSPACE` is the active workspace name (empty when the project is not under
+a declared workspace); `WTM_WORKSPACE_DIR` is its path (the projects root). The
+`pre-rename`
 event adds `WTM_NEW_DIR`/`WTM_NEW_BRANCH` (the destination); the `post-rename`
 event adds `WTM_OLD_DIR`/`WTM_OLD_BRANCH` (the pre-rename path and branch; equal
 to the new values when unchanged), so a hook can reconcile path-keyed state, e.g.
@@ -246,8 +285,10 @@ whether per-worktree hooks are committed to the branch is left to you.
   last positional: an event (removes the bare `wtm-<event>` file; its
   `wtm-<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
   `.d` entry).
-- `wtm hook list [TARGET] [--types]` lists installed hooks grouped by event
-  across scopes; `--types` prints a compact per-event summary.
+- `wtm hook list [TARGET] [--types]` lists hooks grouped by event across scopes,
+  builtin files and inline config hooks alike (inline ones marked `(config)`);
+  `--types` prints a compact per-event summary. `hook install`/`delete` manage
+  builtin files only — inline hooks are edited in the config file.
 
 ## Shell integration
 
@@ -264,13 +305,67 @@ wrapper it stays silent (it cannot move the parent shell anyway).
 
 ## Configuration
 
-`wtm` reads these environment variables:
+`wtm` reads (never writes) TOML config from up to five scopes, mirroring the
+hook scopes, most-general to most-specific:
 
-- `WTM_PROJECTS_ROOT` — projects root (default `~/workspace/projects`)
-- `WTM_SYSTEM_HOOKS_DIR` — system hooks directory (default `/etc/wtm/hooks`)
-- `WTM_USER_HOOKS_DIR` — user hooks directory (default `$XDG_CONFIG_HOME/wtm/hooks`)
-- `WTM_WORKSPACE_HOOKS_DIR` — workspace hooks directory (default
-  `$WTM_PROJECTS_ROOT/.wtm/hooks`)
+| scope | file |
+|---|---|
+| system | `$WTM_SYSTEM_CONFIG` or `/etc/wtm/config.toml` |
+| user | `$WTM_CONFIG` or `$XDG_CONFIG_HOME/wtm/config.toml` |
+| workspace | `<workspace>/.wtm/config.toml` |
+| project | `<project>/.wtm/config.toml` |
+| worktree | `<worktree>/.wtm/config.toml` |
+
+Scalars resolve most-specific-first (`CLI flag > env > worktree > project >
+workspace > user > system > built-in default`); inline hooks *accumulate* across
+scopes. Workspace **paths** are `~`/`$VAR`-expanded and must be absolute after
+expansion. Config is hand-edited; `wtm config show [--sources]` prints the
+effective merge.
+
+The **workspace registry** (name → path) lives at system/user scope; a
+workspace's own metadata and its projects' annotations may also live in its
+`<workspace>/.wtm/config.toml`. Projects are discovered on disk and only
+annotated (by name) with a description, a `base_branch`, and hooks.
+
+```toml
+# ~/.config/wtm/config.toml
+default_workspace = "work"          # active fallback when cwd matches none
+base_branch = "main"                # global default fork point for new branches
+
+[workspaces.work]
+path = "~/work"
+description = "day job"
+[workspaces.work.hooks.on]          # workspace-scope inline hooks (event -> cmd(s))
+post-create = "direnv allow"
+enter = ["tmux new-window", "echo entered $WTM_PROJECT"]
+[workspaces.work.projects.api]      # annotate a discovered project
+base_branch = "develop"
+[workspaces.work.projects.api.hooks.on]
+install = "make deps"
+
+[workspaces.oss]
+path = "$HOME/oss"
+
+[hooks]                             # this file's own (user) scope
+builtins = false                    # disable user-scope builtin file discovery
+[hooks.on]
+leave = "echo bye"
+```
+
+### Environment variables
+
+Inbound env vars are a curated, high-precedence override set (they beat file
+scopes); per-project scalars are deliberately *not* env-settable.
+
+- `WTM_WORKSPACE` — select the active workspace by name
+- `WTM_CONFIG` — user config file path (replaces the `$XDG_CONFIG_HOME` default)
+- `WTM_SYSTEM_CONFIG` — system config file path (default `/etc/wtm/config.toml`)
+- `WTM_NO_SYSTEM` — ignore system-scope config + hooks
+- `WTM_NO_CONFIG` — ignore all config files (env + CLI + defaults only)
+- `WTM_SYSTEM_HOOKS_DIR` / `WTM_USER_HOOKS_DIR` — builtin hooks dir for that scope
+- `WTM_NO_HOOKS` — disable all hook firing
+- `XDG_CONFIG_HOME` — user config + user hooks location
+- `WTM_CD_FILE` — the shell-wrapper cd channel (see *Shell integration*)
 
 ## Development
 

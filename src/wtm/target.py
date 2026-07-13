@@ -33,8 +33,8 @@ import os
 from enum import Enum
 from pathlib import Path
 
+from wtm.config import Config
 from wtm.core import (
-    Config,
     WtmError,
     abspath,
     project_dir_for,

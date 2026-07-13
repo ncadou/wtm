@@ -1,8 +1,8 @@
 [project]
 name = "wtm"
 version = "0.1.0"
-description = "Git worktree manager for a single projects-root layout"
-requires-python = ">=3.10"
+description = "Git worktree manager over multiple named workspaces (projects roots)"
+requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
 ]
@@ -26,7 +26,7 @@ dev = [
 
 [tool.ruff]
 line-length = 99
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

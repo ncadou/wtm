@@ -1,24 +1,24 @@
-"""Pure logic for wtm: configuration, validation, path resolution, context.
+"""Pure logic for wtm: validation, path resolution, worktree context.
 
 No presentation here: all printing and the cd channel live in
-:mod:`wtm.output`. This module only computes and returns values.
+:mod:`wtm.output`. Configuration (workspaces, scopes, TOML layers) lives in
+:mod:`wtm.config`; this module stays free of it so it never imports config and
+the two never form a cycle. This module only computes and returns values.
 """
 
 from __future__ import annotations
 
 __all__ = [
     "WtmError",
-    "Config",
     "Context",
     "abspath",
     "current_dir",
     "derive_context",
+    "expand_path",
     "project_dir_for",
-    "project_dir_for_cwd",
     "reject_traversal",
     "remap_dir",
     "rescue_dir",
-    "resolve_project_dir",
     "valid_project_name",
     "worktree_name",
 ]
@@ -34,39 +34,6 @@ class WtmError(Exception):
     """A fatal, user-facing error. Carries the message printed as ``wtm: ...``."""
 
 
-# --- configuration -----------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Config:
-    """Resolved configuration: the projects root and the hook scope directories."""
-
-    projects_root: Path
-    system_hooks_dir: Path
-    user_hooks_dir: Path
-    workspace_hooks_dir: Path
-
-    @classmethod
-    def load(cls) -> Config:
-        """Load configuration from the environment, applying defaults."""
-        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-        projects_root = Path(
-            os.environ.get("WTM_PROJECTS_ROOT") or Path.home() / "workspace" / "projects"
-        )
-        system_hooks_dir = Path(os.environ.get("WTM_SYSTEM_HOOKS_DIR") or "/etc/wtm/hooks")
-        user_hooks_dir = Path(os.environ.get("WTM_USER_HOOKS_DIR") or xdg_config / "wtm" / "hooks")
-        workspace_hooks_dir = Path(
-            os.environ.get("WTM_WORKSPACE_HOOKS_DIR") or projects_root / ".wtm" / "hooks"
-        )
-
-        return cls(
-            projects_root=projects_root,
-            system_hooks_dir=system_hooks_dir,
-            user_hooks_dir=user_hooks_dir,
-            workspace_hooks_dir=workspace_hooks_dir,
-        )
-
-
 # --- path helpers ------------------------------------------------------------
 
 
@@ -77,6 +44,22 @@ def abspath(value: str) -> Path:
         return path
 
     return Path(os.getcwd()) / path
+
+
+def expand_path(value: str) -> Path:
+    """Expand ``~`` and ``$VAR``/``${VAR}`` in a config path; require it absolute.
+
+    Used for workspace paths and hook-dir overrides read from config: a value
+    like ``~/work`` or ``$HOME/workspace`` is expanded, then rejected if it is
+    still relative after expansion (a loud misconfig rather than a silent
+    resolution against the cwd).
+    """
+    expanded = os.path.expanduser(os.path.expandvars(value))
+    path = Path(expanded)
+    if not path.is_absolute():
+        raise WtmError(f"config path must be absolute after expansion: {value!r} -> {expanded!r}")
+
+    return path
 
 
 # --- name / path validation --------------------------------------------------
@@ -120,11 +103,6 @@ def project_dir_for(projects_root: Path, cwd: Path) -> Path | None:
         return None
 
     return projects_root / parts[0]
-
-
-def project_dir_for_cwd(config: Config) -> Path | None:
-    """Return the project dir if the live cwd is under the projects root, else ``None``."""
-    return project_dir_for(config.projects_root, abspath(os.getcwd()))
 
 
 def current_dir() -> Path | None:
@@ -186,20 +164,6 @@ def remap_dir(cwd: Path | None, old_dir: Path, new_dir: Path) -> Path | None:
     return new_dir / cwd.relative_to(old_real)
 
 
-def resolve_project_dir(config: Config, project: str | None) -> Path:
-    """Resolve a project dir from an explicit name or the current directory."""
-    if project:
-        valid_project_name(project)
-
-        return config.projects_root / project
-
-    project_dir = project_dir_for_cwd(config)
-    if project_dir is None:
-        raise WtmError(f"no PROJECT given and cwd is not under {config.projects_root}")
-
-    return project_dir
-
-
 def worktree_name(path: Path, worktrees_dir: Path) -> str | None:
     """Return *path* as a POSIX name relative to *worktrees_dir*.
 
@@ -221,9 +185,14 @@ class Context:
     """The ``WTM_*`` contract derived from a worktree directory.
 
     Derived from a worktree's git common dir so the layout works regardless of
-    the projects root or a ``--dir`` override, and remains valid after the
+    the active workspace or a ``--dir`` override, and remains valid after the
     worktree directory has been removed (delete event). The bare repo lives at
     ``<project_dir>/.git``, which is the git common dir itself.
+
+    ``workspace`` / ``workspace_dir`` are the active workspace this project
+    belongs to. :func:`derive_context` leaves them empty (it is config-free);
+    config-aware callers enrich them via :meth:`with_workspace` so the pure
+    derivation never imports :mod:`wtm.config`.
     """
 
     dir: Path
@@ -232,17 +201,31 @@ class Context:
     project_dir: Path
     worktrees_dir: Path
     git_common_dir: Path
+    workspace: str = ""
+    workspace_dir: Path | None = None
+
+    def with_workspace(self, name: str, path: Path | None) -> Context:
+        """Return this context with the active workspace name/dir filled in."""
+        self.workspace = name
+        self.workspace_dir = path
+
+        return self
 
     def env(self) -> dict[str, str]:
         """Return the exported ``WTM_*`` environment contract."""
-        return {
+        env = {
             "WTM_WORKTREE_DIR": str(self.dir),
             "WTM_BRANCH": self.branch,
             "WTM_PROJECT": self.project,
             "WTM_PROJECT_DIR": str(self.project_dir),
             "WTM_WORKTREES_DIR": str(self.worktrees_dir),
             "WTM_GIT_COMMON_DIR": str(self.git_common_dir),
+            "WTM_WORKSPACE": self.workspace,
         }
+        if self.workspace_dir is not None:
+            env["WTM_WORKSPACE_DIR"] = str(self.workspace_dir)
+
+        return env
 
 
 def derive_context(directory: str | Path) -> Context:

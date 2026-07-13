@@ -13,6 +13,8 @@ __all__ = [
     "log",
     "tree_children_lines",
     "warn",
+    "worktree_flat_all_json",
+    "worktree_flat_all_lines",
     "worktree_flat_json",
     "worktree_flat_lines",
     "worktree_list_lines",
@@ -25,6 +27,9 @@ from pathlib import Path
 
 FlatRow = tuple[str, str, str, str, str]  # (project, name, path, branch, head)
 _FLAT_KEYS = ("project", "name", "path", "branch", "head")
+# The --all variant prepends the workspace.
+FlatAllRow = tuple[str, str, str, str, str, str]
+_FLAT_ALL_KEYS = ("workspace", "project", "name", "path", "branch", "head")
 
 
 def log(message: str) -> None:
@@ -92,6 +97,25 @@ def worktree_flat_json(rows: list[FlatRow]) -> str:
     ``{"project","name","path","branch","head"}``, key order preserved.
     """
     return json.dumps([dict(zip(_FLAT_KEYS, row, strict=True)) for row in rows])
+
+
+def worktree_flat_all_lines(rows: list[FlatAllRow]) -> list[str]:
+    """Render cross-workspace flat rows as tab-separated lines.
+
+    The ``project list --all --worktrees`` projection: one worktree per line,
+    fields ``workspace\\tproject\\tname\\tpath\\tbranch\\thead`` (the leading
+    workspace column is the only difference from :func:`worktree_flat_lines`).
+    """
+    return ["\t".join(row) for row in rows]
+
+
+def worktree_flat_all_json(rows: list[FlatAllRow]) -> str:
+    """Render cross-workspace flat rows as a JSON array of objects.
+
+    The ``--all --json`` counterpart, each row keyed
+    ``{"workspace","project","name","path","branch","head"}``.
+    """
+    return json.dumps([dict(zip(_FLAT_ALL_KEYS, row, strict=True)) for row in rows])
 
 
 def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:

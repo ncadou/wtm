@@ -1,13 +1,14 @@
 """wtm - git worktree manager.
 
-Manage git worktrees laid out as::
+Manage git worktrees over one or more named workspaces, each laid out as::
 
-    $WTM_PROJECTS_ROOT/<project>/
+    <workspace>/<project>/
         .git/                 bare repository
         worktrees/<name>/     worktrees
 
-wtm knows only this structure. Anything project-specific (shared data/tools
-dirs, direnv, sesh/tmux) is the concern of hooks, never of wtm itself.
+wtm knows only this structure. Workspaces are declared in config; projects are
+discovered on disk. Anything project-specific (shared data/tools dirs, direnv,
+sesh/tmux) is the concern of hooks, never of wtm itself.
 """
 
 from __future__ import annotations

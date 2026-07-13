@@ -11,18 +11,17 @@ from __future__ import annotations
 __all__ = ["app", "main"]
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import typer
 
 from wtm import git
+from wtm.config import Config, resolve_project_dir
 from wtm.core import (
-    Config,
     WtmError,
     current_dir,
     remap_dir,
     rescue_dir,
-    resolve_project_dir,
     worktree_name,
 )
 from wtm.hooks import EVENTS, Hooks, Scope
@@ -33,6 +32,8 @@ from wtm.output import (
     log,
     tree_children_lines,
     warn,
+    worktree_flat_all_json,
+    worktree_flat_all_lines,
     worktree_flat_json,
     worktree_flat_lines,
     worktree_list_lines,
@@ -46,6 +47,7 @@ from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated, WorktreeRena
 class _Services:
     """Config-bound operation objects, built once per process."""
 
+    config: Config
     project: Project
     worktree: Worktree
     migrate: Migrate
@@ -53,18 +55,21 @@ class _Services:
 
 
 _LAYOUT = """\
-Manage git worktrees laid out as:
+Manage git worktrees over one or more named workspaces (projects roots):
 
 \b
-  $WTM_PROJECTS_ROOT/<project>/
+  <workspace>/<project>/
       .git/                 bare repository
       worktrees/<name>/     worktrees
 
-wtm knows only this structure. Anything project-specific (shared data/tools
-dirs, direnv, sesh/tmux) is the concern of hooks, never of wtm itself.
+Workspaces are declared in config; projects are discovered on disk and only
+annotated. The active workspace is picked by -w/--workspace, $WTM_WORKSPACE, the
+cwd, a default_workspace, or the sole declared one. Anything project-specific
+(shared data/tools dirs, direnv, sesh/tmux) is the concern of hooks, not wtm.
 
-Worktree targeting for install/enter/leave/delete/rename/hook:
-  PROJECT NAME -> $WTM_PROJECTS_ROOT/PROJECT/worktrees/NAME
+Worktree targeting for install/enter/leave/delete/rename/hook (within the
+active workspace):
+  PROJECT NAME -> <workspace>/PROJECT/worktrees/NAME
   NAME         -> <cwd-project>/worktrees/NAME (project inferred from cwd);
                   NAME may be nested (e.g. feature/x -> worktrees/feature/x)
   DIR          -> a single arg is a path only if it starts with '/', './',
@@ -82,10 +87,20 @@ app = typer.Typer(
 
 
 @app.callback()
-def _bootstrap(ctx: typer.Context) -> None:
+def _bootstrap(
+    ctx: typer.Context,
+    workspace: str | None = typer.Option(
+        None,
+        "-w",
+        "--workspace",
+        help="Active workspace (name); overrides $WTM_WORKSPACE and cwd inference",
+        autocompletion=lambda: _complete_workspace(""),
+    ),
+) -> None:
     """Load config once and bind the operation objects onto the context."""
-    config = Config.load()
+    config = Config.load(workspace=workspace)
     ctx.obj = _Services(
+        config=config,
         project=Project(config),
         worktree=Worktree(config),
         migrate=Migrate(config),
@@ -131,6 +146,16 @@ def _labelled(
     Prefix filtering is Typer's job, so it is not repeated here.
     """
     return [(name, _render_label(candidates[name], precedence)) for name in sorted(candidates)]
+
+
+def _complete_workspace(incomplete: str) -> list[str]:
+    """Autocompletion: declared workspace names, prefix-filtered (lenient)."""
+    try:
+        names = sorted(Config.load().workspaces)
+    except Exception:
+        return []
+
+    return [name for name in names if name.startswith(incomplete)]
 
 
 def _complete_project(incomplete: str) -> list[tuple[str, str]]:
@@ -332,51 +357,80 @@ def project_list(
         help="Flatten to one worktree per line across all projects (tab-separated)",
     ),
     as_json: bool = typer.Option(False, "-j", "--json", help="Emit --worktrees rows as JSON"),
+    all_ws: bool = typer.Option(
+        False, "-a", "--all", help="Span every declared workspace (adds a workspace column)"
+    ),
 ) -> None:
-    """List all projects under the projects root.
+    """List projects in the active workspace (``--all`` spans every workspace).
 
     Default: one project name per line. ``--tree`` nests each project's
     worktrees beneath it. ``--worktrees`` instead flattens to one worktree per
     line across every project as tab-separated ``project name path branch
     head`` (branch empty when detached; head is a short sha), with ``--json``
-    for the same records as a JSON array. The listing carries only worktree
-    facts — session naming and path rules are a consumer's concern.
+    for the same records as a JSON array. ``--all`` iterates every declared
+    workspace, grouping the plain/tree output under a per-workspace header and
+    prepending a ``workspace`` column to the flat/JSON rows. The listing carries
+    only worktree facts — session naming and path rules are a consumer's concern.
     """
     if tree and worktrees:
         raise WtmError("--tree and --worktrees are mutually exclusive")
     if as_json and not worktrees:
         raise WtmError("--json requires --worktrees")
 
-    project = ctx.obj.project
-    config = project.config
+    config = ctx.obj.config
+    names = sorted(config.workspaces) if all_ws else [config.active_workspace.name]
 
     if worktrees:
-        rows = _flat_worktree_rows(ctx.obj.worktree, config, project.list())
+        _list_worktrees(config, names, with_workspace=all_ws, as_json=as_json)
+
+        return
+
+    for ws_name in names:
+        wcfg = replace(config, active=ws_name)
+        if all_ws:
+            print(f"{ws_name}:")
+        for name in Project(wcfg).list():
+            print(f"  {name}" if all_ws else name)
+            if tree:
+                _print_tree_children(wcfg, name, indent="  " if all_ws else "")
+
+
+def _print_tree_children(config: Config, name: str, *, indent: str) -> None:
+    """Print a project's worktree leaves (tree view), or an error marker."""
+    try:
+        children = _worktree_names(config, name, strict=True)
+    except git.GitError:
+        print(f"{indent}└── <error reading worktrees>")
+
+        return
+    for line in tree_children_lines(children):
+        print(f"{indent}{line}")
+
+
+def _list_worktrees(
+    config: Config, names: list[str], *, with_workspace: bool, as_json: bool
+) -> None:
+    """Emit flat/JSON worktree rows for *names* (optionally workspace-prefixed)."""
+    if with_workspace:
+        rows6: list[tuple[str, str, str, str, str, str]] = []
+        for ws_name in names:
+            wcfg = replace(config, active=ws_name)
+            for row in _flat_worktree_rows(Worktree(wcfg), wcfg, Project(wcfg).list()):
+                rows6.append((ws_name, *row))
         if as_json:
-            print(worktree_flat_json(rows))
+            print(worktree_flat_all_json(rows6))
         else:
-            for line in worktree_flat_lines(rows):
+            for line in worktree_flat_all_lines(rows6):
                 print(line)
 
         return
 
-    if not tree:
-        for name in project.list():
-            print(name)
-
-        return
-
-    # Tree view: a project name per block, its worktree names as child leaves.
-    # _worktree_names(strict=True) re-raises on a failed git query, letting us
-    # tell a genuinely empty project apart from a broken one.
-    for name in project.list():
-        print(name)
-        try:
-            children = _worktree_names(config, name, strict=True)
-        except git.GitError:
-            print("└── <error reading worktrees>")
-            continue
-        for line in tree_children_lines(children):
+    wcfg = replace(config, active=names[0])
+    rows = _flat_worktree_rows(Worktree(wcfg), wcfg, Project(wcfg).list())
+    if as_json:
+        print(worktree_flat_json(rows))
+    else:
+        for line in worktree_flat_lines(rows):
             print(line)
 
 
@@ -466,6 +520,13 @@ def create(
     branch: str | None = typer.Option(
         None, "-b", "--branch", help="Branch name", autocompletion=_complete_branch
     ),
+    base: str | None = typer.Option(
+        None,
+        "--base",
+        "--off",
+        help="Base ref a new branch forks from (overrides configured base_branch)",
+        autocompletion=_complete_branch,
+    ),
     destdir: str | None = typer.Option(None, "-d", "--dir", help="Destination dir"),
     do_cd: bool = typer.Option(False, "-c", "--cd", help="cd into the new worktree"),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks too"),
@@ -475,6 +536,7 @@ def create(
     result = ctx.obj.worktree.create(
         args or [],
         branch=branch,
+        base=base,
         destdir=destdir,
         do_install=do_install,
         do_enter=do_cd,
@@ -634,7 +696,9 @@ def _render_hook_list(grouped: dict[str, list], *, types: bool) -> list[str]:
     lines: list[str] = []
     for event, listings in grouped.items():
         if types:
-            count = sum((1 if lst.file else 0) + len(lst.entries) for lst in listings)
+            count = sum(
+                (1 if lst.file else 0) + len(lst.entries) + len(lst.inline) for lst in listings
+            )
             scopes = ",".join(lst.scope.value for lst in listings) or "-"
             lines.append(f"{event}: {count} hook(s) [{scopes}]")
             continue
@@ -647,6 +711,8 @@ def _render_hook_list(grouped: dict[str, list], *, types: bool) -> list[str]:
                 lines.append(f"    {lst.file}")
             for entry in lst.entries:
                 lines.append(f"    {entry}")
+            for command in lst.inline:
+                lines.append(f"    (config) {command}")
 
     return lines
 
@@ -669,6 +735,13 @@ def enter(
         help="Branch for --create (default: NAME)",
         autocompletion=_complete_branch,
     ),
+    base: str | None = typer.Option(
+        None,
+        "--base",
+        "--off",
+        help="Base ref a new branch forks from (with --create)",
+        autocompletion=_complete_branch,
+    ),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks first"),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
@@ -677,6 +750,8 @@ def enter(
     if not create:
         if branch is not None:
             raise WtmError("-b/--branch requires --create")
+        if base is not None:
+            raise WtmError("--base/--off requires --create")
         emit_cd(worktree.enter(args or [], do_install=do_install, strict=strict))
         return
 
@@ -690,6 +765,7 @@ def enter(
     result = worktree.create(
         args or [],
         branch=branch,
+        base=base,
         destdir=None,
         do_install=do_install,
         do_enter=True,
@@ -1031,6 +1107,97 @@ def _describe_result(result: MigrateResult) -> None:
         warn(f"worktree '{wt_name}' skipped: {reason}")
     for wt_name, reason in result.worktrees_failed:
         warn(f"worktree '{wt_name}' failed: {reason}")
+
+
+# --- workspace & config surface ----------------------------------------------
+
+
+workspace_app = typer.Typer(
+    help="Workspace-level operations (list, resolve).",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(workspace_app, name="workspace")
+
+
+@workspace_app.command(name="list")
+def workspace_list(ctx: typer.Context) -> None:
+    """List declared workspaces (name, path, active marker, description)."""
+    config = ctx.obj.config
+    active = config.active
+    for name, ws in sorted(config.workspaces.items()):
+        marker = "*" if name == active else " "
+        exists = "" if ws.path.is_dir() else "  (missing)"
+        desc = f"  {ws.description}" if ws.description else ""
+        print(f"{marker} {name}\t{ws.path}{exists}{desc}")
+
+
+@workspace_app.command(name="resolve")
+def workspace_resolve(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(
+        None,
+        help="Workspace (default: the active workspace)",
+        autocompletion=_complete_workspace,
+    ),
+    emit_env: bool = typer.Option(
+        False, "-e", "--env", help="Emit WTM_WORKSPACE / WTM_WORKSPACE_DIR for eval"
+    ),
+) -> None:
+    """Print a workspace's path (--env: emit the workspace WTM_* exports)."""
+    config = ctx.obj.config
+    if name is not None:
+        if name not in config.workspaces:
+            raise WtmError(f"unknown workspace: '{name}'")
+        ws = config.workspaces[name]
+    else:
+        ws = config.active_workspace
+    if emit_env:
+        print(emit_env_line("WTM_WORKSPACE", ws.name))
+        print(emit_env_line("WTM_WORKSPACE_DIR", str(ws.path)))
+    else:
+        print(ws.path)
+
+
+config_app = typer.Typer(
+    help="Inspect the effective wtm configuration (read-only).",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command(name="show")
+def config_show(
+    ctx: typer.Context,
+    sources: bool = typer.Option(
+        False, "--sources", help="Annotate where each workspace was declared"
+    ),
+) -> None:
+    """Show the effective merged config (workspaces, defaults, annotations).
+
+    A read-only view of the resolved configuration for debugging the layered
+    merge. ``--sources`` marks the scope each workspace was declared in and
+    flags inert annotations (projects with no directory on disk).
+    """
+    config = ctx.obj.config
+    print(f"active workspace: {config.active or '(none)'}")
+    if config.default_base_branch:
+        print(f"default base_branch: {config.default_base_branch}")
+
+    print("workspaces:")
+    for name, ws in sorted(config.workspaces.items()):
+        origin = f"  [{ws.scope.value}]" if sources else ""
+        print(f"  {name}: {ws.path}{origin}")
+        if ws.base_branch:
+            print(f"    base_branch: {ws.base_branch}")
+        for pname, ann in sorted(ws.projects.items()):
+            inert = ""
+            if sources and not (ws.path / pname / ".git").is_dir():
+                inert = "  (no such project on disk)"
+            bits = [b for b in (ann.description, ann.base_branch) if b]
+            detail = f" ({', '.join(bits)})" if bits else ""
+            print(f"    project {pname}{detail}{inert}")
 
 
 def main() -> None:

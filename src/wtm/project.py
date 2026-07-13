@@ -12,7 +12,8 @@ __all__ = ["Project"]
 from pathlib import Path
 
 from wtm import git
-from wtm.core import Config, WtmError, resolve_project_dir, valid_project_name
+from wtm.config import Config, resolve_project_dir
+from wtm.core import WtmError, valid_project_name
 
 
 class Project:
@@ -76,16 +77,20 @@ class Project:
 
         Every key is derived by path math from the resolved project dir, so no
         git query is needed: there is no ``WTM_WORKTREE_DIR`` / ``WTM_BRANCH``
-        (a project has no single worktree or branch).
+        (a project has no single worktree or branch). The active workspace
+        (name + dir) is folded in; the name is empty when the project is not
+        under a declared workspace.
         """
         project_dir = resolve_project_dir(self.config, project)
+        ws = self.config.workspace_of(project_dir)
 
         return {
             "WTM_PROJECT": project_dir.name,
             "WTM_PROJECT_DIR": str(project_dir),
             "WTM_WORKTREES_DIR": str(project_dir / "worktrees"),
             "WTM_GIT_COMMON_DIR": str(project_dir / ".git"),
-            "WTM_PROJECTS_ROOT": str(self.config.projects_root),
+            "WTM_WORKSPACE": ws.name if ws is not None else "",
+            "WTM_WORKSPACE_DIR": str(ws.path if ws is not None else project_dir.parent),
         }
 
 

@@ -23,14 +23,13 @@ from enum import Enum
 from pathlib import Path
 
 from wtm import git
+from wtm.config import Config, resolve_project_dir
 from wtm.core import (
-    Config,
     Context,
     WtmError,
     abspath,
     derive_context,
     reject_traversal,
-    resolve_project_dir,
 )
 from wtm.hooks import run_hooks
 from wtm.target import TargetMode, looks_like_path, resolve_target, split_project_name
@@ -96,6 +95,7 @@ class Worktree:
         args: list[str],
         *,
         branch: str | None,
+        base: str | None,
         destdir: str | None,
         do_install: bool,
         do_enter: bool,
@@ -106,6 +106,9 @@ class Worktree:
         Fires ``pre-create`` before any filesystem mutation, then (post-move)
         the ``post-create`` event, then ``install`` (when *do_install*), then
         ``enter`` (when *do_enter*, i.e. the caller cds into the new worktree).
+
+        A brand-new branch forks from *base* if given (``--base/--off``), else
+        the project's configured base branch, else ``origin/HEAD``/``HEAD``.
         """
         if not args:
             raise WtmError("usage: wtm create [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]")
@@ -119,6 +122,7 @@ class Worktree:
             raise WtmError(f"project git dir not found: {git_dir}")
 
         branch = branch or name
+        configured_base = self._configured_base(project_dir)
         dest = abspath(destdir) if destdir else project_dir / "worktrees" / name
         if dest.exists():
             raise WtmError(f"destination already exists: {dest}")
@@ -139,7 +143,7 @@ class Worktree:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Branch resolution: local exists -> use; origin has it -> track; else create.
-        base: str | None = None
+        resolved_base: str | None = None
         if git.ref_exists(git_dir, f"refs/heads/{branch}"):
             git.add_worktree(git_dir, dest, commitish=branch)
             strategy = BranchStrategy.EXISTING_LOCAL
@@ -147,17 +151,26 @@ class Worktree:
             git.add_worktree(git_dir, dest, new_branch=branch, track=f"origin/{branch}")
             strategy = BranchStrategy.TRACKING
         else:
-            if git.ref_exists(git_dir, "refs/remotes/origin/HEAD"):
-                base = "origin/HEAD"
+            base_ref = base or configured_base
+            if base_ref is not None:
+                resolved_base = _resolve_base_ref(git_dir, base_ref)
+            elif git.ref_exists(git_dir, "refs/remotes/origin/HEAD"):
+                resolved_base = "origin/HEAD"
             else:
-                base = "HEAD"
-            if git.commit_exists(git_dir, base):
-                git.add_worktree(git_dir, dest, new_branch=branch, commitish=base)
+                resolved_base = "HEAD"
+            if git.commit_exists(git_dir, resolved_base):
+                git.add_worktree(git_dir, dest, new_branch=branch, commitish=resolved_base)
                 strategy = BranchStrategy.NEW_BRANCH
+            elif (base or configured_base) and git.commit_exists(git_dir, "HEAD"):
+                # A populated repo whose explicitly requested base does not
+                # resolve is a loud misconfig, not a silent orphan.
+                raise WtmError(f"base ref does not exist: {base_ref}")
             else:
+                # No commits at all: bootstrap on an orphan branch regardless of
+                # any configured base (there is nothing to fork from yet).
                 git.add_worktree(git_dir, dest, new_branch=branch, orphan=True)
                 strategy = BranchStrategy.ORPHAN
-                base = None
+                resolved_base = None
 
         context = derive_context(dest)
         run_hooks("post-create", context, self.config, strict=strict)
@@ -166,7 +179,17 @@ class Worktree:
         if do_enter:
             run_hooks("enter", context, self.config, strict=strict)
 
-        return WorktreeCreated(context=context, strategy=strategy, branch=branch, base=base)
+        return WorktreeCreated(
+            context=context, strategy=strategy, branch=branch, base=resolved_base
+        )
+
+    def _configured_base(self, project_dir: Path) -> str | None:
+        """The project's configured base branch, if any (via the scope chain)."""
+        ws = self.config.workspace_of(project_dir)
+        if ws is None:
+            return None
+
+        return self.config.base_branch_for(ws, project_dir.name)
 
     def install(self, args: list[str], *, strict: bool) -> None:
         """Run install hooks for a worktree."""
@@ -389,16 +412,36 @@ class Worktree:
         """Return the ``WTM_*`` contract for a worktree.
 
         Inspects git, so the worktree must already exist (unlike
-        :meth:`resolve_path`). ``WTM_PROJECTS_ROOT`` is added from config so the
-        emitted contract matches what hooks receive.
+        :meth:`resolve_path`). The active workspace (name + dir) is folded in so
+        the emitted contract matches what hooks receive.
         """
-        env = derive_context(self.resolve_path(args)).env()
-        env["WTM_PROJECTS_ROOT"] = str(self.config.projects_root)
+        context = derive_context(self.resolve_path(args))
+        ws = self.config.workspace_of(context.project_dir)
+        context.with_workspace(
+            ws.name if ws is not None else "",
+            ws.path if ws is not None else context.project_dir.parent,
+        )
 
-        return env
+        return context.env()
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _resolve_base_ref(git_dir: Path, base: str) -> str:
+    """Resolve a configured/requested base branch to a concrete ref.
+
+    Prefers ``origin/<base>`` (the tracked upstream), then a local
+    ``refs/heads/<base>``; otherwise returns *base* unchanged so a bare commit
+    or tag still works and an unresolvable value surfaces as a loud error at the
+    ``commit_exists`` gate.
+    """
+    if git.ref_exists(git_dir, f"refs/remotes/origin/{base}"):
+        return f"origin/{base}"
+    if git.ref_exists(git_dir, f"refs/heads/{base}"):
+        return base
+
+    return base
 
 
 def _prune_empty_parents(worktree: Path, worktrees_dir: Path) -> None:

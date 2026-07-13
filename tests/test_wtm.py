@@ -40,16 +40,53 @@ class _Result:
     stderr: str
 
 
+def _write_config(root: Path, workspace_hooks_dir: Path | None = None) -> Path:
+    """Write a minimal user config declaring a sole workspace at *root*.
+
+    With no built-in default workspace, tests declare one explicitly (name
+    ``ws``, path = the throwaway root). Being the sole workspace it is selected
+    automatically, so commands run from anywhere resolve it without a flag.
+    *workspace_hooks_dir* sets the workspace-scope builtin hooks dir (the
+    config-native replacement for the old ``WTM_WORKSPACE_HOOKS_DIR``).
+    """
+    config_path = root / "_wtm_config.toml"
+    body = f'[workspaces.ws]\npath = "{root}"\n'
+    if workspace_hooks_dir is not None:
+        body += f'[workspaces.ws.hooks]\ndir = "{workspace_hooks_dir}"\n'
+    config_path.write_text(body)
+
+    return config_path
+
+
+def _config_env(root: Path, workspace_hooks_dir: Path | None = None) -> dict[str, str]:
+    """Env deltas pointing wtm at the sole-workspace config for *root*."""
+    return {
+        "WTM_CONFIG": str(_write_config(root, workspace_hooks_dir)),
+        "WTM_NO_SYSTEM": "1",
+        "WTM_WORKSPACE": "ws",
+    }
+
+
+def _use_config(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Point an in-test ``Config.load()`` at the sole-workspace config for *root*."""
+    root.mkdir(parents=True, exist_ok=True)
+    for key, value in _config_env(root).items():
+        monkeypatch.setenv(key, value)
+
+
 def _isolated_env(
     root: Path,
     hooks_dir: Path | None,
     system_hooks_dir: Path | None,
     cd_file: Path | None,
     extra_env: dict[str, str] | None,
+    workspace_hooks_dir: Path | None = None,
 ) -> dict[str, str]:
     """Build the WTM_*/GIT_* environment deltas for one invocation."""
+    root.mkdir(parents=True, exist_ok=True)
     env = {
-        "WTM_PROJECTS_ROOT": str(root),
+        "WTM_CONFIG": str(_write_config(root, workspace_hooks_dir)),
+        "WTM_NO_SYSTEM": "1",
         "WTM_USER_HOOKS_DIR": str(hooks_dir if hooks_dir is not None else root / "_no_user_hooks"),
         "WTM_SYSTEM_HOOKS_DIR": str(
             system_hooks_dir if system_hooks_dir is not None else root / "_no_system_hooks"
@@ -62,6 +99,8 @@ def _isolated_env(
         "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
         "GIT_CONFIG_SYSTEM": "/dev/null",
     }
+    # A stale WTM_WORKSPACE from the host would shadow the sole-workspace rule.
+    env["WTM_WORKSPACE"] = "ws"
     if cd_file is not None:
         env["WTM_CD_FILE"] = str(cd_file)
     if extra_env:
@@ -78,6 +117,7 @@ def run(
     system_hooks_dir: Path | None = None,
     cd_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    workspace_hooks_dir: Path | None = None,
 ) -> _Result:
     """Invoke wtm in-process via :func:`wtm.cli.main`, isolated from the host.
 
@@ -86,7 +126,9 @@ def run(
     handler, and usage errors match a real invocation -- then restores the
     process state. Use :func:`run_proc` when the command destroys *cwd*.
     """
-    env_delta = _isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env)
+    env_delta = _isolated_env(
+        root, hooks_dir, system_hooks_dir, cd_file, extra_env, workspace_hooks_dir
+    )
 
     prev_environ = dict(os.environ)
     prev_argv = sys.argv
@@ -119,6 +161,7 @@ def run_proc(
     system_hooks_dir: Path | None = None,
     cd_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    workspace_hooks_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Invoke wtm as a real subprocess with an isolated environment.
 
@@ -127,7 +170,9 @@ def run_proc(
     cwd off the test runner.
     """
     env = dict(os.environ)
-    env.update(_isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env))
+    env.update(
+        _isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env, workspace_hooks_dir)
+    )
 
     return subprocess.run(
         WTM + list(args),
@@ -384,9 +429,9 @@ def test_worktree_list_strict_raises_on_broken_project(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (root / "broken" / ".git").mkdir(parents=True)
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     from wtm import git
-    from wtm.core import Config
+    from wtm.config import Config
     from wtm.worktree import Worktree
 
     worktree = Worktree(Config.load())
@@ -441,7 +486,7 @@ def _complete(root: Path, *, words: str, cword: str, cwd: Path | None = None) ->
     wtm_bin = Path(sys.executable).parent / "wtm"
     env = {
         **os.environ,
-        "WTM_PROJECTS_ROOT": str(root),
+        **_config_env(root),
         "_WTM_COMPLETE": "complete_bash",
         "COMP_WORDS": words,
         "COMP_CWORD": cword,
@@ -463,7 +508,7 @@ def test_complete_project_names_and_label(root: Path, monkeypatch: pytest.Monkey
     _seed_repo(root, "alto")
     _seed_repo(root, "beta")
     (root / "stray").mkdir()  # no .git/, must be excluded
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     from wtm.cli import _complete_project
 
     # The callback returns (value, label) tuples for every project; Typer applies
@@ -485,7 +530,7 @@ def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.Mo
     _seed_repo(root, "alpha")
     _seed_repo(root, "alto")
     _seed_repo(root, "beta")
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     from wtm.cli import _complete_project_arg
 
     class _Ctx:  # minimal stand-in: only .params is read
@@ -586,7 +631,7 @@ def test_target_labels_project_and_worktree(root: Path, monkeypatch: pytest.Monk
     repo = _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
     run("create", "alpha", "feat", root=root)
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     monkeypatch.chdir(repo)  # inside 'alpha' -> its worktrees join the projects
     from wtm.cli import _complete_target
 
@@ -605,7 +650,7 @@ def test_target_label_collision_worktree_wins(root: Path, monkeypatch: pytest.Mo
     repo = _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
     run("create", "alpha", "beta", root=root)  # worktree named like project 'beta'
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     monkeypatch.chdir(repo)
     from wtm.cli import _complete_target
 
@@ -617,7 +662,7 @@ def test_target_label_collision_worktree_wins(root: Path, monkeypatch: pytest.Mo
 def test_hook_target_labels_event(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     monkeypatch.chdir(repo)
     from wtm.cli import _complete_hook_target
 
@@ -632,7 +677,7 @@ def test_hook_target_label_collision_event_wins(
 ) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "install", root=root)  # worktree named like an event
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     monkeypatch.chdir(repo)
     from wtm.cli import _complete_hook_target
 
@@ -650,7 +695,7 @@ def _complete_zsh(root: Path, *, args: str, cwd: Path | None = None) -> str:
     wtm_bin = Path(sys.executable).parent / "wtm"
     env = {
         **os.environ,
-        "WTM_PROJECTS_ROOT": str(root),
+        **_config_env(root),
         "_WTM_COMPLETE": "complete_zsh",
         "_TYPER_COMPLETE_ARGS": args,
     }
@@ -684,7 +729,7 @@ def test_complete_branch_unit(root: Path, monkeypatch: pytest.MonkeyPatch) -> No
     _seed_repo(root, "alpha")  # local head: main
     run("create", "alpha", "feat", root=root)  # local head: feat
     run("create", "alpha", "fix", root=root)  # local head: fix
-    monkeypatch.setenv("WTM_PROJECTS_ROOT", str(root))
+    _use_config(monkeypatch, root)
     from wtm.cli import _complete_branch
 
     class _Ctx:  # minimal stand-in: .args (option-value completion) + .params
@@ -1001,7 +1046,8 @@ def test_project_resolve_env_emits_project_subset(root: Path) -> None:
     assert any(line.startswith("export WTM_PROJECT_DIR='") for line in lines)
     assert any(line.startswith("export WTM_WORKTREES_DIR='") for line in lines)
     assert any(line.startswith("export WTM_GIT_COMMON_DIR='") for line in lines)
-    assert any(line.startswith("export WTM_PROJECTS_ROOT='") for line in lines)
+    assert any(line.startswith("export WTM_WORKSPACE='ws'") for line in lines)
+    assert any(line.startswith("export WTM_WORKSPACE_DIR='") for line in lines)
     # A project has no single worktree/branch: those keys must be absent.
     assert not any("WTM_WORKTREE_DIR" in line for line in lines)
     assert not any("WTM_BRANCH" in line for line in lines)
@@ -1464,7 +1510,7 @@ def test_rename_event_setup_scope_order(root: Path, tmp_path: Path) -> None:
         root=root,
         hooks_dir=hooks,
         system_hooks_dir=system,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["system", "user", "workspace", "project", "worktree"]
@@ -1512,16 +1558,16 @@ def test_create_hook_fires_with_contract(root: Path, tmp_path: Path) -> None:
     _write_hook(
         hooks / "wtm-post-create",
         'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$1" "$WTM_PROJECT" "$WTM_BRANCH"'
-        f' "$WTM_PROJECTS_ROOT" > "{out}"\n',
+        f' "$WTM_WORKSPACE_DIR" > "{out}"\n',
     )
     res = run("hook", "run", "alpha", "feat", "post-create", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
-    event, dir_, project, branch, projects_root = out.read_text().strip().split("|")
+    event, dir_, project, branch, workspace_dir = out.read_text().strip().split("|")
     assert event == "post-create"
     assert dir_ == str(root / "alpha" / "worktrees" / "feat")
     assert project == "alpha"
     assert branch == "feat"
-    assert projects_root == str(root)
+    assert workspace_dir == str(root)
 
 
 def test_hook_ordering_file_before_dir(root: Path, tmp_path: Path) -> None:
@@ -1600,7 +1646,7 @@ def test_delete_hook_teardown_order(root: Path, tmp_path: Path) -> None:
         root=root,
         hooks_dir=hooks,
         system_hooks_dir=system,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["worktree", "project", "workspace", "user", "system"]
@@ -1629,7 +1675,7 @@ def test_setup_hook_order(root: Path, tmp_path: Path) -> None:
         root=root,
         hooks_dir=hooks,
         system_hooks_dir=system,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["system", "user", "workspace", "project", "worktree"]
@@ -1786,7 +1832,7 @@ def test_post_delete_teardown_scope_order(root: Path, tmp_path: Path) -> None:
         root=root,
         hooks_dir=hooks,
         system_hooks_dir=system,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["project", "workspace", "user", "system"]
@@ -2041,7 +2087,7 @@ def test_hook_install_workspace_scope_needs_no_target(root: Path, tmp_path: Path
         "--scope",
         "workspace",
         root=root,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert (workspace / "wtm-post-create").is_file()
@@ -2071,7 +2117,7 @@ def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
         "--scope",
         "workspace",
         root=root,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "post-create"
@@ -2081,7 +2127,7 @@ def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
         "alpha",
         "feat",
         root=root,
-        extra_env={"WTM_WORKSPACE_HOOKS_DIR": str(workspace)},
+        workspace_hooks_dir=workspace,
     )
     assert "workspace:" in listed.stdout
 
@@ -2753,3 +2799,272 @@ def test_migrate_all_worktrees_dry_run_previews_each(root: Path) -> None:
     assert not (root / "proj").exists()  # no changes
     assert "worktree 'src'" in res.stderr
     assert "worktree 'wt-bar'" in res.stderr
+
+
+# --- workspaces & config (integration) ---------------------------------------
+
+
+def _multi_workspace_config(base: Path, names: list[str]) -> tuple[Path, list[Path]]:
+    """Write a config declaring several workspaces; return (config_path, paths)."""
+    roots = []
+    body = ""
+    for name in names:
+        ws = base / name
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "_gitconfig").write_text("[init]\n\tdefaultBranch = main\n")
+        roots.append(ws)
+        body += f'[workspaces.{name}]\npath = "{ws}"\n'
+    config = base / "multi.toml"
+    config.write_text(body)
+
+    return config, roots
+
+
+def _run_multi(*args: str, config: Path, cwd: Path, workspace: str | None = None):
+    """Run wtm against a hand-written multi-workspace config."""
+    env = {
+        "WTM_CONFIG": str(config),
+        "WTM_NO_SYSTEM": "1",
+        "WTM_USER_HOOKS_DIR": str(config.parent / "_no_user_hooks"),
+        "WTM_SYSTEM_HOOKS_DIR": str(config.parent / "_no_system_hooks"),
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": str(cwd / "_gitconfig"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    if workspace is not None:
+        env["WTM_WORKSPACE"] = workspace
+    else:
+        env.pop("WTM_WORKSPACE", None)
+    prev = dict(os.environ)
+    prev_argv = sys.argv
+    prev_cwd = os.getcwd()
+    out, err = io.StringIO(), io.StringIO()
+    # Purge any inherited WTM_WORKSPACE so cwd inference is exercised.
+    os.environ.pop("WTM_WORKSPACE", None)
+    try:
+        os.environ.update(env)
+        os.chdir(cwd)
+        sys.argv = ["wtm", *args]
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    finally:
+        os.chdir(prev_cwd)
+        sys.argv = prev_argv
+        os.environ.clear()
+        os.environ.update(prev)
+
+    return _Result(returncode=code, stdout=out.getvalue(), stderr=err.getvalue())
+
+
+def test_workspace_list_marks_active(tmp_path: Path) -> None:
+    config, _ = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    res = _run_multi("workspace", "list", config=config, cwd=tmp_path, workspace="beta")
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("* beta") for line in lines)
+    assert any(line.startswith("  alpha") for line in lines)
+
+
+def test_workspace_resolve_default_and_named(tmp_path: Path) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    res = _run_multi(
+        "workspace", "resolve", "beta", config=config, cwd=tmp_path, workspace="alpha"
+    )
+    assert res.stdout.strip() == str(roots[1])
+    # No arg -> the active (selected) workspace.
+    res = _run_multi("workspace", "resolve", config=config, cwd=tmp_path, workspace="alpha")
+    assert res.stdout.strip() == str(roots[0])
+
+
+def test_workspace_selection_by_cwd(tmp_path: Path) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    # cwd inside beta's root -> beta is active without a flag/env.
+    res = _run_multi("config", "show", config=config, cwd=roots[1])
+    assert "active workspace: beta" in res.stdout
+
+
+def test_no_active_workspace_errors(tmp_path: Path) -> None:
+    config, _ = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    res = _run_multi("project", "list", config=config, cwd=tmp_path)  # ambiguous
+    assert res.returncode == 1
+    assert "no active workspace" in res.stderr
+
+
+def test_config_show_sources_flags_inert_annotation(tmp_path: Path) -> None:
+    ws = tmp_path / "alpha"
+    ws.mkdir()
+    config = tmp_path / "c.toml"
+    config.write_text(
+        f'[workspaces.alpha]\npath = "{ws}"\n'
+        '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
+    )
+    res = _run_multi("config", "show", "--sources", config=config, cwd=tmp_path, workspace="alpha")
+    assert res.returncode == 0, res.stderr
+    assert "[user]" in res.stdout
+    assert "no such project on disk" in res.stdout
+
+
+def test_project_list_all_spans_workspaces(root: Path, tmp_path: Path) -> None:
+    # Two workspaces, each with one project; --all --worktrees prepends the ws.
+    config, roots = _multi_workspace_config(tmp_path, ["A", "B"])
+    for name, ws in zip(["A", "B"], roots, strict=True):
+        _run_multi("project", "new", f"proj{name}", config=config, cwd=ws, workspace=name)
+        _run_multi("create", f"proj{name}", "feat", config=config, cwd=ws, workspace=name)
+    res = _run_multi(
+        "project", "list", "-a", "--worktrees", config=config, cwd=tmp_path, workspace="A"
+    )
+    rows = [line.split("\t") for line in res.stdout.splitlines()]
+    workspaces = {row[0] for row in rows}
+    assert workspaces == {"A", "B"}
+    assert all(len(row) == 6 for row in rows)  # workspace column prepended
+
+
+# --- inline config hooks (integration) ---------------------------------------
+
+
+def _config_with_inline_hook(root: Path, event: str, command: str) -> Path:
+    """Write a config declaring the 'ws' workspace plus a workspace-scope hook."""
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n[workspaces.ws.hooks.on]\n{event} = "{command}"\n'
+    )
+
+    return config
+
+
+def test_inline_hook_fires_after_builtin(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    out = tmp_path / "log"
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-post-create", f'echo builtin >> "{out}"\n')
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n'
+        f'[workspaces.ws.hooks]\ndir = "{hooks}"\n'
+        f'[workspaces.ws.hooks.on]\npost-create = "echo inline >> {out}"\n'
+    )
+    res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
+    assert res.returncode == 0, res.stderr
+    # Builtin file runs before the inline config command within the scope.
+    assert out.read_text().splitlines() == ["builtin", "inline"]
+
+
+def test_inline_hook_gets_contract(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    out = tmp_path / "contract"
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n'
+        "[workspaces.ws.hooks.on]\n"
+        f'post-create = "printf %s:%s:%s $WTM_EVENT $WTM_PROJECT $WTM_WORKSPACE > {out}"\n'
+    )
+    res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
+    assert res.returncode == 0, res.stderr
+    assert out.read_text() == "post-create:alpha:ws"
+
+
+def test_inline_hook_strict_veto_aborts_create(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n[workspaces.ws.hooks.on]\npre-create = "exit 3"\n'
+    )
+    res = run(
+        "create", "alpha", "feat", "--strict", root=root, extra_env={"WTM_CONFIG": str(config)}
+    )
+    assert res.returncode == 1
+    assert not (root / "alpha" / "worktrees" / "feat").exists()
+
+
+def test_hook_list_shows_inline(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    config = _config_with_inline_hook(root, "enter", "true")
+    res = run("hook", "list", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
+    assert res.returncode == 0, res.stderr
+    assert "(config) true" in res.stdout
+
+
+# --- configured base branch (integration) ------------------------------------
+
+
+def test_configured_base_branch_used_for_new_branch(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")  # has a 'main' branch with a commit
+    # Make a 'develop' branch to fork from.
+    git_dir = root / "alpha" / ".git"
+    wt = root / "alpha" / "worktrees" / "seed"
+    subprocess.run(
+        ["git", "-C", str(git_dir), "worktree", "add", "-q", str(wt), "-b", "develop"], check=True
+    )
+    subprocess.run(["git", "-C", str(git_dir), "worktree", "remove", str(wt)], check=True)
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n'
+        '[workspaces.ws.projects.alpha]\nbase_branch = "develop"\n'
+    )
+    res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
+    assert res.returncode == 0, res.stderr
+    assert "off 'develop'" in res.stderr
+
+
+def test_base_flag_overrides_configured(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n[workspaces.ws.projects.alpha]\nbase_branch = "nope"\n'
+    )
+    res = run(
+        "create",
+        "alpha",
+        "feat",
+        "--base",
+        "main",
+        root=root,
+        extra_env={"WTM_CONFIG": str(config)},
+    )
+    assert res.returncode == 0, res.stderr
+    # A configured/requested base prefers the tracked upstream (origin/main).
+    assert "off 'origin/main'" in res.stderr
+
+
+def test_unresolvable_configured_base_errors(root: Path) -> None:
+    _seed_repo(root, "alpha")  # populated repo
+    config = root / "_custom.toml"
+    config.write_text(
+        f'[workspaces.ws]\npath = "{root}"\n'
+        '[workspaces.ws.projects.alpha]\nbase_branch = "ghost"\n'
+    )
+    res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
+    assert res.returncode == 1
+    assert "base ref does not exist" in res.stderr
+
+
+def test_base_flag_requires_create_on_enter(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("enter", "alpha", "feat", "--base", "main", root=root)
+    assert res.returncode == 1
+    assert "--base/--off requires --create" in res.stderr
+
+
+def test_no_hooks_env_disables_firing(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    _write_hook(hooks / "wtm-post-create", f'echo ran >> "{out}"\n')
+    res = run(
+        "create",
+        "alpha",
+        "feat",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_NO_HOOKS": "1"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert not out.exists()  # WTM_NO_HOOKS suppressed the builtin hook

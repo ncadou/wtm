@@ -1,7 +1,7 @@
 """Project migration for wtm: fold a plain clone into the bare-repo layout.
 
 ``wtm migrate`` takes a legacy working clone (the *source*) and folds it into
-the ``$WTM_PROJECTS_ROOT/<project>`` bare-repo + worktrees layout (the
+the ``<workspace>/<project>`` bare-repo + worktrees layout (the
 *target*), carrying over remotes, references, tags, and the live working
 checkout (modified + untracked files) recreated as a worktree.
 
@@ -30,12 +30,12 @@ from enum import Enum
 from pathlib import Path
 
 from wtm import git
+from wtm.config import Config
 from wtm.core import (
-    Config,
     WtmError,
     abspath,
     current_dir,
-    project_dir_for_cwd,
+    project_dir_for,
     reject_traversal,
     valid_project_name,
 )
@@ -75,7 +75,7 @@ class Resolution:
 
     source: Path  # the source working clone's top level (the cwd worktree)
     project: str  # the target project name
-    project_dir: Path  # $WTM_PROJECTS_ROOT/<project>
+    project_dir: Path  # <workspace>/<project>
     git_dir: Path  # <project_dir>/.git (the bare repo)
     target_exists: bool  # whether the target bare repo already exists
     branch: str  # the source's current branch ('' when detached)
@@ -159,7 +159,7 @@ class Migrate:
         is set, since migrating into it mutates a project that may already be
         in active use.
         """
-        cwd_project_dir = project_dir_for_cwd(self.config)
+        cwd_project_dir = project_dir_for(self.config.projects_root, abspath("."))
         cwd_is_repo = cwd_project_dir is None and git.is_repo(abspath("."))
 
         # --- source path ---
@@ -509,6 +509,7 @@ class Migrate:
                 created = self.worktree.create(
                     [res.project, spec.name],
                     branch=spec.branch,
+                    base=None,
                     destdir=None,
                     do_install=False,
                     do_enter=False,
