@@ -5,14 +5,20 @@ projects root ``<path>/<project>/.git`` + ``worktrees/``). Workspaces are
 *declared* in config; individual projects are *discovered* on disk and only
 *annotated* by config.
 
-Config is read (never written) from up to five scopes, mirroring the hook
-scopes, most-general to most-specific::
+Config is read from up to five scopes, mirroring the hook scopes, most-general
+to most-specific::
 
     system:    $WTM_SYSTEM_CONFIG or /etc/wtm/config.toml
     user:      $WTM_CONFIG or $XDG_CONFIG_HOME/wtm/config.toml
     workspace: <workspace.path>/.wtm/config.toml
     project:   <project>/.wtm/config.toml
     worktree:  <worktree>/.wtm/config.toml
+
+This module only *reads* config. The one place that writes it is
+:mod:`wtm.registry`, and it writes only the user-scope file's ``[workspaces.*]``
+registry entries and top-level ``default_workspace`` key (via the
+``wtm workspace add/set/rename/delete/default`` verbs); system/project/worktree
+config stays hand-edited.
 
 The **workspace registry** (name -> path) lives at system/user scope. Scalar
 values resolve most-specific-first (``CLI > env > worktree > project >

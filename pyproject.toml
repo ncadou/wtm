@@ -5,6 +5,7 @@ description = "Git worktree manager over multiple named workspaces (projects roo
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
+    "tomlkit>=0.13",
 ]
 
 [project.scripts]

@@ -3068,3 +3068,166 @@ def test_no_hooks_env_disables_firing(root: Path, tmp_path: Path) -> None:
     )
     assert res.returncode == 0, res.stderr
     assert not out.exists()  # WTM_NO_HOOKS suppressed the builtin hook
+
+
+# --- workspace add / set / rename / delete / default / show (CLI wiring) ------
+#
+# The run() harness rewrites WTM_CONFIG on every call, so these assert the
+# single-invocation effect by reading that file back after the call. The file
+# always starts as '[workspaces.ws] path = <root>' (the sole declared workspace).
+
+
+def _config_text(root: Path) -> str:
+    """Read back the user config the harness wrote (and the command mutated)."""
+    return (root / "_wtm_config.toml").read_text()
+
+
+def test_workspace_add_writes_entry(root: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    res = run("workspace", "add", "extra", str(other), "-d", "notes", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "registered 'extra'" in res.stderr
+    text = _config_text(root)
+    assert "[workspaces.extra]" in text
+    assert 'description = "notes"' in text
+    assert "[workspaces.ws]" in text  # existing entry preserved
+
+
+def test_workspace_add_create_makes_dir(root: Path, tmp_path: Path) -> None:
+    target = tmp_path / "fresh"
+    res = run("workspace", "add", "f", str(target), "-c", root=root)
+    assert res.returncode == 0, res.stderr
+    assert target.is_dir()
+
+
+def test_workspace_add_missing_path_warns(root: Path, tmp_path: Path) -> None:
+    res = run("workspace", "add", "f", str(tmp_path / "ghost"), root=root)
+    assert res.returncode == 0, res.stderr
+    assert "does not exist yet" in res.stderr
+
+
+def test_workspace_add_duplicate_user_name_errors(root: Path) -> None:
+    # 'ws' is already declared by the harness config -> user-scope collision.
+    res = run("workspace", "add", "ws", str(root), root=root)
+    assert res.returncode == 1
+    assert "already declared" in res.stderr
+
+
+def test_workspace_set_edits_entry(root: Path) -> None:
+    res = run("workspace", "set", "ws", "-d", "edited", root=root)
+    assert res.returncode == 0, res.stderr
+    assert 'description = "edited"' in _config_text(root)
+
+
+def test_workspace_rename_moves_key(root: Path) -> None:
+    res = run("workspace", "rename", "ws", "renamed", root=root)
+    assert res.returncode == 0, res.stderr
+    text = _config_text(root)
+    assert "[workspaces.renamed]" in text and "[workspaces.ws]" not in text
+
+
+def test_workspace_delete_unregisters(root: Path) -> None:
+    res = run("workspace", "delete", "ws", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[workspaces.ws]" not in _config_text(root)
+
+
+def test_workspace_default_set_and_show(root: Path) -> None:
+    res = run("workspace", "default", "ws", root=root)
+    assert res.returncode == 0, res.stderr
+    assert 'default_workspace = "ws"' in _config_text(root)
+
+
+def test_workspace_show_outputs_detail(root: Path) -> None:
+    res = run("workspace", "show", "ws", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "name: ws" in res.stdout
+    assert f"path: {root}" in res.stdout
+    assert "scope: user" in res.stdout
+
+
+def test_workspace_write_refused_under_no_config(root: Path) -> None:
+    # WTM_WORKSPACE="" so the ignored-config active-workspace resolution does not
+    # error before we reach the write guard.
+    res = run(
+        "workspace",
+        "add",
+        "x",
+        str(root),
+        root=root,
+        extra_env={"WTM_NO_CONFIG": "1", "WTM_WORKSPACE": ""},
+    )
+    assert res.returncode == 1
+    assert "WTM_NO_CONFIG" in res.stderr
+
+
+# --- workspace enter / leave (cd channel + lifecycle hooks) -------------------
+
+
+def test_workspace_enter_emits_cd_and_fires_hook(root: Path, tmp_path: Path) -> None:
+    workspace = tmp_path / "wshooks"
+    cd_file = tmp_path / "cd"
+    out = tmp_path / "entered"
+    _write_hook(
+        workspace / "wtm-workspace-enter",
+        f'printf "%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_WORKSPACE" "$1"'
+        f' "$WTM_WORKTREE_DIR" > "{out}"\n',
+    )
+    res = run("workspace", "enter", root=root, cd_file=cd_file, workspace_hooks_dir=workspace)
+    assert res.returncode == 0, res.stderr
+    assert cd_file.read_text().strip() == str(root)
+    event, ws, arg1, wtdir = out.read_text().strip().split("|")
+    assert event == "workspace-enter"
+    assert ws == "ws"
+    assert arg1 == str(root)
+    assert wtdir == ""  # workspace-only contract: no worktree fields
+
+
+def test_workspace_leave_from_root_lands_on_oldpwd(root: Path, tmp_path: Path) -> None:
+    workspace = tmp_path / "wshooks"
+    cd_file = tmp_path / "cd"
+    fired = tmp_path / "left"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write_hook(workspace / "wtm-workspace-leave", f'echo "$WTM_WORKSPACE" > "{fired}"\n')
+    res = run(
+        "workspace",
+        "leave",
+        root=root,
+        cwd=root,
+        cd_file=cd_file,
+        workspace_hooks_dir=workspace,
+        extra_env={"OLDPWD": str(outside)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert fired.read_text().strip() == "ws"
+    assert cd_file.read_text().strip() == str(outside)  # OLDPWD is outside the tree
+
+
+def test_workspace_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    workspace = tmp_path / "wshooks"
+    cd_file = tmp_path / "cd"
+    order = tmp_path / "order"
+    # worktree-scope 'leave' (project .git/hooks) + workspace-scope 'workspace-leave'
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-leave", f'echo "wt:$WTM_BRANCH" >> "{order}"\n'
+    )
+    _write_hook(workspace / "wtm-workspace-leave", f'echo "ws:$WTM_WORKSPACE" >> "{order}"\n')
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run(
+        "workspace",
+        "leave",
+        root=root,
+        cwd=wt,
+        cd_file=cd_file,
+        workspace_hooks_dir=workspace,
+        extra_env={"OLDPWD": "/nonexistent-oldpwd"},
+    )
+    assert res.returncode == 0, res.stderr
+    # Teardown is inside-out: worktree leave first, then workspace-leave.
+    assert order.read_text().splitlines() == ["wt:feat", "ws:ws"]
+    # OLDPWD unusable -> cascaded out of the worktree tree to the projects-root parent.
+    assert cd_file.read_text().strip() == str(root.parent)

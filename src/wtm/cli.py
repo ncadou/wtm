@@ -40,6 +40,7 @@ from wtm.output import (
 )
 from wtm.project import Project
 from wtm.target import TargetMode, TokenKind, slot_kind
+from wtm.workspace import Workspaces
 from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated, WorktreeRenamed
 
 
@@ -50,6 +51,7 @@ class _Services:
     config: Config
     project: Project
     worktree: Worktree
+    workspaces: Workspaces
     migrate: Migrate
     hooks: Hooks
 
@@ -103,6 +105,7 @@ def _bootstrap(
         config=config,
         project=Project(config),
         worktree=Worktree(config),
+        workspaces=Workspaces(config),
         migrate=Migrate(config),
         hooks=Hooks(config),
     )
@@ -1113,7 +1116,10 @@ def _describe_result(result: MigrateResult) -> None:
 
 
 workspace_app = typer.Typer(
-    help="Workspace-level operations (list, resolve).",
+    help=(
+        "Workspace-level operations (list, resolve, show, add, set, rename, "
+        "delete, default, enter, leave)."
+    ),
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -1157,6 +1163,159 @@ def workspace_resolve(
         print(emit_env_line("WTM_WORKSPACE_DIR", str(ws.path)))
     else:
         print(ws.path)
+
+
+@workspace_app.command(name="show")
+def workspace_show(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(
+        None, help="Workspace (default: the active workspace)", autocompletion=_complete_workspace
+    ),
+) -> None:
+    """Show a workspace's detail (path, description, base_branch, scope, project count)."""
+    result = ctx.obj.workspaces.show(name)
+    exists = "" if result.exists else "  (missing)"
+    print(f"name: {result.name}")
+    print(f"path: {result.path}{exists}")
+    if result.description:
+        print(f"description: {result.description}")
+    if result.base_branch:
+        print(f"base_branch: {result.base_branch}")
+    print(f"scope: {result.scope.value}")
+    print(f"projects: {result.project_count}")
+
+
+@workspace_app.command(name="add")
+def workspace_add(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Workspace name"),
+    path: str | None = typer.Argument(None, help="Projects root path (default: cwd)"),
+    description: str | None = typer.Option(
+        None, "-d", "--description", help="Workspace description"
+    ),
+    base_branch: str | None = typer.Option(
+        None, "-b", "--base-branch", help="Default fork point for new branches"
+    ),
+    create: bool = typer.Option(False, "-c", "--create", help="mkdir -p the path if absent"),
+) -> None:
+    """Register a workspace in the user config (PATH defaults to the cwd)."""
+    result = ctx.obj.workspaces.add(
+        name, path, description=description, base_branch=base_branch, create=create
+    )
+    if result.duplicate_of is not None:
+        warn(
+            f"path {result.path} is already declared as '{result.duplicate_of}'; "
+            "cwd-based resolution there will require -w"
+        )
+    if result.shadows_system:
+        warn(f"'{name}' also declared at system scope; the user entry shadows it")
+    log(f"registered '{name}' -> {result.path}")
+    if result.created:
+        log(f"created {result.resolved}")
+    elif result.missing:
+        warn(f"path does not exist yet: {result.resolved}")
+
+
+@workspace_app.command(name="set")
+def workspace_set(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Workspace name", autocompletion=_complete_workspace),
+    path: str | None = typer.Option(None, "-p", "--path", help="New path (empty rejected)"),
+    description: str | None = typer.Option(
+        None, "-d", "--description", help="Description (empty clears it)"
+    ),
+    base_branch: str | None = typer.Option(
+        None, "-b", "--base-branch", help="Base branch (empty clears it)"
+    ),
+) -> None:
+    """Edit an existing user-scope workspace entry in place (partial update)."""
+    result = ctx.obj.workspaces.set(
+        name, path=path, description=description, base_branch=base_branch
+    )
+    log(f"updated '{result.name}'")
+    if result.resolved is not None and result.missing:
+        warn(f"path does not exist yet: {result.resolved}")
+
+
+@workspace_app.command(name="rename")
+def workspace_rename(
+    ctx: typer.Context,
+    old: str = typer.Argument(..., help="Current name", autocompletion=_complete_workspace),
+    new: str = typer.Argument(..., help="New name"),
+) -> None:
+    """Rename a workspace's registry key (does not move the directory)."""
+    result = ctx.obj.workspaces.rename(old, new)
+    log(f"renamed workspace '{result.old}' -> '{result.new}'")
+    if result.fixed_default:
+        log(f"default_workspace updated to '{result.new}'")
+
+
+@workspace_app.command(name="delete")
+def workspace_delete(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Workspace name", autocompletion=_complete_workspace),
+) -> None:
+    """Unregister a workspace from the user config (never touches the projects root)."""
+    result = ctx.obj.workspaces.delete(name)
+    log(f"unregistered '{result.name}'")
+    if result.cleared_default:
+        log("cleared default_workspace (it pointed here)")
+    if result.remains_at_system:
+        warn(f"'{result.name}' is still declared at system scope; it remains resolvable")
+
+
+@workspace_app.command(name="default")
+def workspace_default(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(
+        None, help="Workspace to make default (omit to show)", autocompletion=_complete_workspace
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove the default_workspace key"),
+) -> None:
+    """Get, set, or clear the default_workspace (user config)."""
+    if clear:
+        if name is not None:
+            raise WtmError("--clear takes no NAME")
+        ctx.obj.workspaces.default_clear()
+        log("cleared default_workspace")
+
+        return
+    if name is None:
+        current = ctx.obj.workspaces.default_show()
+        print(current if current else "(none set)")
+
+        return
+    ctx.obj.workspaces.default_set(name)
+    log(f"default_workspace set to '{name}'")
+
+
+@workspace_app.command(name="enter")
+def workspace_enter(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(
+        None, help="Workspace (default: the active workspace)", autocompletion=_complete_workspace
+    ),
+    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
+) -> None:
+    """cd into a workspace's projects root, firing workspace-enter hooks."""
+    result = ctx.obj.workspaces.enter(name, strict=strict)
+    emit_cd(result.dir)
+
+
+@workspace_app.command(name="leave")
+def workspace_leave(
+    ctx: typer.Context,
+    name: str | None = typer.Argument(
+        None, help="Workspace (default: the active workspace)", autocompletion=_complete_workspace
+    ),
+    no_cd: bool = typer.Option(False, "-C", "--no-cd", help="Run hooks without cd-ing out"),
+    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
+) -> None:
+    """Fire workspace-leave hooks (cascading the worktree leave when inside one); cd out."""
+    result = ctx.obj.workspaces.leave(name, strict=strict)
+    log(f"left workspace '{result.name}'")
+    if not no_cd and result.cd_dir is not None:
+        emit_cd(result.cd_dir, fallback=False)
 
 
 config_app = typer.Typer(

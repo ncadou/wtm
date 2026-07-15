@@ -9,7 +9,9 @@ repo + `worktrees/<name>/`).
 **Workspace**:
 A named projects root, *declared* in config (path + name + description +
 hooks). Every command operates within one **active** workspace. Also the name
-of the projects-root-wide hook/config scope.
+of the projects-root-wide hook/config scope. The `wtm workspace` verbs
+`add`/`set`/`rename`/`delete`/`default` *write* these declarations (user scope
+only); `enter`/`leave` fire its lifecycle hooks (see **Workspace lifecycle**).
 _Avoid_: root (say "workspace path" or "projects root of the workspace")
 
 **Active workspace**:
@@ -62,8 +64,27 @@ commands. Both accumulate across scopes.
 **Event**:
 A lifecycle point that fires hooks. Names follow a `pre-`/`post-` convention: a
 prefix marks the side of a state mutation, a bare name is a mutation-free
-moment. The nine events are `pre-create`, `post-create`, `install`, `enter`,
-`leave`, `pre-delete`, `post-delete`, `pre-rename`, `post-rename`.
+moment. The eleven events are `pre-create`, `post-create`, `install`, `enter`,
+`leave`, `pre-delete`, `post-delete`, `pre-rename`, `post-rename`,
+`workspace-enter`, `workspace-leave`. The two `workspace-*` events are
+workspace-scoped (see **Workspace lifecycle**); the other nine are worktree
+events.
+
+**Workspace lifecycle**:
+`wtm workspace enter`/`leave` operate at workspace granularity. `enter` cds into
+the projects root and fires `workspace-enter`; `leave` fires `workspace-leave`
+and cds out. These two events fire only across the `system`/`user`/`workspace`
+scopes with a workspace-only contract (`WTM_EVENT`, `WTM_WORKSPACE`,
+`WTM_WORKSPACE_DIR`) -- there is no worktree/project/branch. `leave` cascades:
+standing inside a worktree of the target, it fires that worktree's `leave`
+first (worktree->workspace teardown order), then `workspace-leave`.
+
+**Registry write seam**:
+`wtm` reads config everywhere but writes only via `wtm.registry`, which mutates
+the *user-scope* file's `[workspaces.*]` entries and top-level
+`default_workspace` (comment-preserving `tomlkit` round-trip, atomic replace).
+The `add`/`set`/`rename`/`delete`/`default` verbs refuse system-only names and
+`WTM_NO_CONFIG`.
 
 **Scope**:
 Where a hook/config is discovered/declared, from most general to most specific:

@@ -66,6 +66,7 @@ __all__ = [
     "Scope",
     "ScopeListing",
     "run_hooks",
+    "run_workspace_hooks",
 ]
 
 import os
@@ -95,14 +96,26 @@ EVENTS = (
     "post-delete",
     "pre-rename",
     "post-rename",
+    "workspace-enter",
+    "workspace-leave",
 )
-SETUP_EVENTS = ("pre-create", "post-create", "install", "enter", "pre-rename", "post-rename")
-TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete")
+SETUP_EVENTS = (
+    "pre-create",
+    "post-create",
+    "install",
+    "enter",
+    "pre-rename",
+    "post-rename",
+    "workspace-enter",
+)
+TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete", "workspace-leave")
 
 
 # Setup runs general->specific; teardown reverses to specific->general.
 _SETUP_ORDER = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE, Scope.PROJECT, Scope.WORKTREE)
 _TEARDOWN_ORDER = tuple(reversed(_SETUP_ORDER))
+# The workspace lifecycle events have no project/worktree; only these apply.
+_WORKSPACE_SCOPES = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE)
 
 
 # --- firing engine -----------------------------------------------------------
@@ -168,9 +181,68 @@ def run_hooks(
         spec = config.scope_hook_spec(scope, context.project_dir, context.dir)
         if spec.run_builtins:
             base = _firing_dir(scope, context, config, spec) / f"wtm-{event}"
-            _run_hook_source(base, hcwd, context, env, strict=strict)
+            _run_hook_source(base, hcwd, context.dir, env, strict=strict)
         for command in spec.on.get(event, []):
-            _run_inline_hook(command, hcwd, context, env, strict=strict)
+            _run_inline_hook(command, hcwd, context.dir, env, strict=strict)
+
+
+def run_workspace_hooks(
+    event: str,
+    name: str,
+    path: Path,
+    config: Config,
+    *,
+    strict: bool,
+) -> None:
+    """Fire a workspace-lifecycle event (``workspace-enter`` / ``workspace-leave``).
+
+    Unlike :func:`run_hooks`, this has no worktree: only the system, user, and
+    workspace scopes apply, and the environment contract is workspace-only
+    (``WTM_EVENT`` + ``WTM_WORKSPACE`` + ``WTM_WORKSPACE_DIR``). The projects
+    root *path* is both the subprocess working directory and the hooks' ``$1``.
+    Builtin files are ``wtm-<event>`` / ``wtm-<event>.d/*`` under each scope's
+    hooks dir; inline hooks come from the scope's ``[hooks.on]`` (system/user) or
+    the workspace entry's ``hooks.on`` (workspace).
+    """
+    if _env_flag("WTM_NO_HOOKS"):
+        return
+
+    order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
+    selected = tuple(s for s in order if s in _WORKSPACE_SCOPES)
+
+    env = dict(os.environ)
+    env["WTM_EVENT"] = event
+    env["WTM_WORKSPACE"] = name
+    env["WTM_WORKSPACE_DIR"] = str(path)
+
+    for scope in selected:
+        spec = _workspace_scope_spec(scope, config, path)
+        if spec.run_builtins:
+            base = _workspace_firing_dir(scope, config, spec, path) / f"wtm-{event}"
+            _run_hook_source(base, path, path, env, strict=strict)
+        for command in spec.on.get(event, []):
+            _run_inline_hook(command, path, path, env, strict=strict)
+
+
+def _workspace_scope_spec(scope: Scope, config: Config, path: Path) -> HookSpec:
+    """The inline :class:`HookSpec` for a workspace-lifecycle fire at *scope*."""
+    if scope is Scope.SYSTEM:
+        return config.system_scope_hooks
+    if scope is Scope.USER:
+        return config.user_scope_hooks
+    ws = config.workspace_of(path)
+
+    return ws.hooks if ws is not None else HookSpec()
+
+
+def _workspace_firing_dir(scope: Scope, config: Config, spec: HookSpec, path: Path) -> Path:
+    """The builtin discovery dir for a workspace-lifecycle fire at *scope*."""
+    if scope is Scope.SYSTEM:
+        return config.system_hooks_dir
+    if scope is Scope.USER:
+        return config.user_hooks_dir
+
+    return spec.dir or path / ".wtm" / "hooks"
 
 
 def _firing_dir(scope: Scope, context: Context, config: Config, spec: HookSpec) -> Path:
@@ -228,21 +300,25 @@ def _scope_hooks_dir(scope: Scope, context: Context | None, config: Config) -> P
 
 
 def _run_hook_source(
-    base: Path, hcwd: Path, context: Context, env: dict[str, str], *, strict: bool
+    base: Path, hcwd: Path, arg1: Path, env: dict[str, str], *, strict: bool
 ) -> None:
     """Run the file at *base* (if any), then ``base.d/*`` sorted lexically."""
-    _run_one_hook(base, hcwd, context, env, strict=strict)
+    _run_one_hook(base, hcwd, arg1, env, strict=strict)
 
     directory = Path(f"{base}.d")
     if directory.is_dir():
         for entry in sorted(directory.iterdir(), key=lambda p: p.name):
-            _run_one_hook(entry, hcwd, context, env, strict=strict)
+            _run_one_hook(entry, hcwd, arg1, env, strict=strict)
 
 
 def _run_one_hook(
-    hook: Path, hcwd: Path, context: Context, env: dict[str, str], *, strict: bool
+    hook: Path, hcwd: Path, arg1: Path, env: dict[str, str], *, strict: bool
 ) -> None:
-    """Execute a single hook, applying strict-mode and non-fatal-failure rules."""
+    """Execute a single hook, applying strict-mode and non-fatal-failure rules.
+
+    *arg1* is passed as the hook's ``$1`` (the worktree dir for worktree events,
+    the projects root for workspace-lifecycle events).
+    """
     if not hook.exists():
         return
 
@@ -254,7 +330,7 @@ def _run_one_hook(
         return
 
     log(f"running hook: {hook}")
-    result = subprocess.run([str(hook), str(context.dir)], cwd=str(hcwd), env=env)
+    result = subprocess.run([str(hook), str(arg1)], cwd=str(hcwd), env=env)
     if result.returncode == 0:
         return
 
@@ -264,17 +340,17 @@ def _run_one_hook(
 
 
 def _run_inline_hook(
-    command: str, hcwd: Path, context: Context, env: dict[str, str], *, strict: bool
+    command: str, hcwd: Path, arg1: Path, env: dict[str, str], *, strict: bool
 ) -> None:
     """Execute an inline config hook via ``sh -c``, mirroring file-hook rules.
 
-    The worktree dir is passed both as ``$1`` (matching file hooks) and via the
-    ``WTM_*`` env contract already in *env*. Strict/non-fatal handling matches
-    :func:`_run_one_hook`.
+    *arg1* is passed both as ``$1`` (matching file hooks) and, for worktree
+    events, mirrors the ``WTM_WORKTREE_DIR`` already in *env*. Strict/non-fatal
+    handling matches :func:`_run_one_hook`.
     """
     log(f"running hook (config): {command}")
     result = subprocess.run(
-        ["/bin/sh", "-c", command, "wtm-hook", str(context.dir)],
+        ["/bin/sh", "-c", command, "wtm-hook", str(arg1)],
         cwd=str(hcwd),
         env=env,
     )

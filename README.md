@@ -32,7 +32,23 @@ matching `project` commands. The two forms are equivalent. A global
 ```
 list                      declared workspaces (name, path, active marker '*', description)
 resolve [NAME] [-e|--env] print a workspace's path (default: active); --env emits WTM_WORKSPACE(_DIR)
+show    [NAME]            detail for one workspace (path, description, base_branch, scope, project count)
+add     NAME [PATH] [-d DESC] [-b BASE] [-c]
+                          register a workspace (user scope; PATH default: cwd; -c mkdir -p)
+set     NAME [-p PATH] [-d DESC] [-b BASE]
+                          edit an existing user-scope entry in place (empty value clears a field)
+rename  OLD NEW           rename the registry key (does not move the directory)
+delete  NAME             unregister a workspace (user scope; never touches the projects root)
+default [NAME] [--clear] get/set/clear default_workspace
+enter   [NAME]           cd into the projects root, firing workspace-enter hooks
+leave   [NAME] [-C]      fire workspace-leave hooks (cascading the worktree leave when inside one); cd out unless -C
 ```
+
+Workspaces are *declared* in config. `wtm` reads config from every scope but
+*writes* only the user-scope file's `[workspaces.*]` registry and the top-level
+`default_workspace` key — via `add`/`set`/`rename`/`delete`/`default`, using a
+comment-preserving `tomlkit` round-trip with an atomic replace. System config
+stays hand-edited (those verbs refuse system-only names).
 
 **Config** (`wtm config …`):
 
@@ -194,12 +210,15 @@ your shell follows the move to the corresponding subpath under the new location.
 
 ## Hooks
 
-`wtm` fires nine events across five scopes. A hook is either a **builtin**
+`wtm` fires eleven events across five scopes. A hook is either a **builtin**
 discovered file or an **inline** `sh -c` command declared in config; explicit
 inline hooks *add to* the builtins. Event names follow a `pre-`/`post-`
 convention: a prefix marks the side of a state mutation
 (`pre-create`/`post-create`, `pre-delete`/`post-delete`, `pre-rename`/`post-rename`),
-a bare name is a mutation-free moment (`install`, `enter`, `leave`).
+a bare name is a mutation-free moment (`install`, `enter`, `leave`). Nine of the
+events are worktree events; the two `workspace-enter`/`workspace-leave` events
+are workspace-scoped (fired by `wtm workspace enter`/`leave`, across the
+system/user/workspace scopes only, with a workspace-only `WTM_*` contract).
 
 Builtin file discovery per scope (bare file + `wtm-<event>.d/*`):
 
@@ -252,7 +271,12 @@ The lifecycle events fire from: `pre-create`/`post-create` on `wtm create`;
 `wtm leave`; `pre-delete`/`post-delete` on `wtm delete`; `pre-rename`/`post-rename`
 on `wtm rename`. Within a single `wtm create -c -i` the order is `pre-create` →
 `post-create` → `install` → `enter`; within `wtm enter -i` it is
-`install` → `enter`.
+`install` → `enter`. The workspace events fire from: `workspace-enter` on
+`wtm workspace enter`; `workspace-leave` on `wtm workspace leave` (which, when
+run from inside a worktree, fires that worktree's `leave` first, then
+`workspace-leave`). The `workspace-*` events carry only `WTM_EVENT`,
+`WTM_WORKSPACE`, and `WTM_WORKSPACE_DIR` (their `$1` is the projects root), and
+fire across the system/user/workspace scopes only.
 
 Hooks receive the worktree directory as `$1` plus a `WTM_*` environment contract
 (`WTM_EVENT`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
@@ -305,8 +329,8 @@ wrapper it stays silent (it cannot move the parent shell anyway).
 
 ## Configuration
 
-`wtm` reads (never writes) TOML config from up to five scopes, mirroring the
-hook scopes, most-general to most-specific:
+`wtm` reads TOML config from up to five scopes, mirroring the hook scopes,
+most-general to most-specific:
 
 | scope | file |
 |---|---|
@@ -319,8 +343,9 @@ hook scopes, most-general to most-specific:
 Scalars resolve most-specific-first (`CLI flag > env > worktree > project >
 workspace > user > system > built-in default`); inline hooks *accumulate* across
 scopes. Workspace **paths** are `~`/`$VAR`-expanded and must be absolute after
-expansion. Config is hand-edited; `wtm config show [--sources]` prints the
-effective merge.
+expansion. Config is hand-edited (except the user-scope registry, which
+`wtm workspace add/set/rename/delete/default` also writes); `wtm config show
+[--sources]` prints the effective merge.
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its
