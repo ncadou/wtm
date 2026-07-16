@@ -23,7 +23,7 @@ declared or selected, `wtm` errors and asks you to declare/select one.
 
 Commands are grouped under `workspace`, `project`, `worktree`, `hook`, and
 `config`. Each worktree-level command also has a top-level alias (`wtm create …`
-== `wtm worktree create …`), and `wtm clone …` / `wtm migrate …` alias the
+== `wtm worktree create …`), and `wtm clone …` / `wtm import …` alias the
 matching `project` commands. The two forms are equivalent. A global
 `-w/--workspace NAME` (before the subcommand) selects the active workspace.
 
@@ -66,7 +66,7 @@ list    [-t|--tree] [-w|--worktrees] [-j|--json] [-a|--all]
                                   --worktrees: flat one-worktree-per-line, tab-separated
                                   project/name/path/branch/head; --json: those rows as JSON;
                                   --all: span every declared workspace, prepending a workspace column)
-migrate [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm migrate
+import [SOURCE|PROJECT] [opts]     fold a plain clone into the bare-repo layout; alias: wtm import
 ```
 
 **Worktrees** (`wtm worktree …`, each also a top-level alias):
@@ -93,9 +93,9 @@ list    [TARGET] [--types]                                 list installed hooks,
 
 Run `wtm --help` (or `wtm COMMAND --help`) for the authoritative usage.
 
-## Migrating an existing clone
+## Importing an existing clone
 
-`wtm migrate` folds a legacy plain clone (the *source*) into the bare-repo +
+`wtm import` folds a legacy plain clone (the *source*) into the bare-repo +
 worktrees layout (the *target*), carrying over remotes, references, tags, and
 the live working checkout (modified + untracked files) recreated as a worktree.
 It automates the manual clone/push recipe.
@@ -117,7 +117,7 @@ final `git fetch origin` afterwards to populate `refs/remotes/origin/*` and
 `origin/HEAD`.
 
 A target whose `.git` already exists is refused unless `--update` is passed
-(migrating into it mutates a project that may already be in active use). With
+(importing into it mutates a project that may already be in active use). With
 `--update`, references are imported by pushing from the source: fast-forward-only
 by default (rejected branches are reported; branches checked out in a target
 worktree are skipped), or `--force` to overlay.
@@ -145,14 +145,14 @@ is mutually exclusive with `--name` and `--no-worktree`.
 Phases are toggleable: `--no-remotes`, `--no-refs`, `--no-worktree`,
 `--no-tags`, `--no-ignored`; `--fetch`, `--force`, and `--update` are opt-in.
 `-n/--dry-run` prints the plan and a per-worktree `rsync -n` preview with no
-side effects; `-c/--cd` drops you into the new worktree. Migration is
+side effects; `-c/--cd` drops you into the new worktree. The import is
 non-destructive: the source is left intact (only a temporary push remote is
 added and removed).
 
 
 ## Targeting a worktree
 
-For `install` / `enter` / `leave` / `delete` / `hook run` / `hook install` / `hook delete`:
+For `enter` / `leave` / `delete` / `rename` / `hook run` / `hook install` / `hook delete`:
 
 - `PROJECT NAME` → `<active-workspace>/PROJECT/worktrees/NAME`
 - `NAME` → `<cwd-project>/worktrees/NAME` (project inferred from the current
@@ -266,7 +266,7 @@ Worktree scope is inapplicable to `pre-create` and `post-delete` — there is no
 live worktree to hold `.wtm/hooks`.
 
 The lifecycle events fire from: `pre-create`/`post-create` on `wtm create`;
-`install` on `wtm install`, `wtm create -i`, or `wtm enter -i`; `enter` whenever
+`install` on `wtm create -i` or `wtm enter -i` (or `wtm hook run install`); `enter` whenever
 `wtm` cds you into a worktree (`wtm enter`, and `wtm create -c`); `leave` on
 `wtm leave`; `pre-delete`/`post-delete` on `wtm delete`; `pre-rename`/`post-rename`
 on `wtm rename`. Within a single `wtm create -c -i` the order is `pre-create` →
@@ -304,7 +304,7 @@ whether per-worktree hooks are committed to the branch is left to you.
   `--scope user`, and `--scope workspace` need no target.
 - `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks
   (all scopes unless `--scope` restricts it). `HOOK` (the event) is the last
-  positional. `wtm install` is a shorthand for `wtm hook run install`.
+  positional.
 - `wtm hook delete [TARGET] HOOK [--scope …] [-r]` removes a hook. `HOOK` is the
   last positional: an event (removes the bare `wtm-<event>` file; its
   `wtm-<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
@@ -326,7 +326,7 @@ directory *and* environment.
 
 The contract follows a **session** model: entering sets it, leaving clears it.
 
-- `enter` / `create -c` / `migrate -c` — `cd` into the worktree and export the
+- `enter` / `create -c` / `import -c` — `cd` into the worktree and export the
   full contract: `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`,
   `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
   `WTM_WORKSPACE_DIR`.

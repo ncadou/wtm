@@ -583,7 +583,7 @@ def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.Mo
     assert _complete_project_arg(_Ctx(("alpha",)), "") == []
 
 
-@pytest.mark.parametrize("cmd", ["create", "install", "enter", "delete", "resolve"])
+@pytest.mark.parametrize("cmd", ["create", "enter", "delete", "resolve"])
 def test_first_slot_completes_projects(root: Path, cmd: str) -> None:
     _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
@@ -623,7 +623,7 @@ def test_worktree_names_infers_project_from_cwd(root: Path) -> None:
     assert "feat" in out.split()
 
 
-@pytest.mark.parametrize("cmd", ["install", "enter", "delete", "resolve"])
+@pytest.mark.parametrize("cmd", ["enter", "delete", "resolve"])
 def test_second_slot_completes_worktrees(root: Path, cmd: str) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
@@ -1928,13 +1928,13 @@ def test_hook_run_rejects_retired_event_names(root: Path) -> None:
         assert "unknown event" in res.stderr
 
 
-def test_install_alias_runs_install_hooks(root: Path, tmp_path: Path) -> None:
+def test_hook_run_install_runs_install_hooks(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     out = tmp_path / "hook.out"
     _write_hook(hooks / "wtm-install", f'echo "$WTM_EVENT" > "{out}"\n')
-    res = run("install", "alpha", "feat", root=root, hooks_dir=hooks)
+    res = run("hook", "run", "alpha", "feat", "install", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "install"
 
@@ -2415,7 +2415,7 @@ def test_worktree_rename_matches_alias(root: Path) -> None:
     assert not (root / "alpha" / "worktrees" / "feat").exists()
 
 
-# --- migrate -----------------------------------------------------------------
+# --- import -------------------------------------------------------------------
 
 
 def _git(cwd: Path, *args: str, root: Path) -> subprocess.CompletedProcess[str]:
@@ -2434,7 +2434,7 @@ def _git(cwd: Path, *args: str, root: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _seed_source(root: Path, name: str = "src") -> Path:
-    """Build a plain working clone (the migration source) with dirty state.
+    """Build a plain working clone (the import source) with dirty state.
 
     Returns the source top level, placed *outside* the projects root (sources
     live in a sibling tree, like ``~/workspace/src``). It has a real upstream (a
@@ -2465,9 +2465,9 @@ def _seed_source(root: Path, name: str = "src") -> Path:
     return source
 
 
-def test_migrate_creates_target_and_worktree(root: Path) -> None:
+def test_import_creates_target_and_worktree(root: Path) -> None:
     source = _seed_source(root)
-    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    res = run("import", "--project", "proj", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
 
     git_dir = root / "proj" / ".git"
@@ -2491,43 +2491,43 @@ def test_migrate_creates_target_and_worktree(root: Path) -> None:
     assert (wt / "build" / "artifact.bin").exists()
 
 
-def test_migrate_infers_project_from_source_basename(root: Path) -> None:
+def test_import_infers_project_from_source_basename(root: Path) -> None:
     source = _seed_source(root, "myrepo")
-    res = run("migrate", root=root, cwd=source)  # no --project, no positional
+    res = run("import", root=root, cwd=source)  # no --project, no positional
     assert res.returncode == 0, res.stderr
     assert (root / "myrepo" / ".git").is_dir()
 
 
-def test_project_migrate_subcommand_form(root: Path) -> None:
-    # 'migrate' is canonically 'wtm project migrate' with a 'wtm migrate' alias;
+def test_project_import_subcommand_form(root: Path) -> None:
+    # 'import' is canonically 'wtm project import' with a 'wtm import' alias;
     # the subcommand form is wired to the same handler.
     source = _seed_source(root)
-    res = run("project", "migrate", "--project", "proj", root=root, cwd=source)
+    res = run("project", "import", "--project", "proj", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     assert (root / "proj" / ".git").is_dir()
     assert (root / "proj" / "worktrees" / "feature" / "foo").is_dir()
 
 
-def test_migrate_positional_names_project(root: Path) -> None:
+def test_import_positional_names_project(root: Path) -> None:
     source = _seed_source(root)
-    res = run("migrate", "chosen", root=root, cwd=source)
+    res = run("import", "chosen", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     assert (root / "chosen" / ".git").is_dir()
 
 
-def test_migrate_no_ignored_drops_ignored_files(root: Path) -> None:
+def test_import_no_ignored_drops_ignored_files(root: Path) -> None:
     source = _seed_source(root)
-    res = run("migrate", "--project", "proj", "--no-ignored", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--no-ignored", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     wt = root / "proj" / "worktrees" / "feature" / "foo"
     assert (wt / "untracked.txt").exists()  # untracked kept
     assert not (wt / "build" / "artifact.bin").exists()  # ignored dropped
 
 
-def test_migrate_exclude_pattern_honored(root: Path) -> None:
+def test_import_exclude_pattern_honored(root: Path) -> None:
     source = _seed_source(root)
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--exclude",
@@ -2540,28 +2540,28 @@ def test_migrate_exclude_pattern_honored(root: Path) -> None:
     assert not (wt / "untracked.txt").exists()
 
 
-def test_migrate_mirrors_uncommitted_deletion(root: Path) -> None:
+def test_import_mirrors_uncommitted_deletion(root: Path) -> None:
     source = _seed_source(root)
     # Delete a committed file without committing: the mirror must drop it too.
     (source / "file.txt").unlink()
-    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    res = run("import", "--project", "proj", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     wt = root / "proj" / "worktrees" / "feature" / "foo"
     assert not (wt / "file.txt").exists()
 
 
-def test_migrate_no_worktree_skips_checkout(root: Path) -> None:
+def test_import_no_worktree_skips_checkout(root: Path) -> None:
     source = _seed_source(root)
-    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--no-worktree", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     assert (root / "proj" / ".git").is_dir()
     assert list((root / "proj" / "worktrees").iterdir()) == []
 
 
-def test_migrate_copies_remotes(root: Path) -> None:
+def test_import_copies_remotes(root: Path) -> None:
     source = _seed_source(root)
     _git(source, "remote", "add", "fork", "git@example.com:me/fork.git", root=root)
-    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--no-worktree", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     remotes = _git(
         root, "--git-dir", str(root / "proj" / ".git"), "remote", root=root
@@ -2569,17 +2569,17 @@ def test_migrate_copies_remotes(root: Path) -> None:
     assert "fork" in remotes
 
 
-def test_migrate_existing_target_refused_without_update(root: Path) -> None:
+def test_import_existing_target_refused_without_update(root: Path) -> None:
     source = _seed_source(root)
-    run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
-    # A new branch added after the first migrate must NOT reach the target
+    run("import", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    # A new branch added after the first import must NOT reach the target
     # without --update.
     _git(source, "checkout", "-qb", "another", root=root)
     (source / "a.txt").write_text("a\n")
     _git(source, "add", ".", root=root)
     _git(source, "commit", "-qm", "a", root=root)
 
-    res = run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--no-worktree", root=root, cwd=source)
     assert res.returncode == 1
     assert "already exists" in res.stderr
     assert (
@@ -2597,17 +2597,17 @@ def test_migrate_existing_target_refused_without_update(root: Path) -> None:
     )
 
 
-def test_migrate_existing_target_pushes_new_branch(root: Path) -> None:
+def test_import_existing_target_pushes_new_branch(root: Path) -> None:
     source = _seed_source(root)
-    run("migrate", "--project", "proj", "--no-worktree", root=root, cwd=source)
-    # A new branch added after the first migrate must reach the existing target.
+    run("import", "--project", "proj", "--no-worktree", root=root, cwd=source)
+    # A new branch added after the first import must reach the existing target.
     _git(source, "checkout", "-qb", "another", root=root)
     (source / "a.txt").write_text("a\n")
     _git(source, "add", ".", root=root)
     _git(source, "commit", "-qm", "a", root=root)
 
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--no-worktree",
@@ -2630,14 +2630,14 @@ def test_migrate_existing_target_pushes_new_branch(root: Path) -> None:
         == 0
     )
     # The temporary push remote is cleaned up from the source.
-    assert "wtm-migrate-target" not in _git(source, "remote", root=root).stdout.split()
+    assert "wtm-import-target" not in _git(source, "remote", root=root).stdout.split()
 
 
-def test_migrate_init_bare_imports_refs_via_push(root: Path) -> None:
+def test_import_init_bare_imports_refs_via_push(root: Path) -> None:
     # --init-bare makes an empty repo, so references must arrive by push from
     # the source (the disk-clone shortcut does not apply).
     source = _seed_source(root)
-    res = run("migrate", "--project", "proj", "--init-bare", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--init-bare", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     git_dir = root / "proj" / ".git"
     for branch in ("main", "feature/foo"):
@@ -2665,41 +2665,41 @@ def test_migrate_init_bare_imports_refs_via_push(root: Path) -> None:
     assert (wt / "file.txt").read_text() == "work-in-progress\n"
 
 
-def test_migrate_dry_run_makes_no_changes(root: Path) -> None:
+def test_import_dry_run_makes_no_changes(root: Path) -> None:
     source = _seed_source(root)
-    res = run("migrate", "--project", "proj", "--dry-run", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--dry-run", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     assert not (root / "proj").exists()
     assert "from_disk" in res.stderr
 
 
-def test_migrate_cd_emits_worktree_path(root: Path, tmp_path: Path) -> None:
+def test_import_cd_emits_worktree_path(root: Path, tmp_path: Path) -> None:
     source = _seed_source(root)
     shell_file = tmp_path / "cd"
     shell_file.touch()
-    res = run("migrate", "--project", "proj", "-c", root=root, cwd=source, shell_file=shell_file)
+    res = run("import", "--project", "proj", "-c", root=root, cwd=source, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert _shell_cd(shell_file) == str(root / "proj" / "worktrees" / "feature" / "foo")
 
 
-def test_migrate_detached_head_requires_name(root: Path) -> None:
+def test_import_detached_head_requires_name(root: Path) -> None:
     source = _seed_source(root)
     head = _git(source, "rev-parse", "HEAD", root=root).stdout.strip()
     _git(source, "checkout", "-q", head, root=root)  # detach
-    res = run("migrate", "--project", "proj", root=root, cwd=source)
+    res = run("import", "--project", "proj", root=root, cwd=source)
     assert res.returncode == 1
     assert "detached HEAD" in res.stderr
 
 
-def test_migrate_under_projects_root_needs_source(root: Path) -> None:
+def test_import_under_projects_root_needs_source(root: Path) -> None:
     # Standing under the projects root with no source given is an error.
     run("project", "new", "proj", root=root)
-    res = run("migrate", root=root, cwd=root / "proj")
+    res = run("import", root=root, cwd=root / "proj")
     assert res.returncode == 1
     assert "source" in res.stderr
 
 
-# --- migrate --all-worktrees -------------------------------------------------
+# --- import --all-worktrees ---------------------------------------------------
 
 
 def _add_linked_worktree(
@@ -2722,10 +2722,10 @@ def _detach_worktree(source: Path, name: str, root: Path) -> tuple[Path, str]:
     return path, head
 
 
-def test_migrate_all_worktrees_reproduces_set(root: Path) -> None:
+def test_import_all_worktrees_reproduces_set(root: Path) -> None:
     source = _seed_source(root)  # main worktree on feature/foo
     _add_linked_worktree(source, "wt-bar", "bar", root)
-    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--all-worktrees", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
 
     # Main worktree named after the source dir basename (not its branch).
@@ -2741,10 +2741,10 @@ def test_migrate_all_worktrees_reproduces_set(root: Path) -> None:
     assert (bar_wt / "wt.txt").read_text() == "linked\n"
 
 
-def test_migrate_all_worktrees_detached_pins_branch(root: Path) -> None:
+def test_import_all_worktrees_detached_pins_branch(root: Path) -> None:
     source = _seed_source(root)
     _path, head = _detach_worktree(source, "wt-detached", root)
-    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--all-worktrees", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
 
     wt = root / "proj" / "worktrees" / "wt-detached"
@@ -2753,14 +2753,14 @@ def test_migrate_all_worktrees_detached_pins_branch(root: Path) -> None:
     assert _git(wt, "rev-parse", "HEAD", root=root).stdout.strip() == head
 
 
-def test_migrate_all_worktrees_skips_existing_collision(root: Path) -> None:
+def test_import_all_worktrees_skips_existing_collision(root: Path) -> None:
     source = _seed_source(root)
     _add_linked_worktree(source, "wt-bar", "bar", root)
-    # First migrate creates both worktrees.
-    run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    # First import creates both worktrees.
+    run("import", "--project", "proj", "--all-worktrees", root=root, cwd=source)
     # Re-run: both targets already exist, so both are skipped, run still succeeds.
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--all-worktrees",
@@ -2772,10 +2772,10 @@ def test_migrate_all_worktrees_skips_existing_collision(root: Path) -> None:
     assert "skipped" in res.stderr
 
 
-def test_migrate_all_worktrees_rejects_name(root: Path) -> None:
+def test_import_all_worktrees_rejects_name(root: Path) -> None:
     source = _seed_source(root)
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--all-worktrees",
@@ -2788,10 +2788,10 @@ def test_migrate_all_worktrees_rejects_name(root: Path) -> None:
     assert "mutually exclusive" in res.stderr
 
 
-def test_migrate_all_worktrees_rejects_no_worktree(root: Path) -> None:
+def test_import_all_worktrees_rejects_no_worktree(root: Path) -> None:
     source = _seed_source(root)
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--all-worktrees",
@@ -2803,11 +2803,11 @@ def test_migrate_all_worktrees_rejects_no_worktree(root: Path) -> None:
     assert "mutually exclusive" in res.stderr
 
 
-def test_migrate_all_worktrees_skips_prunable(root: Path) -> None:
+def test_import_all_worktrees_skips_prunable(root: Path) -> None:
     source = _seed_source(root)
     path = _add_linked_worktree(source, "wt-gone", "gone", root)
     shutil.rmtree(path)  # leave a registered-but-missing worktree
-    res = run("migrate", "--project", "proj", "--all-worktrees", root=root, cwd=source)
+    res = run("import", "--project", "proj", "--all-worktrees", root=root, cwd=source)
     assert res.returncode == 0, res.stderr
     assert not (root / "proj" / "worktrees" / "wt-gone").exists()
     assert "prunable" in res.stderr or "missing" in res.stderr
@@ -2815,14 +2815,14 @@ def test_migrate_all_worktrees_skips_prunable(root: Path) -> None:
     assert (root / "proj" / "worktrees" / "src").is_dir()
 
 
-def test_migrate_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Path) -> None:
+def test_import_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Path) -> None:
     source = _seed_source(root)
     linked = _add_linked_worktree(source, "wt-bar", "bar", root)
     shell_file = tmp_path / "cd"
     shell_file.touch()
     # Invoke from inside the linked worktree: -c should land there, not in main.
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--all-worktrees",
@@ -2835,11 +2835,11 @@ def test_migrate_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Pa
     assert _shell_cd(shell_file) == str(root / "proj" / "worktrees" / "wt-bar")
 
 
-def test_migrate_all_worktrees_dry_run_previews_each(root: Path) -> None:
+def test_import_all_worktrees_dry_run_previews_each(root: Path) -> None:
     source = _seed_source(root)
     _add_linked_worktree(source, "wt-bar", "bar", root)
     res = run(
-        "migrate",
+        "import",
         "--project",
         "proj",
         "--all-worktrees",

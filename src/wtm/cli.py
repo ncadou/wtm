@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, replace
 
 import typer
+from typer.core import TyperGroup
 
 from wtm import git
 from wtm.config import Config, resolve_project_dir
@@ -25,7 +26,7 @@ from wtm.core import (
     worktree_name,
 )
 from wtm.hooks import EVENTS, Hooks, Scope
-from wtm.migrate import CreateMethod, Migrate, MigratePlan, MigrateResult
+from wtm.importer import CreateMethod, Import, ImportPlan, ImportResult
 from wtm.output import (
     emit_env_line,
     emit_shell,
@@ -52,7 +53,7 @@ class _Services:
     project: Project
     worktree: Worktree
     workspaces: Workspaces
-    migrate: Migrate
+    importer: Import
     hooks: Hooks
 
 
@@ -69,7 +70,7 @@ annotated. The active workspace is picked by -w/--workspace, $WTM_WORKSPACE, the
 cwd, a default_workspace, or the sole declared one. Anything project-specific
 (shared data/tools dirs, direnv, sesh/tmux) is the concern of hooks, not wtm.
 
-Worktree targeting for install/enter/leave/delete/rename/hook (within the
+Worktree targeting for enter/leave/delete/rename/hook (within the
 active workspace):
   PROJECT NAME -> <workspace>/PROJECT/worktrees/NAME
   NAME         -> <cwd-project>/worktrees/NAME (project inferred from cwd);
@@ -79,7 +80,27 @@ active workspace):
   (no arg)     -> cwd (delete requires an explicit target)
 """
 
+
+class _GroupsFirstTyperGroup(TyperGroup):
+    """Root group that lists its sub-groups before its bare commands.
+
+    Typer emits every bare command before any sub-group, which (with rich
+    panels) forces the "Command groups" panel below the shortcut panels.
+    Surfacing groups first here flips the rich panel order so Command groups
+    heads the listing, while each subset keeps its own registration order.
+    """
+
+    def list_commands(self, ctx: typer.Context) -> list[str]:
+        """Return sub-group names first, then bare command names."""
+        names = super().list_commands(ctx)
+        groups = [name for name in names if isinstance(self.get_command(ctx, name), TyperGroup)]
+        group_set = set(groups)
+
+        return groups + [name for name in names if name not in group_set]
+
+
 app = typer.Typer(
+    cls=_GroupsFirstTyperGroup,
     help=_LAYOUT,
     no_args_is_help=True,
     add_completion=True,
@@ -106,7 +127,7 @@ def _bootstrap(
         project=Project(config),
         worktree=Worktree(config),
         workspaces=Workspaces(config),
-        migrate=Migrate(config),
+        importer=Import(config),
         hooks=Hooks(config),
     )
 
@@ -321,7 +342,8 @@ project_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(project_app, name="project")
+# project_app is added to the top-level app after worktree_app (below) so the
+# "Command groups" panel lists worktree first, then project.
 
 
 @project_app.command(name="new")
@@ -343,8 +365,9 @@ def _clone(
 
 # 'clone' is dual-homed: the canonical 'wtm project clone' plus a top-level
 # 'wtm clone' shorthand. One handler, registered under both apps to avoid drift.
+# The top-level alias is registered after the worktree shortcuts (see below) so
+# the "Worktree shortcuts" panel is encountered first in the help listing.
 project_app.command(name="clone")(_clone)
-app.command(name="clone")(_clone)
 
 
 @project_app.command(name="list")
@@ -499,17 +522,22 @@ def project_resolve(
 #
 # The worktree-level commands are canonically 'wtm worktree <cmd>'; each is also
 # kept as a top-level 'wtm <cmd>' alias. One handler per command, registered
-# under both apps to avoid drift (the same dual-homing idiom used by 'clone').
+# under both apps in a single ordered block (below the handlers) to avoid drift
+# and to keep the help ordering in one place.
 
 
 worktree_app = typer.Typer(
-    help=(
-        "Worktree-level operations (create, install, enter, leave, delete, rename, list, resolve)."
-    ),
+    help="Worktree-level operations (enter, leave, create, delete, rename, list, resolve).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(worktree_app, name="worktree")
+app.add_typer(worktree_app, name="worktree", rich_help_panel="Command groups")
+app.add_typer(project_app, name="project", rich_help_panel="Command groups")
+
+
+# The worktree handlers are registered under both worktree_app and app in a
+# single ordered block below (after every handler is defined), so ordering
+# lives in one place. See the note at that block.
 
 
 def create(
@@ -551,10 +579,6 @@ def create(
         emit_shell(cd=dest, env=ctx.obj.worktree.env_for_dir(dest))
 
 
-worktree_app.command(name="create")(create)
-app.command(name="create")(create)
-
-
 def _describe_create(result: WorktreeCreated) -> str:
     """Render the branch-resolution diagnostic for a create result."""
     if result.strategy is BranchStrategy.EXISTING_LOCAL:
@@ -567,24 +591,6 @@ def _describe_create(result: WorktreeCreated) -> str:
     return f"new orphan branch '{result.branch}' (empty repository)"
 
 
-def install(
-    ctx: typer.Context,
-    args: list[str] = typer.Argument(
-        None,
-        metavar="[PROJECT] NAME | [DIR]",
-        help="Worktree target",
-        autocompletion=_complete_target,
-    ),
-    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
-) -> None:
-    """Run install hooks for a worktree (alias for 'wtm hook run install')."""
-    ctx.obj.worktree.install(args or [], strict=strict)
-
-
-worktree_app.command(name="install")(install)
-app.command(name="install")(install)
-
-
 # --- hook management ---------------------------------------------------------
 
 
@@ -593,7 +599,8 @@ hook_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(hook_app, name="hook")
+# hook_app is added to the top-level app last (below, after config) so the
+# "Command groups" panel lists it after project/workspace/config.
 
 
 @hook_app.command(name="install")
@@ -782,10 +789,6 @@ def enter(
     emit_shell(cd=dest, env=worktree.env_for_dir(dest))
 
 
-worktree_app.command(name="enter")(enter)
-app.command(name="enter")(enter)
-
-
 def leave(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
@@ -806,10 +809,6 @@ def leave(
     """
     result = ctx.obj.worktree.leave(args or [], strict=strict)
     emit_shell(cd=None if no_cd else result.cd_dir, env={})
-
-
-worktree_app.command(name="leave")(leave)
-app.command(name="leave")(leave)
 
 
 def delete(
@@ -838,10 +837,6 @@ def delete(
         emit_shell(cd=rescue, env={}, fallback=False)
 
 
-worktree_app.command(name="delete")(delete)
-app.command(name="delete")(delete)
-
-
 def rename(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
@@ -868,10 +863,6 @@ def rename(
     remapped = remap_dir(cwd, result.old_dir, result.new_dir)
     if remapped is not None:
         emit_shell(cd=remapped, env=ctx.obj.worktree.env_for_dir(remapped), fallback=False)
-
-
-worktree_app.command(name="rename")(rename)
-app.command(name="rename")(rename)
 
 
 def _describe_rename(result: WorktreeRenamed) -> str:
@@ -907,10 +898,6 @@ def list_(
         print(line)
 
 
-worktree_app.command(name="list")(list_)
-app.command(name="list")(list_)
-
-
 def resolve(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
@@ -935,14 +922,35 @@ def resolve(
         print(ctx.obj.worktree.resolve_path(args or []))
 
 
-worktree_app.command(name="resolve")(resolve)
-app.command(name="resolve")(resolve)
+# Worktree handlers, registered in one ordered block (after every handler is
+# defined) so the help ordering lives in one place. Order is common-first and
+# grouped: the session pair, then the lifecycle mutations, then the read-only
+# queries. Each is dual-homed: canonically 'wtm worktree <cmd>' plus a top-level
+# 'wtm <cmd>' shortcut. (Install hooks are run via 'wtm hook run install'.)
+_WORKTREE_COMMANDS = (
+    ("enter", enter),
+    ("leave", leave),
+    ("create", create),
+    ("delete", delete),
+    ("rename", rename),
+    ("list", list_),
+    ("resolve", resolve),
+)
+for _name, _handler in _WORKTREE_COMMANDS:
+    worktree_app.command(name=_name)(_handler)
+    app.command(name=_name, rich_help_panel="Worktree shortcuts")(_handler)
 
 
-# 'migrate' is dual-homed: canonically 'wtm project migrate' (it folds a repo
-# into the project layout) plus a top-level 'wtm migrate' alias. One handler,
-# registered under both apps to avoid drift (as with 'clone').
-def migrate(
+# Top-level 'wtm clone' alias, registered after the worktree shortcuts so the
+# "Worktree shortcuts" panel heads the listing and "Project shortcuts" follows.
+app.command(name="clone", rich_help_panel="Project shortcuts")(_clone)
+
+
+# 'import' is dual-homed: canonically 'wtm project import' (it folds a repo
+# into the project layout) plus a top-level 'wtm import' alias. One handler,
+# registered under both apps to avoid drift (as with 'clone'). The Python
+# keyword 'import' forbids it as a function name, so the handler is 'import_'.
+def import_(
     ctx: typer.Context,
     other: str | None = typer.Argument(
         None,
@@ -972,9 +980,9 @@ def migrate(
         False,
         "-u",
         "--update",
-        help="Allow migrating into an existing target (required if .git is already present)",
+        help="Allow importing into an existing target (required if .git is already present)",
     ),
-    no_remotes: bool = typer.Option(False, "--no-remotes", help="Skip remote migration"),
+    no_remotes: bool = typer.Option(False, "--no-remotes", help="Skip remote import"),
     no_refs: bool = typer.Option(
         False, "--no-refs", help="Skip pushing references to an existing target"
     ),
@@ -1020,13 +1028,13 @@ def migrate(
         else CreateMethod.FROM_DISK
     )
 
-    migrator = ctx.obj.migrate
-    resolution = migrator.resolve(
+    importer = ctx.obj.importer
+    resolution = importer.resolve(
         other, source=source, project=project, all_worktrees=all_worktrees, update=update
     )
     for skipped in resolution.prunable_skipped:
         warn(f"source worktree '{skipped}' is prunable/missing; skipped")
-    plan = migrator.plan(
+    plan = importer.plan(
         resolution,
         create_method=create_method,
         worktree_name=name,
@@ -1042,14 +1050,14 @@ def migrate(
 
     if dry_run:
         _describe_plan(plan)
-        for wt_name, preview in migrator.dry_run_rsync(
+        for wt_name, preview in importer.dry_run_rsync(
             plan, exclude=exclude, filter_files=filter_file
         ):
             log(f"rsync preview (worktree '{wt_name}'):")
             print(preview, end="", file=sys.stderr)
         return
 
-    result = migrator.run(plan, exclude=exclude, filter_files=filter_file, strict=strict)
+    result = importer.run(plan, exclude=exclude, filter_files=filter_file, strict=strict)
     _describe_result(result)
     if do_cd and result.cd_dir is not None:
         emit_shell(cd=result.cd_dir, env=ctx.obj.worktree.env_for_dir(result.cd_dir))
@@ -1057,12 +1065,12 @@ def migrate(
         raise SystemExit(1)
 
 
-project_app.command(name="migrate")(migrate)
-app.command(name="migrate")(migrate)
+project_app.command(name="import")(import_)
+app.command(name="import", rich_help_panel="Project shortcuts")(import_)
 
 
-def _describe_plan(plan: MigratePlan) -> None:
-    """Render a migration plan to stderr (used by --dry-run)."""
+def _describe_plan(plan: ImportPlan) -> None:
+    """Render an import plan to stderr (used by --dry-run)."""
     res = plan.resolution
     log(f"source:  {res.source}")
     log(f"target:  {res.project_dir} (.git bare)")
@@ -1095,8 +1103,8 @@ def _describe_plan(plan: MigratePlan) -> None:
             log(f"  worktree '{spec.name}' <- {on}")
 
 
-def _describe_result(result: MigrateResult) -> None:
-    """Render what a migration actually did to stderr."""
+def _describe_result(result: ImportResult) -> None:
+    """Render what an import actually did to stderr."""
     res = result.plan.resolution
     if result.created:
         log(f"created target {res.project_dir}")
@@ -1130,7 +1138,7 @@ workspace_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(workspace_app, name="workspace")
+app.add_typer(workspace_app, name="workspace", rich_help_panel="Command groups")
 
 
 @workspace_app.command(name="list")
@@ -1337,7 +1345,7 @@ config_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(config_app, name="config")
+app.add_typer(config_app, name="config", rich_help_panel="Command groups")
 
 
 @config_app.command(name="show")
@@ -1371,6 +1379,11 @@ def config_show(
             bits = [b for b in (ann.description, ann.base_branch) if b]
             detail = f" ({', '.join(bits)})" if bits else ""
             print(f"    project {pname}{detail}{inert}")
+
+
+# Register the hook group last so the "Command groups" panel lists it after
+# project/workspace/config (see the note at the hook_app definition).
+app.add_typer(hook_app, name="hook", rich_help_panel="Command groups")
 
 
 def main() -> None:

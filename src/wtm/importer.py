@@ -1,6 +1,6 @@
-"""Project migration for wtm: fold a plain clone into the bare-repo layout.
+"""Project import for wtm: fold a plain clone into the bare-repo layout.
 
-``wtm migrate`` takes a legacy working clone (the *source*) and folds it into
+``wtm import`` takes a legacy working clone (the *source*) and folds it into
 the ``<workspace>/<project>`` bare-repo + worktrees layout (the
 *target*), carrying over remotes, references, tags, and the live working
 checkout (modified + untracked files) recreated as a worktree.
@@ -15,9 +15,9 @@ from __future__ import annotations
 
 __all__ = [
     "CreateMethod",
-    "Migrate",
-    "MigratePlan",
-    "MigrateResult",
+    "Import",
+    "ImportPlan",
+    "ImportResult",
     "Resolution",
     "WorktreeSpec",
 ]
@@ -56,7 +56,7 @@ class WorktreeSpec:
 
     ``branch`` is the branch the source worktree is on, or ``None`` when it is
     detached; a detached spec is reproduced by pinning a branch named ``name``
-    at ``head`` (see :meth:`Migrate._pin_detached`). ``name`` is the target
+    at ``head`` (see :meth:`Import._pin_detached`). ``name`` is the target
     worktree's name: under ``--all-worktrees`` it is the source worktree's
     directory basename; for the lone default worktree it is the branch name (or
     an explicit ``--name``).
@@ -71,7 +71,7 @@ class WorktreeSpec:
 
 @dataclass
 class Resolution:
-    """Resolved source/target inputs for a migration."""
+    """Resolved source/target inputs for an import."""
 
     source: Path  # the source working clone's top level (the cwd worktree)
     project: str  # the target project name
@@ -86,8 +86,8 @@ class Resolution:
 
 
 @dataclass
-class MigratePlan:
-    """A description of what a migration will do (for --dry-run and logging)."""
+class ImportPlan:
+    """A description of what an import will do (for --dry-run and logging)."""
 
     resolution: Resolution
     create_method: CreateMethod | None  # None when the target already exists
@@ -102,10 +102,10 @@ class MigratePlan:
 
 
 @dataclass
-class MigrateResult:
-    """What a migration actually did, for the CLI to render."""
+class ImportResult:
+    """What an import actually did, for the CLI to render."""
 
-    plan: MigratePlan
+    plan: ImportPlan
     created: bool = False
     remotes_added: list[str] = field(default_factory=list)
     remotes_skipped: list[str] = field(default_factory=list)
@@ -118,11 +118,11 @@ class MigrateResult:
 
 
 # The temporary remote added to the source to push references into the target.
-_PUSH_REMOTE = "wtm-migrate-target"
+_PUSH_REMOTE = "wtm-import-target"
 
 
-class Migrate:
-    """Project migration bound to a resolved :class:`Config`."""
+class Import:
+    """Project import bound to a resolved :class:`Config`."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -156,7 +156,7 @@ class Migrate:
         (missing-on-disk) entries dropped into :attr:`Resolution.prunable_skipped`.
 
         A target whose bare repo already exists is refused unless ``update``
-        is set, since migrating into it mutates a project that may already be
+        is set, since importing into it mutates a project that may already be
         in active use.
         """
         cwd_project_dir = project_dir_for(self.config.projects_root, abspath("."))
@@ -264,8 +264,8 @@ class Migrate:
         force: bool,
         include_ignored: bool,
         no_worktree: bool,
-    ) -> MigratePlan:
-        """Build the migration plan, resolving the worktree set and branches.
+    ) -> ImportPlan:
+        """Build the import plan, resolving the worktree set and branches.
 
         Default (single) mode reproduces just the source's current checkout: a
         detached HEAD requires an explicit ``worktree_name`` (there is no branch
@@ -301,7 +301,7 @@ class Migrate:
                 )
             ]
 
-        return MigratePlan(
+        return ImportPlan(
             resolution=resolution,
             create_method=None if resolution.target_exists else create_method,
             all_worktrees=all_worktrees,
@@ -318,22 +318,22 @@ class Migrate:
 
     def run(
         self,
-        plan: MigratePlan,
+        plan: ImportPlan,
         *,
         exclude: list[str],
         filter_files: list[str],
         strict: bool,
-    ) -> MigrateResult:
+    ) -> ImportResult:
         """Execute *plan*, returning a record of what was done."""
         res = plan.resolution
-        result = MigrateResult(plan=plan)
+        result = ImportResult(plan=plan)
 
         if plan.create_method is not None:
             self._create_target(res, plan.create_method)
             result.created = True
 
         if plan.do_remotes:
-            self._migrate_remotes(res, result)
+            self._import_remotes(res, result)
 
         # References are imported by pushing from the source unless the target
         # was freshly created by a disk-clone, which already carries the
@@ -391,7 +391,7 @@ class Migrate:
                 git.add_remote(res.git_dir, "origin", res.origin_url)
                 git.set_config_fetch(res.git_dir)
 
-    def _migrate_remotes(self, res: Resolution, result: MigrateResult) -> None:
+    def _import_remotes(self, res: Resolution, result: ImportResult) -> None:
         """Copy source remotes into the target; add-missing, warn-skip clashes."""
         target_remotes = git.list_remotes(res.git_dir)
         for name, url in git.list_remotes(res.source).items():
@@ -405,7 +405,7 @@ class Migrate:
             elif existing != url:
                 result.remotes_skipped.append(name)
 
-    def _push_refs(self, res: Resolution, plan: MigratePlan, result: MigrateResult) -> None:
+    def _push_refs(self, res: Resolution, plan: ImportPlan, result: ImportResult) -> None:
         """Import references by pushing from the source into the target.
 
         Skips branches checked out in a target worktree (git refuses those).
@@ -451,7 +451,7 @@ class Migrate:
 
     def dry_run_rsync(
         self,
-        plan: MigratePlan,
+        plan: ImportPlan,
         *,
         exclude: list[str],
         filter_files: list[str],
@@ -479,8 +479,8 @@ class Migrate:
     def _recreate_worktrees(
         self,
         res: Resolution,
-        plan: MigratePlan,
-        result: MigrateResult,
+        plan: ImportPlan,
+        result: ImportResult,
         *,
         exclude: list[str],
         filter_files: list[str],
@@ -536,7 +536,7 @@ class Migrate:
 # --- helpers -----------------------------------------------------------------
 
 
-def _pick_cd_dir(res: Resolution, plan: MigratePlan, result: MigrateResult) -> Path | None:
+def _pick_cd_dir(res: Resolution, plan: ImportPlan, result: ImportResult) -> Path | None:
     """Choose where -c/--cd should land among the created worktrees.
 
     Prefers the worktree matching the cwd source worktree

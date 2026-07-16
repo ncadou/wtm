@@ -191,12 +191,6 @@ class Worktree:
 
         return self.config.base_branch_for(ws, project_dir.name)
 
-    def install(self, args: list[str], *, strict: bool) -> None:
-        """Run install hooks for a worktree."""
-        target = resolve_target(self.config, TargetMode.WORKTREE, args)
-        context = derive_context(target)
-        run_hooks("install", context, self.config, strict=strict)
-
     def enter(self, args: list[str], *, do_install: bool, strict: bool) -> Path:
         """Resolve a worktree (running install then enter hooks); return its dir.
 

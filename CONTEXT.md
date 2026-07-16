@@ -92,15 +92,15 @@ Where a hook/config is discovered/declared, from most general to most specific:
 scopes; each scope has its own config file, scalars resolve most-specific-first,
 and hooks accumulate.
 
-**Source / Target** (migration):
-`wtm migrate` folds a legacy plain clone (the *source*) into the bare-repo
+**Source / Target** (import):
+`wtm import` folds a legacy plain clone (the *source*) into the bare-repo
 layout (the *target* project) of the active workspace.
 
 **Shell session**:
 The `WTM_*` context the shell wrapper carries between an `enter` and a `leave`.
 Movers that cd the shell also emit shell directives (a `cd` plus `export`/`unset`
 of the eight-var contract) out-of-band via the `WTM_SHELL_FILE` temp file, which
-the wrapper *sources*. Set on enter/`create -c`/`migrate -c` (full contract) and
+the wrapper *sources*. Set on enter/`create -c`/`import -c` (full contract) and
 on `workspace enter` (workspace vars only); *updated* on `rename` when standing
 in the moved worktree; *unset* on `leave`/`delete`-of-current/`workspace leave`
 (even with `-C`, which suppresses only the cd). Because the exported
