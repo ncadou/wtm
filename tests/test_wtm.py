@@ -27,8 +27,43 @@ from pathlib import Path
 import pytest
 
 from wtm import cli
+from wtm.output import MANAGED_ENV_VARS
 
 WTM = [sys.executable, "-m", "wtm.cli"]
+
+
+def _unsquote(token: str) -> str:
+    """Reverse :func:`wtm.output._squote` (a POSIX single-quoted string)."""
+    return token[1:-1].replace("'\\''", "'")
+
+
+def _shell_cd(shell_file: Path) -> str | None:
+    """Return the ``cd -- '...'`` target emitted to *shell_file*, or ``None``."""
+    for line in shell_file.read_text().splitlines():
+        if line.startswith("cd -- "):
+            return _unsquote(line[len("cd -- ") :])
+
+    return None
+
+
+def _shell_exports(shell_file: Path) -> dict[str, str]:
+    """Return the ``export NAME='...'`` pairs emitted to *shell_file*."""
+    exports: dict[str, str] = {}
+    for line in shell_file.read_text().splitlines():
+        if line.startswith("export "):
+            name, _, value = line[len("export ") :].partition("=")
+            exports[name] = _unsquote(value)
+
+    return exports
+
+
+def _shell_unsets(shell_file: Path) -> set[str]:
+    """Return the names on the ``unset ...`` line emitted to *shell_file*."""
+    for line in shell_file.read_text().splitlines():
+        if line.startswith("unset "):
+            return set(line[len("unset ") :].split())
+
+    return set()
 
 
 @dataclass(frozen=True)
@@ -78,7 +113,7 @@ def _isolated_env(
     root: Path,
     hooks_dir: Path | None,
     system_hooks_dir: Path | None,
-    cd_file: Path | None,
+    shell_file: Path | None,
     extra_env: dict[str, str] | None,
     workspace_hooks_dir: Path | None = None,
 ) -> dict[str, str]:
@@ -101,8 +136,8 @@ def _isolated_env(
     }
     # A stale WTM_WORKSPACE from the host would shadow the sole-workspace rule.
     env["WTM_WORKSPACE"] = "ws"
-    if cd_file is not None:
-        env["WTM_CD_FILE"] = str(cd_file)
+    if shell_file is not None:
+        env["WTM_SHELL_FILE"] = str(shell_file)
     if extra_env:
         env.update(extra_env)
 
@@ -115,7 +150,7 @@ def run(
     cwd: Path | None = None,
     hooks_dir: Path | None = None,
     system_hooks_dir: Path | None = None,
-    cd_file: Path | None = None,
+    shell_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
     workspace_hooks_dir: Path | None = None,
 ) -> _Result:
@@ -127,7 +162,7 @@ def run(
     process state. Use :func:`run_proc` when the command destroys *cwd*.
     """
     env_delta = _isolated_env(
-        root, hooks_dir, system_hooks_dir, cd_file, extra_env, workspace_hooks_dir
+        root, hooks_dir, system_hooks_dir, shell_file, extra_env, workspace_hooks_dir
     )
 
     prev_environ = dict(os.environ)
@@ -159,7 +194,7 @@ def run_proc(
     cwd: Path | None = None,
     hooks_dir: Path | None = None,
     system_hooks_dir: Path | None = None,
-    cd_file: Path | None = None,
+    shell_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
     workspace_hooks_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -171,7 +206,9 @@ def run_proc(
     """
     env = dict(os.environ)
     env.update(
-        _isolated_env(root, hooks_dir, system_hooks_dir, cd_file, extra_env, workspace_hooks_dir)
+        _isolated_env(
+            root, hooks_dir, system_hooks_dir, shell_file, extra_env, workspace_hooks_dir
+        )
     )
 
     return subprocess.run(
@@ -848,13 +885,23 @@ def test_create_rejects_traversal(root: Path) -> None:
     assert "may not contain '..'" in res.stderr
 
 
-def test_create_cd_emits_to_cd_file(root: Path, tmp_path: Path) -> None:
+def test_create_cd_emits_to_shell_file(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
-    res = run("create", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("create", "alpha", "feat", "-c", root=root, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "feat")
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert _shell_cd(shell_file) == str(wt)
+    # A move into a worktree exports the full WTM_* session contract (nothing unset).
+    exports = _shell_exports(shell_file)
+    assert exports["WTM_WORKTREE_DIR"] == str(wt)
+    assert exports["WTM_PROJECT"] == "alpha"
+    assert exports["WTM_PROJECT_DIR"] == str(root / "alpha")
+    assert exports["WTM_WORKSPACE"] == "ws"
+    assert exports["WTM_WORKSPACE_DIR"] == str(root)
+    assert set(exports) == set(MANAGED_ENV_VARS)
+    assert _shell_unsets(shell_file) == set()
 
 
 # --- enter --create ----------------------------------------------------------
@@ -862,13 +909,13 @@ def test_create_cd_emits_to_cd_file(root: Path, tmp_path: Path) -> None:
 
 def test_enter_create_makes_worktree_when_absent(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    res = run("enter", "alpha", "feat", "-c", root=root, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert (wt / "file.txt").exists()
-    assert cd_file.read_text().strip() == str(wt)
+    assert _shell_cd(shell_file) == str(wt)
     branch = subprocess.run(
         ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
         capture_output=True,
@@ -880,12 +927,12 @@ def test_enter_create_makes_worktree_when_absent(root: Path, tmp_path: Path) -> 
 def test_enter_create_enters_existing_idempotently(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", root=root, cd_file=cd_file)
+    res = run("enter", "alpha", "feat", "-c", root=root, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(wt)
+    assert _shell_cd(shell_file) == str(wt)
     # Existing path is silent: no create diagnostic.
     assert "new branch" not in res.stderr
     assert "existing local branch" not in res.stderr
@@ -909,13 +956,13 @@ def test_enter_branch_requires_create(root: Path) -> None:
 def test_enter_create_warns_branch_ignored_when_exists(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", "-b", "other", root=root, cd_file=cd_file)
+    res = run("enter", "alpha", "feat", "-c", "-b", "other", root=root, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert "ignored" in res.stderr
-    assert cd_file.read_text().strip() == str(wt)
+    assert _shell_cd(shell_file) == str(wt)
 
 
 def test_enter_create_rejects_dir_target(root: Path) -> None:
@@ -1115,8 +1162,8 @@ def test_delete_cds_to_oldpwd_when_standing_in_worktree(root: Path, tmp_path: Pa
     wt = root / "alpha" / "worktrees" / "feat"
     prev = tmp_path / "prev"
     prev.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     # Shell stands in the deleted worktree: run as a real subprocess so the
     # doomed cwd cannot strand the test runner.
     res = run_proc(
@@ -1125,30 +1172,30 @@ def test_delete_cds_to_oldpwd_when_standing_in_worktree(root: Path, tmp_path: Pa
         "feat",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(prev)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(prev)
+    assert _shell_cd(shell_file) == str(prev)
 
 
 def test_delete_cds_to_project_dir_when_oldpwd_gone(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     wt = root / "alpha" / "worktrees" / "feat"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     res = run_proc(
         "delete",
         "alpha",
         "feat",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(tmp_path / "does-not-exist")},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "alpha")
+    assert _shell_cd(shell_file) == str(root / "alpha")
 
 
 def test_delete_cds_from_subdir_of_worktree(root: Path, tmp_path: Path) -> None:
@@ -1159,19 +1206,19 @@ def test_delete_cds_from_subdir_of_worktree(root: Path, tmp_path: Path) -> None:
     sub.mkdir()
     prev = tmp_path / "prev"
     prev.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     res = run_proc(
         "delete",
         "alpha",
         "feat",
         root=root,
         cwd=sub,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(prev)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(prev)
+    assert _shell_cd(shell_file) == str(prev)
 
 
 def test_delete_no_cd_when_outside_deleted_worktree(root: Path, tmp_path: Path) -> None:
@@ -1181,8 +1228,8 @@ def test_delete_no_cd_when_outside_deleted_worktree(root: Path, tmp_path: Path) 
     other = root / "alpha" / "worktrees" / "other"
     prev = tmp_path / "prev"
     prev.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     # Standing in a different worktree: deleting 'feat' must not move the shell.
     res = run(
         "delete",
@@ -1190,11 +1237,11 @@ def test_delete_no_cd_when_outside_deleted_worktree(root: Path, tmp_path: Path) 
         "feat",
         root=root,
         cwd=other,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(prev)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text() == ""
+    assert shell_file.read_text() == ""
 
 
 def test_delete_silent_without_shell_wrapper(root: Path, tmp_path: Path) -> None:
@@ -1203,7 +1250,7 @@ def test_delete_silent_without_shell_wrapper(root: Path, tmp_path: Path) -> None
     wt = root / "alpha" / "worktrees" / "feat"
     prev = tmp_path / "prev"
     prev.mkdir()
-    # No WTM_CD_FILE (cd_file unset): no cd channel, so stay silent on stdout.
+    # No WTM_SHELL_FILE (shell_file unset): no shell channel, so stay silent on stdout.
     res = run_proc("delete", "alpha", "feat", root=root, cwd=wt, extra_env={"OLDPWD": str(prev)})
     assert res.returncode == 0, res.stderr
     assert res.stdout == ""
@@ -1419,11 +1466,11 @@ def test_rename_cds_to_mapped_path_when_standing_in_worktree(root: Path, tmp_pat
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     wt = root / "alpha" / "worktrees" / "feat"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
-    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=wt, cd_file=cd_file)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=wt, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix")
+    assert _shell_cd(shell_file) == str(root / "alpha" / "worktrees" / "fix")
 
 
 def test_rename_cds_to_mapped_subpath_from_subdir(root: Path, tmp_path: Path) -> None:
@@ -1432,11 +1479,11 @@ def test_rename_cds_to_mapped_subpath_from_subdir(root: Path, tmp_path: Path) ->
     wt = root / "alpha" / "worktrees" / "feat"
     sub = wt / "sub"
     sub.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
-    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=sub, cd_file=cd_file)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run_proc("rename", "alpha", "feat", "fix", root=root, cwd=sub, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "alpha" / "worktrees" / "fix" / "sub")
+    assert _shell_cd(shell_file) == str(root / "alpha" / "worktrees" / "fix" / "sub")
 
 
 def test_rename_no_cd_when_outside_renamed_worktree(root: Path, tmp_path: Path) -> None:
@@ -1444,12 +1491,12 @@ def test_rename_no_cd_when_outside_renamed_worktree(root: Path, tmp_path: Path) 
     run("create", "alpha", "feat", root=root)
     run("create", "alpha", "other", root=root)
     other = root / "alpha" / "worktrees" / "other"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     # Standing in a different worktree: renaming 'feat' must not move the shell.
-    res = run("rename", "alpha", "feat", "fix", root=root, cwd=other, cd_file=cd_file)
+    res = run("rename", "alpha", "feat", "fix", root=root, cwd=other, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text() == ""
+    assert shell_file.read_text() == ""
 
 
 # --- rename: the rename event ------------------------------------------------
@@ -2140,10 +2187,10 @@ def test_enter_event_fires_on_enter(root: Path, tmp_path: Path) -> None:
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     out = tmp_path / "ran"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     _write_hook(hooks / "wtm-enter", f'echo "$WTM_EVENT" > "{out}"\n')
-    res = run("enter", "alpha", "feat", root=root, hooks_dir=hooks, cd_file=cd_file)
+    res = run("enter", "alpha", "feat", root=root, hooks_dir=hooks, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "enter"
 
@@ -2152,10 +2199,10 @@ def test_enter_event_fires_on_create_cd(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     hooks = tmp_path / "hooks"
     out = tmp_path / "ran"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     _write_hook(hooks / "wtm-enter", f'echo "$WTM_EVENT" >> "{out}"\n')
-    res = run("create", "alpha", "feat", "-c", root=root, hooks_dir=hooks, cd_file=cd_file)
+    res = run("create", "alpha", "feat", "-c", root=root, hooks_dir=hooks, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "enter"
 
@@ -2175,11 +2222,11 @@ def test_enter_install_then_enter_order(root: Path, tmp_path: Path) -> None:
     run("create", "alpha", "feat", root=root)
     hooks = tmp_path / "hooks"
     order = tmp_path / "order"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     _write_hook(hooks / "wtm-install", f'echo install >> "{order}"\n')
     _write_hook(hooks / "wtm-enter", f'echo enter >> "{order}"\n')
-    res = run("enter", "alpha", "feat", "-i", root=root, hooks_dir=hooks, cd_file=cd_file)
+    res = run("enter", "alpha", "feat", "-i", root=root, hooks_dir=hooks, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["install", "enter"]
 
@@ -2189,8 +2236,8 @@ def test_create_cd_install_order(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     hooks = tmp_path / "hooks"
     order = tmp_path / "order"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     _write_hook(hooks / "wtm-post-create", f'echo post-create >> "{order}"\n')
     _write_hook(hooks / "wtm-install", f'echo install >> "{order}"\n')
     _write_hook(hooks / "wtm-enter", f'echo enter >> "{order}"\n')
@@ -2202,7 +2249,7 @@ def test_create_cd_install_order(root: Path, tmp_path: Path) -> None:
         "-i",
         root=root,
         hooks_dir=hooks,
-        cd_file=cd_file,
+        shell_file=shell_file,
     )
     assert res.returncode == 0, res.stderr
     assert order.read_text().split() == ["post-create", "install", "enter"]
@@ -2214,14 +2261,14 @@ def test_leave_event_fires_with_cwd_default(root: Path, tmp_path: Path) -> None:
     wt = root / "alpha" / "worktrees" / "feat"
     hooks = tmp_path / "hooks"
     out = tmp_path / "ran"
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     # cwd default: bare 'wtm leave' acts on the worktree you stand in.
     _write_hook(
         hooks / "wtm-leave",
         f'printf "%s|%s\\n" "$WTM_EVENT" "$WTM_WORKTREE_DIR" > "{out}"\n',
     )
-    res = run("leave", root=root, cwd=wt, hooks_dir=hooks, cd_file=cd_file)
+    res = run("leave", root=root, cwd=wt, hooks_dir=hooks, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     event, dir_ = out.read_text().strip().split("|")
     assert event == "leave"
@@ -2235,17 +2282,20 @@ def test_leave_cd_lands_in_oldpwd(root: Path, tmp_path: Path) -> None:
     wt = root / "alpha" / "worktrees" / "feat"
     prev = tmp_path / "prev"
     prev.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     res = run(
         "leave",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(prev)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(prev)
+    assert _shell_cd(shell_file) == str(prev)
+    # Leaving ends the session: the whole managed contract is unset.
+    assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
+    assert _shell_exports(shell_file) == {}
 
 
 def test_leave_cd_falls_back_to_project_dir(root: Path, tmp_path: Path) -> None:
@@ -2253,17 +2303,17 @@ def test_leave_cd_falls_back_to_project_dir(root: Path, tmp_path: Path) -> None:
     run("create", "alpha", "feat", root=root)
     wt = root / "alpha" / "worktrees" / "feat"
     gone = tmp_path / "gone"  # never created -> not a dir
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     res = run(
         "leave",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(gone)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "alpha")
+    assert _shell_cd(shell_file) == str(root / "alpha")
 
 
 def test_leave_no_cd_stays_put(root: Path, tmp_path: Path) -> None:
@@ -2272,19 +2322,21 @@ def test_leave_no_cd_stays_put(root: Path, tmp_path: Path) -> None:
     wt = root / "alpha" / "worktrees" / "feat"
     prev = tmp_path / "prev"
     prev.mkdir()
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
-    # -C/--no-cd runs leave hooks but leaves the shell where it stands.
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    # -C/--no-cd runs leave hooks and stays put, but the session still ends:
+    # the WTM_* contract is unset even though the shell does not cd out.
     res = run(
         "leave",
         "-C",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         extra_env={"OLDPWD": str(prev)},
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text() == ""
+    assert _shell_cd(shell_file) is None
+    assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
 
 
 # --- usage / dispatch --------------------------------------------------------
@@ -2623,11 +2675,11 @@ def test_migrate_dry_run_makes_no_changes(root: Path) -> None:
 
 def test_migrate_cd_emits_worktree_path(root: Path, tmp_path: Path) -> None:
     source = _seed_source(root)
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
-    res = run("migrate", "--project", "proj", "-c", root=root, cwd=source, cd_file=cd_file)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("migrate", "--project", "proj", "-c", root=root, cwd=source, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "proj" / "worktrees" / "feature" / "foo")
+    assert _shell_cd(shell_file) == str(root / "proj" / "worktrees" / "feature" / "foo")
 
 
 def test_migrate_detached_head_requires_name(root: Path) -> None:
@@ -2766,8 +2818,8 @@ def test_migrate_all_worktrees_skips_prunable(root: Path) -> None:
 def test_migrate_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Path) -> None:
     source = _seed_source(root)
     linked = _add_linked_worktree(source, "wt-bar", "bar", root)
-    cd_file = tmp_path / "cd"
-    cd_file.touch()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
     # Invoke from inside the linked worktree: -c should land there, not in main.
     res = run(
         "migrate",
@@ -2777,10 +2829,10 @@ def test_migrate_all_worktrees_cd_lands_in_cwd_worktree(root: Path, tmp_path: Pa
         "-c",
         root=root,
         cwd=linked,
-        cd_file=cd_file,
+        shell_file=shell_file,
     )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root / "proj" / "worktrees" / "wt-bar")
+    assert _shell_cd(shell_file) == str(root / "proj" / "worktrees" / "wt-bar")
 
 
 def test_migrate_all_worktrees_dry_run_previews_each(root: Path) -> None:
@@ -3167,16 +3219,29 @@ def test_workspace_write_refused_under_no_config(root: Path) -> None:
 
 def test_workspace_enter_emits_cd_and_fires_hook(root: Path, tmp_path: Path) -> None:
     workspace = tmp_path / "wshooks"
-    cd_file = tmp_path / "cd"
+    shell_file = tmp_path / "cd"
     out = tmp_path / "entered"
     _write_hook(
         workspace / "wtm-workspace-enter",
         f'printf "%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_WORKSPACE" "$1"'
         f' "$WTM_WORKTREE_DIR" > "{out}"\n',
     )
-    res = run("workspace", "enter", root=root, cd_file=cd_file, workspace_hooks_dir=workspace)
+    res = run(
+        "workspace", "enter", root=root, shell_file=shell_file, workspace_hooks_dir=workspace
+    )
     assert res.returncode == 0, res.stderr
-    assert cd_file.read_text().strip() == str(root)
+    assert _shell_cd(shell_file) == str(root)
+    # Workspace-level session: only the workspace vars are exported; the six
+    # worktree/project vars are unset.
+    assert _shell_exports(shell_file) == {"WTM_WORKSPACE": "ws", "WTM_WORKSPACE_DIR": str(root)}
+    assert _shell_unsets(shell_file) == {
+        "WTM_WORKTREE_DIR",
+        "WTM_BRANCH",
+        "WTM_PROJECT",
+        "WTM_PROJECT_DIR",
+        "WTM_WORKTREES_DIR",
+        "WTM_GIT_COMMON_DIR",
+    }
     event, ws, arg1, wtdir = out.read_text().strip().split("|")
     assert event == "workspace-enter"
     assert ws == "ws"
@@ -3186,7 +3251,7 @@ def test_workspace_enter_emits_cd_and_fires_hook(root: Path, tmp_path: Path) -> 
 
 def test_workspace_leave_from_root_lands_on_oldpwd(root: Path, tmp_path: Path) -> None:
     workspace = tmp_path / "wshooks"
-    cd_file = tmp_path / "cd"
+    shell_file = tmp_path / "cd"
     fired = tmp_path / "left"
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -3196,20 +3261,20 @@ def test_workspace_leave_from_root_lands_on_oldpwd(root: Path, tmp_path: Path) -
         "leave",
         root=root,
         cwd=root,
-        cd_file=cd_file,
+        shell_file=shell_file,
         workspace_hooks_dir=workspace,
         extra_env={"OLDPWD": str(outside)},
     )
     assert res.returncode == 0, res.stderr
     assert fired.read_text().strip() == "ws"
-    assert cd_file.read_text().strip() == str(outside)  # OLDPWD is outside the tree
+    assert _shell_cd(shell_file) == str(outside)  # OLDPWD is outside the tree
 
 
 def test_workspace_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     workspace = tmp_path / "wshooks"
-    cd_file = tmp_path / "cd"
+    shell_file = tmp_path / "cd"
     order = tmp_path / "order"
     # worktree-scope 'leave' (project .git/hooks) + workspace-scope 'workspace-leave'
     _write_hook(
@@ -3222,7 +3287,7 @@ def test_workspace_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) 
         "leave",
         root=root,
         cwd=wt,
-        cd_file=cd_file,
+        shell_file=shell_file,
         workspace_hooks_dir=workspace,
         extra_env={"OLDPWD": "/nonexistent-oldpwd"},
     )
@@ -3230,4 +3295,4 @@ def test_workspace_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) 
     # Teardown is inside-out: worktree leave first, then workspace-leave.
     assert order.read_text().splitlines() == ["wt:feat", "ws:ws"]
     # OLDPWD unusable -> cascaded out of the worktree tree to the projects-root parent.
-    assert cd_file.read_text().strip() == str(root.parent)
+    assert _shell_cd(shell_file) == str(root.parent)

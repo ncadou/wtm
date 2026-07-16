@@ -316,16 +316,37 @@ whether per-worktree hooks are committed to the branch is left to you.
 
 ## Shell integration
 
-`wtm` writes diagnostics to stderr and emits the target directory out-of-band so
-the calling shell can `cd` into it. The `wtm` function in `../env` provides this
-wrapper: it passes a `WTM_CD_FILE` temp file to the real binary and `cd`s into
-whatever path the command writes there. This is what makes `wtm enter` and
-`wtm create -c` change the current shell's directory.
+`wtm` writes diagnostics to stderr and emits shell directives out-of-band so the
+calling shell can follow the move. The `wtm` function in `../env` provides the
+wrapper: it passes a `WTM_SHELL_FILE` temp file to the real binary and *sources*
+whatever the command writes there. The directives are a `cd` plus the
+`export`/`unset` lines that sync the **`WTM_*` session contract** (see below).
+This is what makes `wtm enter` and `wtm create -c` change the current shell's
+directory *and* environment.
 
-`wtm delete` uses the same channel to rescue a stranded shell: when you delete
-the worktree you are standing in (or a subdirectory of it), it `cd`s to
-`$OLDPWD` if that still exists, otherwise to the project dir. Without the
-wrapper it stays silent (it cannot move the parent shell anyway).
+The contract follows a **session** model: entering sets it, leaving clears it.
+
+- `enter` / `create -c` / `migrate -c` — `cd` into the worktree and export the
+  full contract: `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`,
+  `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
+  `WTM_WORKSPACE_DIR`.
+- `rename` (when you are standing in the moved worktree) — follow it and update
+  `WTM_WORKTREE_DIR` / `WTM_BRANCH`.
+- `leave` — `cd` out (`$OLDPWD` or the project dir) and **unset** the whole
+  contract. `-C`/`--no-cd` keeps you put but still unsets (leaving ends the
+  session regardless of whether you also move).
+- `delete` (when you are standing in the doomed worktree) — rescue-`cd` out and
+  unset the contract.
+- `workspace enter` — `cd` into the projects root and export only
+  `WTM_WORKSPACE` / `WTM_WORKSPACE_DIR` (the six worktree/project vars are
+  unset). `workspace leave` unsets everything (even with `-C`).
+
+Because `WTM_WORKSPACE` is exported on `enter`, it **pins the active workspace**
+(it beats cwd inference) until you `wtm leave` — the session is deliberately
+sticky. Without the wrapper the commands stay silent about the environment (they
+cannot alter the parent shell) and print a manual-`cd` notice for the target
+directory only.
+
 
 ## Configuration
 
@@ -390,7 +411,7 @@ scopes); per-project scalars are deliberately *not* env-settable.
 - `WTM_SYSTEM_HOOKS_DIR` / `WTM_USER_HOOKS_DIR` — builtin hooks dir for that scope
 - `WTM_NO_HOOKS` — disable all hook firing
 - `XDG_CONFIG_HOME` — user config + user hooks location
-- `WTM_CD_FILE` — the shell-wrapper cd channel (see *Shell integration*)
+- `WTM_SHELL_FILE` — the shell-wrapper directive channel (see *Shell integration*)
 
 ## Development
 

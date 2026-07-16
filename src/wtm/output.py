@@ -8,8 +8,9 @@ modules (:mod:`wtm.project`, :mod:`wtm.worktree`) stay pure and return data;
 from __future__ import annotations
 
 __all__ = [
-    "emit_cd",
+    "MANAGED_ENV_VARS",
     "emit_env_line",
+    "emit_shell",
     "log",
     "tree_children_lines",
     "warn",
@@ -31,6 +32,22 @@ _FLAT_KEYS = ("project", "name", "path", "branch", "head")
 FlatAllRow = tuple[str, str, str, str, str, str]
 _FLAT_ALL_KEYS = ("workspace", "project", "name", "path", "branch", "head")
 
+# The WTM_* context vars the shell wrapper manages as a set: each shell move
+# exports the applicable subset and unsets the rest, so the interactive shell
+# reflects the current wtm session. WTM_WORKSPACE is included (it pins the
+# active workspace until leave -- the session contract); the wrapper never sets
+# any var outside this tuple.
+MANAGED_ENV_VARS = (
+    "WTM_WORKTREE_DIR",
+    "WTM_BRANCH",
+    "WTM_PROJECT",
+    "WTM_PROJECT_DIR",
+    "WTM_WORKTREES_DIR",
+    "WTM_GIT_COMMON_DIR",
+    "WTM_WORKSPACE",
+    "WTM_WORKSPACE_DIR",
+)
+
 
 def log(message: str) -> None:
     """Print an informational diagnostic to stderr."""
@@ -42,26 +59,55 @@ def warn(message: str) -> None:
     print(f"wtm: warning: {message}", file=sys.stderr)
 
 
-def emit_env_line(name: str, value: str) -> str:
-    """Render ``export NAME='value'`` with single-quote escaping for ``eval``."""
+def _squote(value: str) -> str:
+    """Single-quote *value* for POSIX ``sh`` (escaping embedded single quotes)."""
     escaped = value.replace("'", "'\\''")
 
-    return f"export {name}='{escaped}'"
+    return f"'{escaped}'"
 
 
-def emit_cd(target: Path, *, fallback: bool = True) -> None:
-    """Write *target* to WTM_CD_FILE for the shell wrapper.
+def emit_env_line(name: str, value: str) -> str:
+    """Render ``export NAME='value'`` with single-quote escaping for ``eval``."""
+    return f"export {name}={_squote(value)}"
 
-    When not running under the wrapper (no ``WTM_CD_FILE``): with *fallback*
-    print a manual-cd notice, otherwise stay silent (the cd could not affect
-    the parent shell anyway, e.g. delete's opportunistic rescue).
+
+def emit_shell(
+    cd: Path | None = None,
+    env: dict[str, str] | None = None,
+    *,
+    fallback: bool = True,
+) -> None:
+    """Emit shell directives to WTM_SHELL_FILE for the shell wrapper to source.
+
+    The wrapper creates the file, passes it, then sources it -- so the emitted
+    ``cd``/``export``/``unset`` lines run in the calling shell. *env* is the
+    desired managed subset to export (see :data:`MANAGED_ENV_VARS`); every
+    managed var *not* in *env* is unset, so the interactive shell reflects the
+    current wtm session. An empty *env* (leave/delete) unsets the whole set.
+
+    When not running under the wrapper (no ``WTM_SHELL_FILE``): with *fallback*
+    print a manual-cd notice for *cd*, otherwise stay silent (delete's
+    opportunistic rescue); env directives are dropped either way (they cannot
+    affect the parent shell).
     """
-    cd_file = os.environ.get("WTM_CD_FILE")
-    if cd_file:
-        Path(cd_file).write_text(f"{target}\n")
-    elif fallback:
-        warn("not running under the wtm shell wrapper; cd manually:")
-        print(target)
+    env = env or {}
+    shell_file = os.environ.get("WTM_SHELL_FILE")
+    if not shell_file:
+        if cd is not None and fallback:
+            warn("not running under the wtm shell wrapper; cd manually:")
+            print(cd)
+
+        return
+
+    lines: list[str] = []
+    if cd is not None:
+        lines.append(f"cd -- {_squote(str(cd))}")
+    lines.extend(emit_env_line(name, env[name]) for name in MANAGED_ENV_VARS if name in env)
+    unset = [name for name in MANAGED_ENV_VARS if name not in env]
+    if unset:
+        lines.append("unset " + " ".join(unset))
+
+    Path(shell_file).write_text("".join(f"{line}\n" for line in lines))
 
 
 def tree_children_lines(children: list[str]) -> list[str]:

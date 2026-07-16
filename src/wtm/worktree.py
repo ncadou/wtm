@@ -415,7 +415,18 @@ class Worktree:
         :meth:`resolve_path`). The active workspace (name + dir) is folded in so
         the emitted contract matches what hooks receive.
         """
-        context = derive_context(self.resolve_path(args))
+        return self.env_for_dir(self.resolve_path(args))
+
+    def env_for_dir(self, directory: Path) -> dict[str, str]:
+        """Return the ``WTM_*`` contract for an existing worktree *directory*.
+
+        The dir-keyed core of :meth:`resolve_env`: derives the context from
+        *directory* (must be inside the worktree) and folds in the active
+        workspace, so the shell wrapper's session env matches what hooks and
+        ``resolve --env`` emit. Used by the movers (enter/create/rename) that
+        already know their destination dir.
+        """
+        context = derive_context(directory)
         ws = self.config.workspace_of(context.project_dir)
         context.with_workspace(
             ws.name if ws is not None else "",

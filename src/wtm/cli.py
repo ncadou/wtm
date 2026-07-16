@@ -27,8 +27,8 @@ from wtm.core import (
 from wtm.hooks import EVENTS, Hooks, Scope
 from wtm.migrate import CreateMethod, Migrate, MigratePlan, MigrateResult
 from wtm.output import (
-    emit_cd,
     emit_env_line,
+    emit_shell,
     log,
     tree_children_lines,
     warn,
@@ -547,7 +547,8 @@ def create(
     )
     log(_describe_create(result))
     if do_cd:
-        emit_cd(result.context.dir)
+        dest = result.context.dir
+        emit_shell(cd=dest, env=ctx.obj.worktree.env_for_dir(dest))
 
 
 worktree_app.command(name="create")(create)
@@ -755,14 +756,16 @@ def enter(
             raise WtmError("-b/--branch requires --create")
         if base is not None:
             raise WtmError("--base/--off requires --create")
-        emit_cd(worktree.enter(args or [], do_install=do_install, strict=strict))
+        dest = worktree.enter(args or [], do_install=do_install, strict=strict)
+        emit_shell(cd=dest, env=worktree.env_for_dir(dest))
         return
 
     # --create: restrict to PROJECT NAME / NAME and branch on existence.
     if worktree.target_path(args or []).exists():
         if branch is not None:
             warn(f"branch '{branch}' ignored: worktree already exists")
-        emit_cd(worktree.enter(args or [], do_install=do_install, strict=strict))
+        dest = worktree.enter(args or [], do_install=do_install, strict=strict)
+        emit_shell(cd=dest, env=worktree.env_for_dir(dest))
         return
 
     result = worktree.create(
@@ -775,7 +778,8 @@ def enter(
         strict=strict,
     )
     log(_describe_create(result))
-    emit_cd(result.context.dir)
+    dest = result.context.dir
+    emit_shell(cd=dest, env=worktree.env_for_dir(dest))
 
 
 worktree_app.command(name="enter")(enter)
@@ -795,10 +799,13 @@ def leave(
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Run leave hooks for a worktree; cds out ($OLDPWD or project dir) unless -C."""
+    """Run leave hooks for a worktree; cds out ($OLDPWD or project dir) unless -C.
+
+    Ends the shell session either way: the WTM_* contract is unset even with -C
+    (which only suppresses the cd-out, not the session teardown).
+    """
     result = ctx.obj.worktree.leave(args or [], strict=strict)
-    if not no_cd:
-        emit_cd(result.cd_dir)
+    emit_shell(cd=None if no_cd else result.cd_dir, env={})
 
 
 worktree_app.command(name="leave")(leave)
@@ -828,7 +835,7 @@ def delete(
             warn(f"could not delete branch '{result.branch}'")
     rescue = rescue_dir(cwd, result.worktree_dir, result.project_dir)
     if rescue is not None:
-        emit_cd(rescue, fallback=False)
+        emit_shell(cd=rescue, env={}, fallback=False)
 
 
 worktree_app.command(name="delete")(delete)
@@ -860,7 +867,7 @@ def rename(
         log(f"renamed branch '{result.old_branch}' -> '{result.new_branch}'")
     remapped = remap_dir(cwd, result.old_dir, result.new_dir)
     if remapped is not None:
-        emit_cd(remapped, fallback=False)
+        emit_shell(cd=remapped, env=ctx.obj.worktree.env_for_dir(remapped), fallback=False)
 
 
 worktree_app.command(name="rename")(rename)
@@ -1045,7 +1052,7 @@ def migrate(
     result = migrator.run(plan, exclude=exclude, filter_files=filter_file, strict=strict)
     _describe_result(result)
     if do_cd and result.cd_dir is not None:
-        emit_cd(result.cd_dir)
+        emit_shell(cd=result.cd_dir, env=ctx.obj.worktree.env_for_dir(result.cd_dir))
     if result.worktrees_failed:
         raise SystemExit(1)
 
@@ -1299,7 +1306,10 @@ def workspace_enter(
 ) -> None:
     """cd into a workspace's projects root, firing workspace-enter hooks."""
     result = ctx.obj.workspaces.enter(name, strict=strict)
-    emit_cd(result.dir)
+    emit_shell(
+        cd=result.dir,
+        env={"WTM_WORKSPACE": result.name, "WTM_WORKSPACE_DIR": str(result.dir)},
+    )
 
 
 @workspace_app.command(name="leave")
@@ -1311,11 +1321,15 @@ def workspace_leave(
     no_cd: bool = typer.Option(False, "-C", "--no-cd", help="Run hooks without cd-ing out"),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Fire workspace-leave hooks (cascading the worktree leave when inside one); cd out."""
+    """Fire workspace-leave hooks (cascading the worktree leave when inside one); cd out.
+
+    Ends the session: the WTM_* contract is unset even with -C (which only
+    suppresses the cd-out).
+    """
     result = ctx.obj.workspaces.leave(name, strict=strict)
     log(f"left workspace '{result.name}'")
-    if not no_cd and result.cd_dir is not None:
-        emit_cd(result.cd_dir, fallback=False)
+    cd_dir = result.cd_dir if (not no_cd and result.cd_dir is not None) else None
+    emit_shell(cd=cd_dir, env={}, fallback=False)
 
 
 config_app = typer.Typer(
