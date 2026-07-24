@@ -19,6 +19,7 @@ from wtm.config import Config, ConfigAddress, Scope
 from wtm.core import WtmError
 from wtm.project import Project
 from wtm.workspace import Workspaces
+from wtm.worktree import Worktree
 
 
 @pytest.fixture(autouse=True)
@@ -231,6 +232,30 @@ def test_builtins_toggle_default_and_off(tmp_path: Path, monkeypatch: pytest.Mon
     assert spec.run_builtins is False
 
 
+def test_worktree_scope_hooks_accumulate_from_ancestor_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A worktree inline hook declared at the *project* scope (project-local
+    # [worktrees.NAME.hooks.on]) must be seen at worktree scope -- the branch
+    # used to read only the worktree-local file, so ancestor-declared worktree
+    # hooks silently never fired.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    wt = proj / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text(
+        '[worktrees.feat.hooks.on]\nenter = "from-project"\n'
+    )
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('[hooks.on]\nleave = "from-worktree"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    spec = cfg.scope_hook_spec(Scope.WORKTREE, proj, wt)
+    assert spec.on["enter"] == ["from-project"]  # inherited from the project tier
+    assert spec.on["leave"] == ["from-worktree"]  # the worktree-local file
+
+
 # --- base branch resolution --------------------------------------------------
 
 
@@ -255,10 +280,214 @@ def test_project_local_beats_registry_annotation(
     ws = tmp_path / "w"
     proj = ws / "proj"
     (proj / ".wtm").mkdir(parents=True)
-    (proj / ".wtm" / "config.toml").write_text('[project]\nbase_branch="local"\n')
+    (proj / ".wtm" / "config.toml").write_text('base_branch="local"\n')
     body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nbase_branch="registry"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     assert cfg.base_branch_for(cfg.workspaces["a"], "proj") == "local"
+
+
+def test_workspace_local_project_base_branch_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A base_branch set only in the workspace-local [projects.NAME] table must be
+    # both seen and correctly attributed to the project tier (the provenance bug).
+    ws = tmp_path / "w"
+    (ws / "proj").mkdir(parents=True)
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj]\nbase_branch="wslocal"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    workspace = cfg.workspaces["a"]
+    value, tier = cfg.base_branch_provenance(workspace, "proj")
+    assert value == "wslocal"
+    assert tier == "project"
+
+
+def test_project_arbitrary_key_cascades_into_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-reserved key resolves most-local-first and lands in `extra`.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('editor = "vim"\n')
+    body = (
+        f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\neditor="emacs"\nlint="ruff"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["editor"] == "vim"  # project-local wins
+    assert annotation.extra["lint"] == "ruff"  # inherited from the registry
+
+
+def test_project_kind_clash_across_scopes_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same key declared as a scalar in one scope and a table in another is a
+    # hard error naming the key.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[flags]\nx = "1"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nflags="scalar"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    with pytest.raises(WtmError, match="conflicting kinds"):
+        cfg.project_annotation(cfg.workspaces["a"], "proj")
+
+
+def test_generic_get_kind_clash_across_scopes_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `config get` (resolve_generic_value) enforces the same kind-clash rule as
+    # `config show` (project_annotation): one rule for every read surface.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[flags]\nx = "1"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nflags="scalar"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    with pytest.raises(WtmError, match="conflicting kinds"):
+        cfg.resolve_generic_value(target, "flags")
+
+
+def test_generic_get_base_branch_inherits_from_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `config get base_branch` from a project reports the inherited workspace-own
+    # value -- matching what `create` uses (base_branch_for), not `(unset)`.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "wsdefault"
+    assert effective == cfg.base_branch_for(cfg.workspaces["a"], "proj")
+    # The winning rung is tagged with its definition tier, not just its scope.
+    assert chain[0].tier == "workspace"
+
+
+def test_generic_get_base_branch_inherits_from_global(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With nothing project- or workspace-local, the global top-level default is
+    # the effective value, tagged `global`.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "global"
+    assert chain[0].tier == "global"
+
+
+def test_generic_get_base_branch_project_local_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A project-local value outranks the inherited workspace and global tiers,
+    # and the chain lists every present rung most-local-first.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('base_branch="local"\n')
+    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "local"
+    assert [(r.tier, r.value) for r in chain] == [
+        ("project", "local"),
+        ("workspace", "wsdefault"),
+        ("global", "global"),
+    ]
+
+
+def test_generic_get_base_branch_from_worktree_uses_project_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # From inside a worktree, base_branch (a project-tier concept) resolves the
+    # containing project's inherited value.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    target = cfg.resolve_generic_target(wt)
+    effective, _ = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "wsdefault"
+
+
+def test_generic_get_base_branch_from_workspace_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # At the workspace root (no project), base_branch resolves workspace-own then
+    # global -- there is no project tier to fold.
+    ws = tmp_path / "w"
+    ws.mkdir(parents=True)
+    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=ws)
+    target = cfg.resolve_generic_target(ws)
+    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "wsdefault"
+    assert [r.tier for r in chain] == ["workspace", "global"]
+
+
+def test_generic_get_non_inheritable_key_stays_entity_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-inheritable key does not fold ancestor tiers: a workspace-own scalar
+    # is invisible to a project entity's `config get`.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'[workspaces.a]\npath="{ws}"\neditor="emacs"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "editor")
+    assert effective is None
+    assert chain == []
+
+
+def test_project_presence_beats_registry_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty-string project-local value is a legitimate value that wins over a
+    # non-empty ancestor (presence-based, not `x or y`).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('description = ""\n')
+    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\ndescription="registry"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.description == ""
+
+
+def test_worktree_description_deep_cascade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A worktree's description resolves through the deep cascade: the project-local
+    # [worktrees.NAME] table supplies it, the worktree-local top-level overrides.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    (ws / "proj" / ".wtm").mkdir(parents=True)
+    (ws / "proj" / ".wtm" / "config.toml").write_text(
+        '[worktrees.feat]\ndescription = "from-project"\nowner = "team"\n'
+    )
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('description = "from-worktree"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    resolved = cfg.resolve_view(cwd=wt)
+    worktree = resolved.project.worktree
+    assert worktree is not None
+    assert worktree.description == "from-worktree"  # worktree-local wins
+    assert worktree.extra["owner"] == "team"  # inherited from the project tier
 
 
 # --- workspace-of lookup -----------------------------------------------------
@@ -270,6 +499,75 @@ def test_workspace_of_by_project_dir(tmp_path: Path, monkeypatch: pytest.MonkeyP
     cfg = _load(monkeypatch, tmp_path, f'[workspaces.a]\npath="{ws}"\n', cwd=tmp_path)
     assert cfg.workspace_of(ws / "proj").name == "a"
     assert cfg.workspace_of(tmp_path / "elsewhere" / "proj") is None
+
+
+# --- workspace-tier locality merge (unified probe engine) --------------------
+
+
+def test_workspace_local_empty_string_clears_registry_scalar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A workspace-local empty-string value is a legitimate value that wins over a
+    # non-empty registry declaration (presence-based, not `x or y`).
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('description = ""\n')
+    body = f'[workspaces.a]\npath="{ws}"\ndescription="registry"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    assert cfg.workspaces["a"].description == ""
+
+
+def test_workspace_arbitrary_key_populates_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-reserved workspace key resolves most-local-first into Workspace.extra
+    # (the registry engine used to leave extra permanently empty).
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('editor = "vim"\n')
+    body = f'[workspaces.a]\npath="{ws}"\neditor="emacs"\nlint="ruff"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    workspace = cfg.workspaces["a"]
+    assert workspace.extra["editor"] == "vim"  # workspace-local wins
+    assert workspace.extra["lint"] == "ruff"  # inherited from the registry
+    # The reserved declaration key `path` owns its typed surface and must never
+    # leak into `extra` (the registry entry's own `path = ...` is not arbitrary).
+    assert "path" not in workspace.extra
+
+
+def test_workspace_base_branch_matches_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The unified engine means Workspace.base_branch equals the workspace tier
+    # base_branch_provenance resolves (no divergence between the two).
+    ws = tmp_path / "w"
+    (ws / "proj").mkdir(parents=True)
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('base_branch = "wslocal"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="registry"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    workspace = cfg.workspaces["a"]
+    assert workspace.base_branch == "wslocal"  # workspace-local wins
+    value, tier = cfg.base_branch_provenance(workspace, "other")
+    assert (value, tier) == ("wslocal", "workspace")
+
+
+def test_global_default_workspace_presence_based(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The global default tier is presence-based too: a user-file value present
+    # (even alongside a system one) wins outright.
+    ws_a = tmp_path / "a"
+    ws_b = tmp_path / "b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    sys_path = tmp_path / "system.toml"
+    sys_path.write_text(f'default_workspace = "a"\n[workspaces.a]\npath="{ws_a}"\n')
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(sys_path))
+    body = f'default_workspace = "b"\n[workspaces.b]\npath="{ws_b}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    assert cfg.default_workspace == "b"
+    assert cfg.active == "b"
 
 
 # =============================================================================
@@ -708,50 +1006,63 @@ def test_base_branch_source_prefers_user_over_system(
 # --- project annotation (registry fallback) ----------------------------------
 
 
-def test_set_project_annotation_writes_nested_table(user_cfg: Path, tmp_path: Path) -> None:
-    ws = tmp_path / "w"
-    ws.mkdir()
-    _seed_user(user_cfg, "w", ws)
-    _ops().config.set_project_annotation("w", "api", "base_branch", "develop")
-    text = user_cfg.read_text()
-    assert "[workspaces.w.projects.api]" in text
-    assert 'base_branch = "develop"' in text
-    _ops().config.set_project_annotation("w", "api", "base_branch", None)
-    assert "develop" not in user_cfg.read_text()
-
-
-def test_set_project_annotation_requires_user_entry(user_cfg: Path) -> None:
-    with pytest.raises(WtmError, match="not declared at user scope"):
-        _ops().config.set_project_annotation("ghost", "api", "base_branch", "x")
-
-
-# --- project annotation via the Project service ------------------------------
-
-
 def test_project_set_writes_local_when_dir_exists(user_cfg: Path, tmp_path: Path) -> None:
     ws = tmp_path / "w"
     (ws / "api").mkdir(parents=True)
     _seed_user(user_cfg, "w", ws)
     result = _proj_ops().set("w", "api", base_branch="develop", description="the api")
-    assert result.local
+    assert result.scope is Scope.PROJECT
     local = (ws / "api" / ".wtm" / "config.toml").read_text()
-    assert "[project]" in local
     assert 'base_branch = "develop"' in local
     assert 'description = "the api"' in local
     assert "develop" not in user_cfg.read_text()  # not the registry
 
 
-def test_project_set_falls_back_to_registry_when_dir_absent(
+def test_project_set_defaults_to_workspace_when_only_ws_dir_exists(
     user_cfg: Path, tmp_path: Path
 ) -> None:
+    # Project dir absent, workspace dir present -> deepest existing = workspace-local.
     ws = tmp_path / "w"
     ws.mkdir()
     _seed_user(user_cfg, "w", ws)
     result = _proj_ops().set("w", "api", base_branch="develop", description=None)
-    assert not result.local
+    assert result.scope is Scope.WORKSPACE
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "[projects.api]" in text
+    assert 'base_branch = "develop"' in text
+    assert "develop" not in user_cfg.read_text()
+
+
+def test_project_set_scope_user_writes_registry(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    result = _proj_ops().set("w", "api", base_branch="develop", description=None, scope=Scope.USER)
+    assert result.scope is Scope.USER
     text = user_cfg.read_text()
     assert "[workspaces.w.projects.api]" in text
     assert 'base_branch = "develop"' in text
+
+
+def test_project_set_scope_workspace_writes_local(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    _proj_ops().set("w", "api", base_branch="develop", description=None, scope=Scope.WORKSPACE)
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "[projects.api]" in text
+    assert 'base_branch = "develop"' in text
+
+
+def test_project_set_scope_user_requires_user_workspace_declaration(
+    user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A system-only workspace cannot receive a user-scope project annotation.
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _system(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n')
+    with pytest.raises(WtmError, match="not declared at user scope"):
+        _proj_ops().set("w", "api", base_branch="develop", description=None, scope=Scope.USER)
 
 
 def test_project_set_requires_a_field(user_cfg: Path, tmp_path: Path) -> None:
@@ -774,3 +1085,99 @@ def test_project_show_base_branch_provenance(user_cfg: Path, tmp_path: Path) -> 
     shown = _proj_ops().show("w", "api")
     assert shown.effective_base_branch == "develop"
     assert shown.base_branch_source == "project"
+
+
+# --- worktree set ------------------------------------------------------------
+
+
+def _wt_ops() -> Worktree:
+    """Build a Worktree bound to a freshly loaded config."""
+    return Worktree(Config.load())
+
+
+def test_worktree_set_writes_local_when_wt_dir_exists(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    wt = ws / "api" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    result = _wt_ops().set(["api", "feat"], description="the feature", scope=None)
+    assert result.scope is Scope.WORKTREE
+    local = (wt / ".wtm" / "config.toml").read_text()
+    assert 'description = "the feature"' in local
+
+
+def test_worktree_set_defaults_to_project_when_only_project_dir_exists(
+    user_cfg: Path, tmp_path: Path
+) -> None:
+    # Worktree dir absent, project dir present -> deepest existing = project-local.
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    result = _wt_ops().set(["api", "feat"], description="planned", scope=None)
+    assert result.scope is Scope.PROJECT
+    text = (ws / "api" / ".wtm" / "config.toml").read_text()
+    assert "[worktrees.feat]" in text
+    assert 'description = "planned"' in text
+
+
+def test_worktree_set_scope_workspace_writes_ws_local(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    _wt_ops().set(["api", "feat"], description="deep", scope=Scope.WORKSPACE)
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "[projects.api.worktrees.feat]" in text
+    assert 'description = "deep"' in text
+
+
+def test_worktree_set_scope_user_writes_registry(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    result = _wt_ops().set(["api", "feat"], description="global", scope=Scope.USER)
+    assert result.scope is Scope.USER
+    text = user_cfg.read_text()
+    assert "[workspaces.w.projects.api.worktrees.feat]" in text
+    assert 'description = "global"' in text
+
+
+def test_worktree_set_empty_clears(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    wt = ws / "api" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    _wt_ops().set(["api", "feat"], description="temp", scope=None)
+    _wt_ops().set(["api", "feat"], description="", scope=None)
+    local = (wt / ".wtm" / "config.toml").read_text()
+    assert "description" not in local
+
+
+def test_worktree_set_requires_a_field(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    with pytest.raises(WtmError, match="nothing to set"):
+        _wt_ops().set(["api", "feat"], description=None, scope=None)
+
+
+def test_worktree_set_scope_user_requires_user_workspace_declaration(
+    user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A system-only workspace cannot receive a user-scope worktree annotation.
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _system(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n')
+    with pytest.raises(WtmError, match="not declared at user scope"):
+        _wt_ops().set(["api", "feat"], description="x", scope=Scope.USER)
+
+
+def test_worktree_set_roundtrips_through_read_cascade(user_cfg: Path, tmp_path: Path) -> None:
+    # A worktree-local write is seen by the deep read-cascade at the worktree tier.
+    ws = tmp_path / "w"
+    wt = ws / "api" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    _seed_user(user_cfg, "w", ws)
+    _wt_ops().set(["api", "feat"], description="round", scope=None)
+    resolved = Config.load(cwd=wt).resolve_view(cwd=wt)
+    assert resolved.project.worktree is not None
+    assert resolved.project.worktree.description == "round"

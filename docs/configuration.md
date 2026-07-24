@@ -11,43 +11,98 @@
 | project | `<project>/.wtm/config.toml` |
 | worktree | `<worktree>/.wtm/config.toml` |
 
-Scalars resolve most-specific-first (`CLI flag > env > worktree > project >
-workspace > user > system > built-in default`); inline hooks *accumulate* across
-scopes. Workspace **paths** are `~`/`$VAR`-expanded and must be absolute after
-expansion.
+Config resolves by a single, uniform rule: **increased locality always
+outranks lesser locality**. Every scope is folded by a locality-ordered,
+recursive merge (`CLI flag > env > worktree > project > workspace > user >
+system > built-in default`); the most-local *present* value of a key wins
+(`false`/`0`/`""` are real values — clearing a key *removes* it rather than
+writing an empty string). Inline hooks (`hooks.on`) are the one exception: they
+*accumulate* across scopes. Workspace **paths** are `~`/`$VAR`-expanded and must
+be absolute after expansion.
 
-Most config is hand-edited; a few defaults have management commands that write
-config for you (a comment-preserving `tomlkit` round-trip with an atomic
-replace). All reads and writes go through one authority — `wtm.config` — the
-only module that touches a `.wtm/config.toml` file. It offers a generic value
-facility (read/write any scalar at any named scope), a typed read view, and the
-named structural registry mutations (`add`/`set`/`rename`/`delete` workspace,
-`default_workspace`, global `base_branch`, project annotations) that write the
-**user file** and own their cross-key fixups (a rename follows a dangling
-`default_workspace`). Writes name their target scope explicitly; the
-"most-local home that exists" placement below is the calling command's policy.
+An entity stores its *own* config at the **top level** of its own file; a
+containing file nests a child under `<child-plural>.<name>`. So the same key —
+say a project's `base_branch` — is writable (and correctly resolved) at every
+scope above the project:
 
-| default | command | writes |
+| where written | table in that file |
+|---|---|
+| project-local | top level |
+| workspace-local | `[projects.NAME]` |
+| user / system | `[workspaces.W.projects.NAME]` |
+
+Worktrees add one more rung (`[worktrees.T]` project-local,
+`[projects.P.worktrees.T]` workspace-local, and so on).
+
+Most config is hand-edited; management commands write it for you (a
+comment-preserving `tomlkit` round-trip with an atomic replace). All reads and
+writes go through one authority — `wtm.config` — the only module that touches a
+`.wtm/config.toml` file. It offers a generic value facility (read/write any
+scalar at any named scope), a typed read view, and named structural registry
+mutations (`add`/`set`/`rename`/`delete` workspace, `default_workspace`, global
+`base_branch`) that write the **user file** and own their cross-key fixups (a
+rename follows a dangling `default_workspace`).
+
+## Write placement (`-s/--scope`)
+
+Annotation writes name their target scope explicitly with `-s/--scope`
+(mirroring `hook install`); the auto-default is the **deepest scope whose
+directory exists**. The allowed scopes narrow by entity:
+
+| command | writes | allowed `--scope` |
 |---|---|---|
-| global `base_branch` | `wtm config base-branch [VALUE] [--clear]` | user file, top-level |
-| `default_workspace` | `wtm workspace default [NAME] [--clear]` | user file, top-level |
-| workspace `path` | `wtm workspace add` / `set --path` | user file registry entry |
-| workspace `description` / `base_branch` | `wtm workspace set -d/-b` | `<ws>/.wtm/config.toml` if the dir exists, else the registry entry |
-| project `description` / `base_branch` | `wtm project set -d/-b` | `<project>/.wtm/config.toml` if the dir exists, else the user file annotation |
+| `wtm workspace set -d/-b` | workspace `description` / `base_branch` | workspace, user, system |
+| `wtm project set -d/-b` | project `description` / `base_branch` | project, workspace, user, system |
+| `wtm worktree set -d` | worktree `description` | worktree, project, workspace, user, system |
+| `wtm config base-branch [VALUE] [--clear]` | global `base_branch` (user file, top-level) | — |
+| `wtm workspace default [NAME] [--clear]` | `default_workspace` (user file, top-level) | — |
+| `wtm workspace add` / `set --path` | workspace `path` (user file registry entry) | — user-file only |
 
-Scalar writes target the **most-local home that already exists**: `workspace
-set`/`project set` write the entity's own `.wtm/config.toml` when its directory
-is present, otherwise they fall back to the user-file registry entry/annotation.
-One consequence: `wtm workspace add -b main` records `base_branch` in the
-registry entry, but a later `wtm workspace set -b develop` (once the dir exists)
-writes the workspace-local file, which *wins* on merge — and clearing it there
-(`set -b ""`) lets the registry value resurface. `wtm config show [--sources]
-[--hooks]` prints the effective merge for the current context and where each
-value comes from: it lists all workspaces, then descends only in the active one
-as far as the cwd sits — the cwd-bound project's resolved annotation (its
-`.wtm/config.toml` merged over the registry annotation) and, when the cwd is
-inside a worktree, that worktree's tier. `--sources` tags the actual tier each
-value resolves from; `--hooks` also renders accumulated inline hooks per scope.
+Workspace **declarations** (`add`/`set --path`/`rename`/`default`) stay
+user-file-only. `WTM_NO_CONFIG` refuses all writes. Because a workspace-local
+value *wins* on merge, clearing it there (`set -b ""`) lets a lesser-locality
+value (e.g. the user-file registry annotation) resurface.
+
+## Arbitrary keys (`config set/get/unset`)
+
+Any non-reserved key cascades too. `wtm config set/get/unset KEY [VALUE]` acts
+on the **cwd-inferred entity** (the deepest one the cwd sits inside — worktree,
+else project, else the active workspace); `-s/--scope` picks the file tier the
+same way annotations do.
+
+- `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key.
+- `wtm config get KEY [--sources]` — resolve it (most-local wins); `--sources`
+  lists the full chain, most-local first, each rung showing where the value comes
+  from (its scope) and the file it lives in.
+- `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
+
+An **inheritable** key resolves up the containment chain rather than staying
+entity-local. Today only `base_branch` inherits: `config get base_branch` folds
+the entity's own cascade plus its ancestors' (project → workspace → global
+default), so it reports the same effective value `create` would use. For an
+inheritable key `--sources` labels each rung by its definition level
+(`project` / `workspace` / `global`) — matching `config show` — rather than its
+raw scope, and still names the file.
+
+Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default_workspace`)
+have their own commands and are refused as arbitrary keys.
+
+## Inline hooks (`hook set/unset`)
+
+`wtm hook set EVENT "CMD" [-s SCOPE]` / `wtm hook unset EVENT [-s SCOPE]` write
+an inline hook (`[...hooks.on] EVENT = "CMD"`) at the cwd-inferred entity's
+table-path, reusing the same scope machinery. A `set` replaces the command in
+that one file; commands still accumulate across scopes at read time.
+
+## Showing the effective config
+
+`wtm config show [--sources] [--hooks]` prints the effective merge for the
+current context: it lists all workspaces, then descends only in the active one
+as far as the cwd sits — the cwd-bound project's resolved annotation and, when
+the cwd is inside a worktree, that worktree's tier. Arbitrary (non-reserved)
+keys resolved along the descent are always shown. `--sources` tags each value
+with its **winning** scope (the full chain lives in `config get KEY --sources`);
+`--hooks` also renders accumulated inline hooks per scope.
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its

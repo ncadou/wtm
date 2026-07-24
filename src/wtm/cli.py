@@ -12,12 +12,21 @@ __all__ = ["app", "main"]
 
 import sys
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 import typer
 from typer.core import TyperGroup
 
 from wtm import git
-from wtm.config import Config, HookSpec, ResolvedConfig, resolve_project_dir
+from wtm.config import (
+    Config,
+    GenericTarget,
+    HookSpec,
+    ResolvedConfig,
+    Workspace,
+    resolve_project_dir,
+    validate_arbitrary_key,
+)
 from wtm.core import (
     WtmError,
     current_dir,
@@ -807,18 +816,23 @@ def project_set(
     description: str | None = typer.Option(
         None, "-d", "--description", help="Description (empty clears it)"
     ),
+    scope: Scope | None = typer.Option(
+        None,
+        "-s",
+        "--scope",
+        help="Where to write (project|workspace|user|system); default: deepest existing dir",
+    ),
 ) -> None:
     """Annotate a project's base_branch / description (partial update).
 
-    Writes ``<project>/.wtm/config.toml`` when the project dir exists, else the
-    user-scope registry annotation. A field passed as ``""`` clears it.
+    Writes at ``--scope`` (project/workspace/user/system); the default is the
+    deepest scope whose directory exists. A field passed as ``""`` clears it.
     """
     workspace, project = split_workspace_project(args or [])
     result = ctx.obj.project.set(
-        workspace, project, base_branch=base_branch, description=description
+        workspace, project, base_branch=base_branch, description=description, scope=scope
     )
-    home = result.dir / ".wtm" / "config.toml" if result.local else "user config"
-    log(f"updated project '{result.name}' ({home})")
+    log(f"updated project '{result.name}' [{result.scope.value}] ({result.address.file})")
 
 
 @project_app.command(name="show")
@@ -1062,6 +1076,66 @@ def _render_hook_list(grouped: dict[str, list], *, types: bool) -> list[str]:
                 lines.append(f"    (config) {command}")
 
     return lines
+
+
+def _validate_event(event: str) -> None:
+    """Reject an unknown event name (guards the inline-hook writer)."""
+    if event not in EVENTS:
+        raise WtmError(f"unknown event '{event}' (expected {' | '.join(EVENTS)})")
+
+
+_GENERIC_SCOPE_HELP = (
+    "Where to write (worktree|project|workspace|user|system); default: deepest existing dir"
+)
+
+
+@hook_app.command(name="set")
+def hook_set(
+    ctx: typer.Context,
+    event: str = typer.Argument(
+        ..., metavar="EVENT", help="Lifecycle event", autocompletion=_complete_event
+    ),
+    command: str = typer.Argument(..., metavar="CMD", help="Inline sh -c command to run"),
+    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+) -> None:
+    """Set an inline hook for EVENT on the cwd-inferred entity.
+
+    Writes ``[...hooks.on] EVENT = "CMD"`` at the entity's table-path for the
+    chosen ``--scope`` (defaulting to the deepest scope whose directory exists),
+    reusing the generic-key prefix machinery. Replaces any inline command
+    already declared for EVENT at that scope's file; commands still accumulate
+    across scopes at read time.
+    """
+    _validate_event(event)
+    config = ctx.obj.config
+    target = config.resolve_generic_target(current_dir(resolve=False))
+    scope = _generic_scope(target, scope)
+    address, prefix = target.write_target(scope)
+    config.set_value(address, (*prefix, "hooks", "on", event), command)
+    log(f"{target.label}: set hook {event} [{scope.value}] ({address.file})")
+
+
+@hook_app.command(name="unset")
+def hook_unset(
+    ctx: typer.Context,
+    event: str = typer.Argument(
+        ..., metavar="EVENT", help="Lifecycle event", autocompletion=_complete_event
+    ),
+    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+) -> None:
+    """Remove the inline hook for EVENT from one tier of the cwd-inferred entity.
+
+    Mirrors :func:`hook_set`: the entity is cwd-inferred and ``--scope`` picks
+    the file (defaulting to the deepest existing dir). A no-op when no inline
+    command is declared for EVENT at that tier.
+    """
+    _validate_event(event)
+    config = ctx.obj.config
+    target = config.resolve_generic_target(current_dir(resolve=False))
+    scope = _generic_scope(target, scope)
+    address, prefix = target.write_target(scope)
+    config.unset_value(address, (*prefix, "hooks", "on", event))
+    log(f"{target.label}: unset hook {event} [{scope.value}] ({address.file})")
 
 
 def enter(
@@ -1393,6 +1467,35 @@ def resolve(
         print(ctx.obj.worktree.resolve_path(args or []))
 
 
+def set_(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[[WORKSPACE] PROJECT] NAME]",
+        help="Target: NAME, PROJECT NAME, WORKSPACE PROJECT NAME, or none (the cwd worktree)",
+        autocompletion=_complete_target,
+    ),
+    description: str | None = typer.Option(
+        None, "-d", "--description", help="Description (empty clears it)"
+    ),
+    scope: Scope | None = typer.Option(
+        None,
+        "-s",
+        "--scope",
+        help="Where to write (worktree|project|workspace|user|system); "
+        "default: deepest existing dir",
+    ),
+) -> None:
+    """Annotate a worktree's description (partial update).
+
+    Writes at ``--scope`` (worktree/project/workspace/user/system); the default
+    is the deepest scope whose directory exists. A field passed as ``""`` clears
+    it.
+    """
+    result = ctx.obj.worktree.set(args or [], description=description, scope=scope)
+    log(f"updated worktree '{result.name}' [{result.scope.value}] ({result.address.file})")
+
+
 # Worktree handlers, registered in one ordered block (after every handler is
 # defined) so the help ordering lives in one place. Order is common-first and
 # grouped: the session pair, then the lifecycle mutations, then the read-only
@@ -1410,6 +1513,12 @@ _WORKTREE_COMMANDS = (
 for _name, _handler in _WORKTREE_COMMANDS:
     worktree_app.command(name=_name)(_handler)
     app.command(name=_name, rich_help_panel="Worktree shortcuts")(_handler)
+
+
+# 'set' is worktree-namespaced only (no top-level shortcut), matching the
+# subcommand-only 'project set' / 'workspace set': it is an annotation verb, not
+# a session/lifecycle mover, so it reads better under 'wtm worktree'.
+worktree_app.command(name="set")(set_)
 
 
 # Top-level 'wtm clone' alias, registered after the worktree shortcuts so the
@@ -1713,17 +1822,24 @@ def workspace_set(
     base_branch: str | None = typer.Option(
         None, "-b", "--base-branch", help="Base branch (empty clears it)"
     ),
+    scope: Scope | None = typer.Option(
+        None,
+        "-s",
+        "--scope",
+        help="Where to write scalars (workspace|user|system); default: deepest existing dir",
+    ),
 ) -> None:
     """Edit an existing workspace's scalars (partial update).
 
     ``--path`` always rewrites the user-scope registry entry. ``--description`` /
-    ``--base-branch`` write ``<ws>/.wtm/config.toml`` when the workspace dir
-    exists, else the registry entry.
+    ``--base-branch`` land at ``--scope`` (workspace/user/system); the default is
+    the deepest scope whose directory exists.
     """
     result = ctx.obj.workspaces.set(
-        name, path=path, description=description, base_branch=base_branch
+        name, path=path, description=description, base_branch=base_branch, scope=scope
     )
-    log(f"updated '{result.name}'")
+    where = f" [{result.scope.value}]" if result.scope is not None else ""
+    log(f"updated '{result.name}'{where}")
     if result.resolved is not None and result.missing:
         warn(f"path does not exist yet: {result.resolved}")
 
@@ -1817,7 +1933,8 @@ def workspace_leave(
 
 
 config_app = typer.Typer(
-    help="Inspect config (show) and manage the global default (base-branch).",
+    help="Inspect config (show), manage the global default (base-branch), "
+    "and read/write arbitrary keys (get/set/unset).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -1838,9 +1955,11 @@ def config_show(
     listed; the active one descends only as far as the cwd sits -- the cwd-bound
     project's effective annotation (registry annotation merged with its
     ``.wtm/config.toml``, project-local winning), and its worktree tier when the
-    cwd is inside a worktree. ``--sources`` annotates the actual tier each value
-    resolves from and flags inert annotations (projects with no dir on disk);
-    ``--hooks`` also renders accumulated inline hooks per scope along that chain.
+    cwd is inside a worktree. Arbitrary (non-reserved) keys resolved along that
+    cwd descent are always shown. ``--sources`` annotates the actual tier each
+    value resolves from and flags inert annotations (projects with no dir on
+    disk); ``--hooks`` also renders accumulated inline hooks per scope along that
+    chain.
     """
     config = ctx.obj.config
     view = config.resolve_view()
@@ -1855,17 +1974,38 @@ def config_show(
         print(f"  {name}: {ws.path}{origin}")
         if ws.base_branch:
             print(f"    base_branch: {ws.base_branch}")
-        for pname, ann in sorted(ws.projects.items()):
-            inert = ""
-            if sources and not (ws.path / pname / ".git").is_dir():
-                inert = "  (no such project on disk)"
-            bits = [b for b in (ann.description, ann.base_branch) if b]
-            detail = f" ({', '.join(bits)})" if bits else ""
-            print(f"    project {pname}{detail}{inert}")
+        if name == config.active:
+            _print_extra("    ", ws.extra)
+        for pname in sorted(_workspace_project_names(config, ws)):
+            _print_workspace_project(config, ws, pname, sources)
         if hooks:
             _print_scope_hooks("    ", ws.hooks, sources, "workspace")
 
     _print_effective_project(view, sources, hooks)
+
+
+def _workspace_project_names(config: Config, ws: Workspace) -> set[str]:
+    """Projects to list under *ws*: on-disk dirs unioned with declared names."""
+    on_disk = {
+        entry.name
+        for entry in (ws.path.iterdir() if ws.path.is_dir() else [])
+        if entry.is_dir() and (entry / ".git").is_dir()
+    }
+
+    return on_disk | config.declared_project_names(ws)
+
+
+def _print_workspace_project(config: Config, ws: Workspace, pname: str, sources: bool) -> None:
+    """Render one project line under a workspace, resolved via the probe engine."""
+    annotation = config.project_annotation(ws, pname)
+    effective, source = config.base_branch_provenance(ws, pname)
+    branch = f"{effective}  [{source}]" if (effective and sources) else effective
+    bits = [b for b in (annotation.description, branch) if b]
+    detail = f" ({', '.join(bits)})" if bits else ""
+    inert = ""
+    if sources and not (ws.path / pname / ".git").is_dir():
+        inert = "  (no such project on disk)"
+    print(f"    project {pname}{detail}{inert}")
 
 
 def _print_effective_project(view: ResolvedConfig, sources: bool, hooks: bool) -> None:
@@ -1880,6 +2020,7 @@ def _print_effective_project(view: ResolvedConfig, sources: bool, hooks: bool) -
     if project.effective_base_branch:
         origin = f"  [{project.base_branch_source}]" if sources else ""
         print(f"  base_branch: {project.effective_base_branch}{origin}")
+    _print_extra("  ", project.extra)
     if hooks:
         _print_scope_hooks("  ", project.hooks, sources, "project")
 
@@ -1888,8 +2029,17 @@ def _print_effective_project(view: ResolvedConfig, sources: bool, hooks: bool) -
         return
 
     print(f"  worktree {worktree.name}: {worktree.dir}")
+    if worktree.description:
+        print(f"    description: {worktree.description}")
+    _print_extra("    ", worktree.extra)
     if hooks:
         _print_scope_hooks("    ", worktree.hooks, sources, "worktree")
+
+
+def _print_extra(indent: str, extra: dict[str, object]) -> None:
+    """Render an entity's arbitrary (non-reserved) keys, always in the cwd descent."""
+    for key, value in sorted(extra.items()):
+        print(f"{indent}{key}: {value}")
 
 
 def _print_scope_hooks(indent: str, spec: HookSpec, sources: bool, scope: str) -> None:
@@ -1898,6 +2048,14 @@ def _print_scope_hooks(indent: str, spec: HookSpec, sources: bool, scope: str) -
         for command in commands:
             origin = f"  [{scope}]" if sources else ""
             print(f"{indent}hook {event} = {command}{origin}")
+
+
+def _tilde(path: Path) -> str:
+    """Render *path* with the home dir collapsed to ``~`` (best-effort)."""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
 
 
 @config_app.command(name="base-branch")
@@ -1934,6 +2092,100 @@ def config_base_branch(
         return
     ctx.obj.config.set_base_branch(value)
     log(f"base_branch set to '{value}'")
+
+
+# --- generic key surface (arbitrary keys, cwd-inferred entity) ---------------
+
+
+@config_app.command(name="set")
+def config_set(
+    ctx: typer.Context,
+    key: str = typer.Argument(..., metavar="KEY", help="Arbitrary (non-reserved) config key"),
+    value: str = typer.Argument(..., metavar="VALUE", help="Value to write"),
+    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+) -> None:
+    """Set an arbitrary config KEY on the cwd-inferred entity.
+
+    The entity is the deepest one the cwd sits inside (worktree, else project,
+    else the active workspace); ``--scope`` picks which file tier of that
+    entity's cascade to write, defaulting to the deepest scope whose directory
+    exists. Reserved keys (``hooks``/``projects``/``worktrees``/``path``/
+    ``default_workspace``) have their own commands and are refused here.
+    """
+    validate_arbitrary_key(key)
+    config = ctx.obj.config
+    target = config.resolve_generic_target(current_dir(resolve=False))
+    scope = _generic_scope(target, scope)
+    address, prefix = target.write_target(scope)
+    config.set_value(address, (*prefix, key) if prefix else key, value)
+    log(f"{target.label}: set {key} [{scope.value}] ({address.file})")
+
+
+@config_app.command(name="get")
+def config_get(
+    ctx: typer.Context,
+    key: str = typer.Argument(..., metavar="KEY", help="Arbitrary (non-reserved) config key"),
+    sources: bool = typer.Option(
+        False, "-s", "--sources", help="Print the full probe chain, most-local first"
+    ),
+) -> None:
+    """Resolve an arbitrary config KEY for the cwd-inferred entity.
+
+    Prints the winning (most-local) value, or ``(unset)`` when the key appears
+    nowhere in the entity's cascade. ``--sources`` instead lists every rung that
+    carries the key, most-local first, each showing where the value comes from --
+    its definition level (``project``/``workspace``/``global``) for an inherited
+    key such as ``base_branch``, otherwise its scope -- and the file it lives in.
+    """
+    validate_arbitrary_key(key)
+    config = ctx.obj.config
+    target = config.resolve_generic_target(current_dir(resolve=False))
+    effective, chain = config.resolve_generic_value(target, key)
+    if sources:
+        if not chain:
+            print("(unset)")
+
+            return
+        for rung in chain:
+            label = rung.tier or rung.scope.value
+            print(f"{rung.value}  [{label}]  {_tilde(rung.file)}")
+
+        return
+    print("(unset)" if effective is None else str(effective))
+
+
+@config_app.command(name="unset")
+def config_unset(
+    ctx: typer.Context,
+    key: str = typer.Argument(..., metavar="KEY", help="Arbitrary (non-reserved) config key"),
+    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+) -> None:
+    """Remove an arbitrary config KEY from one tier of the cwd-inferred entity.
+
+    Mirrors :func:`config_set`: the entity is cwd-inferred and ``--scope`` picks
+    the file (defaulting to the deepest existing dir). A no-op when the key is
+    absent at that tier.
+    """
+    validate_arbitrary_key(key)
+    config = ctx.obj.config
+    target = config.resolve_generic_target(current_dir(resolve=False))
+    scope = _generic_scope(target, scope)
+    address, prefix = target.write_target(scope)
+    config.unset_value(address, (*prefix, key) if prefix else key)
+    log(f"{target.label}: unset {key} [{scope.value}] ({address.file})")
+
+
+def _generic_scope(target: GenericTarget, scope: Scope | None) -> Scope:
+    """Resolve/validate the write scope for a generic key against *target*."""
+    scope = scope if scope is not None else target.default_scope
+    if scope not in target.allowed_scopes:
+        allowed = ", ".join(s.value for s in target.allowed_scopes)
+        raise WtmError(
+            f"cannot write a key for {target.label} at '{scope.value}' scope "
+            f"(choose one of {allowed})"
+        )
+
+    return scope
 
 
 # Register the hook group last so the "Command groups" panel lists it after

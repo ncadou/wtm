@@ -3374,6 +3374,23 @@ def test_config_show_sources_flags_inert_annotation(tmp_path: Path) -> None:
     assert "no such project on disk" in res.stdout
 
 
+def test_config_show_lists_project_local_only_annotation(tmp_path: Path) -> None:
+    # A project annotated *only* in its own <project>/.wtm/config.toml (declared
+    # nowhere in the registry) still appears in the workspace listing, resolved
+    # via the probe engine -- the old registry-only enumeration missed it.
+    ws = tmp_path / "alpha"
+    proj = ws / "api"
+    (proj / ".git").mkdir(parents=True)
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('base_branch = "develop"\n')
+    config = tmp_path / "c.toml"
+    config.write_text(f'[workspaces.alpha]\npath = "{ws}"\n')
+    res = _run_multi("config", "show", config=config, cwd=tmp_path, workspace="alpha")
+    assert res.returncode == 0, res.stderr
+    assert "project api" in res.stdout
+    assert "develop" in res.stdout
+
+
 def test_project_list_all_spans_workspaces(root: Path, tmp_path: Path) -> None:
     # Two workspaces, each with one project; --all --worktrees prepends the ws.
     config, roots = _multi_workspace_config(tmp_path, ["A", "B"])
@@ -3584,6 +3601,23 @@ def test_workspace_set_edits_entry(root: Path) -> None:
     assert 'description = "edited"' in (root / ".wtm" / "config.toml").read_text()
 
 
+def test_workspace_set_scope_user_writes_registry(root: Path) -> None:
+    # Explicit -s user routes scalars to the user-scope registry entry, even
+    # though the workspace dir exists (which would auto-default to workspace).
+    res = run("workspace", "set", "ws", "-d", "edited", "-s", "user", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[user]" in res.stderr
+    assert 'description = "edited"' in _config_text(root)
+    local = root / ".wtm" / "config.toml"
+    assert not local.exists() or "edited" not in local.read_text()
+
+
+def test_workspace_set_scope_rejects_project(root: Path) -> None:
+    res = run("workspace", "set", "ws", "-d", "x", "-s", "project", root=root)
+    assert res.returncode == 1
+    assert "project" in res.stderr.lower()
+
+
 def test_config_base_branch_set_show_clear(root: Path) -> None:
     # A test-owned config file so writes persist across invocations (the default
     # harness config is rewritten on every run).
@@ -3644,11 +3678,29 @@ def test_config_show_worktree_tier_only_when_cwd_inside(root: Path) -> None:
     assert "worktree feat:" not in from_proj.stdout
 
 
+def test_config_show_arbitrary_keys_shown_in_cwd_descent(root: Path) -> None:
+    # Arbitrary keys resolved along the cwd descent are always shown (no flag),
+    # for the project and its worktree tiers.
+    _seed_repo(root, "proj")
+    run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    run("create", "proj", "feat", root=root)
+    wt = root / "proj" / "worktrees" / "feat"
+    run("config", "set", "runner", "pytest", root=root, cwd=wt)
+
+    from_proj = run("config", "show", root=root, cwd=root / "proj")
+    assert "editor: nvim" in from_proj.stdout
+
+    from_wt = run("config", "show", root=root, cwd=wt)
+    assert "runner: pytest" in from_wt.stdout
+    # The worktree descent still surfaces the project-tier key too.
+    assert "editor: nvim" in from_wt.stdout
+
+
 def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
     _seed_repo(root, "proj")
     run("project", "set", "proj", "-b", "develop", root=root)
     (root / "proj" / ".wtm" / "config.toml").write_text(
-        '[project]\nbase_branch = "develop"\n[project.hooks.on]\ninstall = "make deps"\n'
+        'base_branch = "develop"\n[hooks.on]\ninstall = "make deps"\n'
     )
     without = run("config", "show", root=root, cwd=root / "proj")
     assert "hook install" not in without.stdout
@@ -3661,9 +3713,35 @@ def test_project_set_writes_local_config(root: Path) -> None:
     res = run("project", "set", "proj", "-b", "develop", "-d", "the proj", root=root)
     assert res.returncode == 0, res.stderr
     local = (root / "proj" / ".wtm" / "config.toml").read_text()
-    assert "[project]" in local
     assert 'base_branch = "develop"' in local
     assert 'description = "the proj"' in local
+
+
+def test_project_set_scope_workspace_writes_ws_local(root: Path) -> None:
+    # -s workspace lands the annotation in the workspace-local [projects.proj].
+    _seed_repo(root, "proj")
+    res = run("project", "set", "proj", "-b", "develop", "-s", "workspace", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[workspace]" in res.stderr
+    text = (root / ".wtm" / "config.toml").read_text()
+    assert "[projects.proj]" in text
+    assert 'base_branch = "develop"' in text
+    assert not (root / "proj" / ".wtm" / "config.toml").exists()
+
+
+def test_project_set_scope_user_writes_registry(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("project", "set", "proj", "-b", "develop", "-s", "user", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[user]" in res.stderr
+    assert "[workspaces.ws.projects.proj]" in _config_text(root)
+
+
+def test_project_set_scope_rejects_worktree(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("project", "set", "proj", "-b", "develop", "-s", "worktree", root=root)
+    assert res.returncode == 1
+    assert "worktree" in res.stderr.lower()
 
 
 def test_project_show_outputs_detail(root: Path) -> None:
@@ -3673,6 +3751,312 @@ def test_project_show_outputs_detail(root: Path) -> None:
     assert res.returncode == 0, res.stderr
     assert "name: proj" in res.stdout
     assert "effective base_branch: develop [project]" in res.stdout
+
+
+def test_worktree_set_writes_local_config(root: Path) -> None:
+    # A created worktree exists on disk, so the default scope is worktree-local.
+    _seed_repo(root, "proj")
+    assert run("create", "proj", "feat", root=root).returncode == 0
+    res = run("worktree", "set", "proj", "feat", "-d", "the feature", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[worktree]" in res.stderr
+    local = (root / "proj" / "worktrees" / "feat" / ".wtm" / "config.toml").read_text()
+    assert 'description = "the feature"' in local
+
+
+def test_worktree_set_scope_project_writes_project_local(root: Path) -> None:
+    _seed_repo(root, "proj")
+    assert run("create", "proj", "feat", root=root).returncode == 0
+    res = run("worktree", "set", "proj", "feat", "-d", "planned", "-s", "project", root=root)
+    assert res.returncode == 0, res.stderr
+    text = (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert "[worktrees.feat]" in text
+    assert 'description = "planned"' in text
+
+
+def test_worktree_set_scope_workspace_writes_ws_local(root: Path) -> None:
+    _seed_repo(root, "proj")
+    assert run("create", "proj", "feat", root=root).returncode == 0
+    res = run("worktree", "set", "proj", "feat", "-d", "deep", "-s", "workspace", root=root)
+    assert res.returncode == 0, res.stderr
+    text = (root / ".wtm" / "config.toml").read_text()
+    assert "[projects.proj.worktrees.feat]" in text
+    assert 'description = "deep"' in text
+
+
+def test_worktree_set_scope_user_writes_registry(root: Path) -> None:
+    _seed_repo(root, "proj")
+    assert run("create", "proj", "feat", root=root).returncode == 0
+    res = run("worktree", "set", "proj", "feat", "-d", "global", "-s", "user", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "[workspaces.ws.projects.proj.worktrees.feat]" in _config_text(root)
+
+
+def test_worktree_set_requires_a_field(root: Path) -> None:
+    _seed_repo(root, "proj")
+    assert run("create", "proj", "feat", root=root).returncode == 0
+    res = run("worktree", "set", "proj", "feat", root=root)
+    assert res.returncode == 1
+    assert "nothing to set" in res.stderr
+
+
+def test_worktree_set_has_no_top_level_shortcut(root: Path) -> None:
+    # 'set' is worktree-namespaced only (unlike enter/create/etc.).
+    _seed_repo(root, "proj")
+    res = run("set", "proj", "feat", "-d", "x", root=root)
+    assert res.returncode != 0
+
+
+# --- generic config set / get / unset (arbitrary keys, cwd-inferred entity) ---
+
+
+def test_config_set_get_project_local(root: Path) -> None:
+    # From inside a project, the arbitrary key lands in the project-local file
+    # and reads back through the cascade.
+    _seed_repo(root, "proj")
+    res = run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "[project]" in res.stderr
+    assert 'editor = "nvim"' in (root / "proj" / ".wtm" / "config.toml").read_text()
+    got = run("config", "get", "editor", root=root, cwd=root / "proj")
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip().splitlines()[0] == "nvim"
+
+
+def test_config_set_scope_workspace_from_project_cwd(root: Path) -> None:
+    # -s workspace lands the project's key in the workspace-local [projects.proj].
+    _seed_repo(root, "proj")
+    res = run("config", "set", "editor", "emacs", "-s", "workspace", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    text = (root / ".wtm" / "config.toml").read_text()
+    assert "[projects.proj]" in text
+    assert 'editor = "emacs"' in text
+
+
+def test_config_get_sources_shows_full_chain(root: Path) -> None:
+    # A key set at two tiers: --sources lists both, most-local first, and the
+    # most-local one wins. Each rung also names the file it lives in.
+    _seed_repo(root, "proj")
+    run("config", "set", "editor", "vi", "-s", "workspace", root=root, cwd=root / "proj")
+    run("config", "set", "editor", "nvim", "-s", "project", root=root, cwd=root / "proj")
+    res = run("config", "get", "editor", "--sources", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "nvim  [project]" in res.stdout
+    assert "vi  [workspace]" in res.stdout
+    assert res.stdout.index("[project]") < res.stdout.index("[workspace]")
+    # The file each value lives in is shown too.
+    assert str(root / "proj" / ".wtm" / "config.toml") in res.stdout
+    assert str(root / ".wtm" / "config.toml") in res.stdout
+
+
+def test_config_get_base_branch_reports_inherited_value(root: Path) -> None:
+    # `config get base_branch` from a project reports the inherited workspace-own
+    # default a real `create` would use -- not `(unset)`.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\nbase_branch = "develop"\n')
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "get",
+        "base_branch",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "develop"
+
+
+def test_config_get_base_branch_sources_lists_inheritance_tiers(root: Path) -> None:
+    # --sources labels each rung by its definition level (project/workspace/
+    # global), most-local-first, so the two `user`-file rungs read distinctly.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'base_branch = "main"\n'
+        f'[workspaces.ws]\npath = "{root}"\nbase_branch = "develop"\n'
+        f'[workspaces.ws.projects.proj]\nbase_branch = "feature"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "get",
+        "base_branch",
+        "--sources",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "feature  [project]" in res.stdout
+    assert "develop  [workspace]" in res.stdout
+    assert "main  [global]" in res.stdout
+    assert (
+        res.stdout.index("[project]")
+        < res.stdout.index("[workspace]")
+        < res.stdout.index("[global]")
+    )
+
+
+def test_config_set_user_scope_renders_dotted_headers(root: Path) -> None:
+    # A fresh deep user-scope generic write produces dotted [workspaces.W.
+    # projects.P] headers -- no empty [workspaces] / [projects] container lines.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "set",
+        "editor",
+        "nvim",
+        "-s",
+        "user",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    text = cfg.read_text()
+    assert "[workspaces.ws.projects.proj]" in text
+    assert 'editor = "nvim"' in text
+    lines = [line.strip() for line in text.splitlines()]
+    assert "[projects]" not in lines  # no empty container header
+
+
+def test_config_unset_removes_key(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    res = run("config", "unset", "editor", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "editor" not in (root / "proj" / ".wtm" / "config.toml").read_text()
+
+
+def test_config_set_workspace_entity_from_root_cwd(root: Path) -> None:
+    # Standing at the workspace root (no project), the entity floor is the
+    # active workspace; the key lands workspace-local top-level.
+    res = run("config", "set", "editor", "nvim", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "workspace 'ws'" in res.stderr
+    assert 'editor = "nvim"' in (root / ".wtm" / "config.toml").read_text()
+
+
+def test_config_set_rejects_reserved_key(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("config", "set", "hooks", "x", root=root, cwd=root / "proj")
+    assert res.returncode == 1
+    assert "reserved" in res.stderr.lower()
+
+
+def test_config_get_missing_key_reports_unset(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("config", "get", "editor", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "(unset)" in res.stdout
+
+
+def test_config_set_refused_under_no_config(root: Path) -> None:
+    # WTM_NO_CONFIG empties the registry, so the write never lands: whether the
+    # error is the write guard or the (consequent) no-active-workspace, nothing
+    # is written to disk.
+    res = run(
+        "config",
+        "set",
+        "editor",
+        "nvim",
+        root=root,
+        cwd=root,
+        extra_env={"WTM_NO_CONFIG": "1"},
+    )
+    assert res.returncode == 1
+    assert not (root / ".wtm" / "config.toml").exists()
+
+
+def test_config_set_rejects_unreachable_scope(root: Path) -> None:
+    # Standing in the workspace (no project), a -s project write has no project
+    # entity to attach to.
+    res = run("config", "set", "editor", "nvim", "-s", "project", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "project" in res.stderr.lower()
+
+
+# --- inline hook writer: hook set / unset (phase 5) --------------------------
+
+
+def test_hook_set_writes_project_local_inline(root: Path) -> None:
+    # From inside a project, an inline hook lands in the project-local file under
+    # [hooks.on] and reads back through the merged cascade (config show --hooks).
+    _seed_repo(root, "proj")
+    res = run("hook", "set", "install", "make deps", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "[project]" in res.stderr
+    text = (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert "[hooks.on]" in text
+    assert 'install = "make deps"' in text
+    shown = run("config", "show", "--hooks", root=root, cwd=root / "proj")
+    assert "hook install = make deps" in shown.stdout
+
+
+def test_hook_set_scope_workspace_from_project_cwd(root: Path) -> None:
+    # -s workspace nests the inline hook under [projects.proj.hooks.on].
+    _seed_repo(root, "proj")
+    res = run("hook", "set", "enter", "echo hi", "-s", "workspace", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    text = (root / ".wtm" / "config.toml").read_text()
+    assert "[projects.proj.hooks.on]" in text
+    assert 'enter = "echo hi"' in text
+    assert not (root / "proj" / ".wtm" / "config.toml").exists()
+
+
+def test_hook_set_workspace_entity_from_root_cwd(root: Path) -> None:
+    # Standing at the workspace root (no project), the entity floor is the active
+    # workspace; the inline hook nests under the workspace entry's hooks.on.
+    res = run("hook", "set", "workspace-enter", "echo in", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "workspace 'ws'" in res.stderr
+    text = (root / ".wtm" / "config.toml").read_text()
+    assert "[hooks.on]" in text
+    assert 'workspace-enter = "echo in"' in text
+
+
+def test_hook_unset_removes_inline(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("hook", "set", "install", "make deps", root=root, cwd=root / "proj")
+    res = run("hook", "unset", "install", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    text = (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert "install" not in text
+    shown = run("config", "show", "--hooks", root=root, cwd=root / "proj")
+    assert "hook install" not in shown.stdout
+
+
+def test_hook_set_replaces_at_same_scope(root: Path) -> None:
+    # A second set at the same scope replaces the command in that file.
+    _seed_repo(root, "proj")
+    run("hook", "set", "install", "old", root=root, cwd=root / "proj")
+    run("hook", "set", "install", "new", root=root, cwd=root / "proj")
+    text = (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert 'install = "new"' in text
+    assert '"old"' not in text
+
+
+def test_hook_set_rejects_unknown_event(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("hook", "set", "not-an-event", "x", root=root, cwd=root / "proj")
+    assert res.returncode == 1
+    assert "unknown event" in res.stderr.lower()
+
+
+def test_hook_set_refused_under_no_config(root: Path) -> None:
+    res = run(
+        "hook",
+        "set",
+        "enter",
+        "echo hi",
+        root=root,
+        cwd=root,
+        extra_env={"WTM_NO_CONFIG": "1"},
+    )
+    assert res.returncode == 1
+    assert not (root / ".wtm" / "config.toml").exists()
 
 
 def test_workspace_rename_moves_key(root: Path) -> None:

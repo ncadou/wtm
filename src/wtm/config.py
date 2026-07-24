@@ -28,17 +28,18 @@ offers three tiers, all on :class:`Config`:
 * a **structural write tier** -- the named registry mutations
   (:meth:`Config.add_workspace`, ``set_workspace``, ``rename_workspace``,
   ``remove_workspace``, ``set_default`` / ``clear_default``, ``set_base_branch``
-  / ``clear_base_branch``, ``set_project_annotation``) that own cross-key
-  invariants (a rename fixes a dangling ``default_workspace``) and write only the
-  user file.
+  / ``clear_base_branch``) that own cross-key invariants (a rename fixes a
+  dangling ``default_workspace``) and write only the user file.
 
 Writes name their target scope explicitly; the "most-local home that exists"
 placement policy is the caller's (see :mod:`wtm.workspace` / :mod:`wtm.project`).
-Scalar values resolve ``CLI > env > worktree > project > workspace > user >
-system > default``; inline hooks *accumulate* across scopes on top of the
-builtin file hooks. ``WTM_NO_CONFIG`` suppresses all config files (reads) and
-makes any write a hard error (mutating a file we are told to ignore is
-contradictory); it is the test/CI isolation knob.
+Config-file scalars resolve most-local-first ``worktree > project > workspace >
+user > system > default``; command-layer overrides (a CLI flag such as
+``--base``, or the ``WTM_*`` env selectors) sit above this file cascade and are
+applied by the calling command, not here. Inline hooks *accumulate* across
+scopes on top of the builtin file hooks. ``WTM_NO_CONFIG`` suppresses all config
+files (reads) and makes any write a hard error (mutating a file we are told to
+ignore is contradictory); it is the test/CI isolation knob.
 
 The active workspace is resolved ``$WTM_WORKSPACE > cwd (longest path match) >
 default_workspace > sole workspace > error`` -- there is no built-in default
@@ -57,20 +58,23 @@ from __future__ import annotations
 __all__ = [
     "Config",
     "ConfigAddress",
+    "GenericTarget",
     "HookSpec",
     "ProjectAnnotation",
     "ResolvedConfig",
     "ResolvedProject",
     "ResolvedWorktree",
     "Scope",
+    "SourceRung",
     "Workspace",
     "resolve_project_dir",
+    "validate_arbitrary_key",
 ]
 
 import os
 import tempfile
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -182,24 +186,33 @@ class HookSpec:
 
 @dataclass(frozen=True)
 class ProjectAnnotation:
-    """Config overlay for a discovered project (never a declaration)."""
+    """Config overlay for a discovered project (never a declaration).
+
+    :param extra: arbitrary (non-reserved) keys resolved by the locality merge,
+        beyond the known scalar fields.
+    """
 
     description: str | None = None
     base_branch: str | None = None
     hooks: HookSpec = field(default_factory=HookSpec)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Workspace:
-    """A declared workspace: a named projects root plus its config overlay."""
+    """A declared workspace: a named projects root plus its config overlay.
+
+    :param extra: arbitrary (non-reserved) keys resolved by the locality merge,
+        beyond the known scalar fields.
+    """
 
     name: str
     path: Path
     description: str | None = None
     base_branch: str | None = None  # scope-wide default for its projects
     hooks: HookSpec = field(default_factory=HookSpec)
-    projects: dict[str, ProjectAnnotation] = field(default_factory=dict)
     scope: Scope = Scope.USER  # where it was ultimately declared (for --sources)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 # --- resolved view -----------------------------------------------------------
@@ -207,11 +220,17 @@ class Workspace:
 
 @dataclass(frozen=True)
 class ResolvedWorktree:
-    """The worktree tier of the resolved view (worktree-local config = hooks)."""
+    """The worktree tier of the resolved view (locality-merged over the ladder).
+
+    :param description: the worktree's scalar annotation, if any.
+    :param extra: arbitrary (non-reserved) keys resolved by the locality merge.
+    """
 
     name: str
     dir: Path
+    description: str | None = None
     hooks: HookSpec = field(default_factory=HookSpec)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -226,6 +245,7 @@ class ResolvedProject:
     effective_base_branch: str | None  # after the full resolution chain
     base_branch_source: str  # project | workspace | global | (none)
     hooks: HookSpec = field(default_factory=HookSpec)
+    extra: dict[str, object] = field(default_factory=dict)
     worktree: ResolvedWorktree | None = None  # set only when cwd is in a worktree
 
 
@@ -246,10 +266,74 @@ class ResolvedConfig:
     project: ResolvedProject | None  # the cwd-bound project, when cwd is inside one
 
 
+@dataclass(frozen=True)
+class GenericTarget:
+    """The cwd-inferred entity a generic ``config`` key acts on.
+
+    Resolved by :meth:`Config.resolve_generic_target`: *label* names the entity
+    for messages, *probes* is its locality cascade (most-local-first, feeding
+    reads), *write_target* maps a scope to its ``(address, prefix)`` write site,
+    *allowed_scopes* gates ``-s/--scope``, and *default_scope* is the auto-default
+    (the deepest scope whose dir exists). *inherit* maps an inheritable key (see
+    :data:`INHERITABLE_KEYS`) to its extended, tier-tagged probe list -- the
+    entity's own cascade followed by its ancestors' -- so ``config get`` reports
+    the same effective value a real command would take.
+    """
+
+    label: str
+    probes: list[_Probe]
+    write_target: Callable[[Scope], tuple[ConfigAddress, tuple[str, ...]]]
+    allowed_scopes: tuple[Scope, ...]
+    default_scope: Scope
+    inherit: dict[str, list[_TierProbe]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SourceRung:
+    """One resolved rung of a ``config get --sources`` chain.
+
+    :param scope: the config scope (file tier) the value was read from.
+    :param value: the value present at this rung.
+    :param file: the config file the value lives in.
+    :param tier: for an inheritable key, the definition level it came from
+        (``project`` / ``workspace`` / ``global``); ``None`` for a plain
+        (entity-local) key, where the scope already names the source.
+    """
+
+    scope: Scope
+    value: object
+    file: Path
+    tier: str | None = None
+
+
 # --- generic value store -----------------------------------------------------
 
 
 Key = str | tuple[str, ...]
+
+RESERVED_KEYS = frozenset({"hooks", "projects", "worktrees", "path", "default_workspace"})
+_CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
+# Keys whose tables are pure containers of named children (rendered as
+# super-tables so a fresh nested write produces dotted headers, no empty parent).
+_SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
+# Keys whose read resolution inherits down the containment chain (Layer 2): the
+# generic `config get` folds an entity's own cascade plus its ancestors' for
+# these, so it reports the same effective value a real command would use.
+INHERITABLE_KEYS = frozenset({"base_branch"})
+
+
+def validate_arbitrary_key(key: str) -> None:
+    """Reject a reserved name as an arbitrary ``config`` key (raises on clash).
+
+    The container tables (``hooks`` / ``projects`` / ``worktrees``) and the
+    user-file declarations (``path`` / ``default_workspace``) own their own
+    typed surfaces; the generic key facility must not shadow them.
+    """
+    if key in RESERVED_KEYS:
+        raise WtmError(
+            f"'{key}' is a reserved key; use its dedicated command "
+            f"(reserved: {', '.join(sorted(RESERVED_KEYS))})"
+        )
 
 
 class _Store:
@@ -359,12 +443,18 @@ def _unwrap_scalar(node: object) -> str:
 
 
 def _descend_for_write(doc: tomlkit.TOMLDocument, parts: Sequence[str]):
-    """Walk/create the intermediate tables for a nested write, returning the leaf table."""
+    """Walk/create the intermediate tables for a nested write, returning the leaf table.
+
+    A freshly created container level (``workspaces`` / ``projects`` /
+    ``worktrees``) is a super-table so it renders as dotted ``[workspaces.NAME]``
+    headers with no empty ``[workspaces]`` line -- matching the structural write
+    tier; the name/entity segments in between stay normal (they hold scalars).
+    """
     table: object = doc
     for part in parts:
         child = table.get(part)
         if child is None:
-            child = tomlkit.table()
+            child = tomlkit.table(is_super_table=part in _SUPER_TABLE_KEYS)
             table[part] = child
         table = child
 
@@ -499,6 +589,224 @@ class Config:
         """Remove one scalar at *key* from the file *address* names (a no-op if absent)."""
         self._store.unset(address.file, key)
 
+    # --- scope write targets -------------------------------------------------
+
+    def project_write_target(
+        self, workspace: Workspace, name: str, scope: Scope
+    ) -> tuple[ConfigAddress, tuple[str, ...]]:
+        """Resolve where a project annotation lands at *scope*: (address, key prefix).
+
+        Mirrors the project probe table's inverse: the address names the file for
+        *scope* and the prefix is the table path an own scalar sits under there
+        (empty at project-local top-level). ``key`` is appended by the caller.
+        """
+        ws_path = workspace.path
+        if scope is Scope.PROJECT:
+            return ConfigAddress.project(ws_path / name), ()
+
+        if scope is Scope.WORKSPACE:
+            return ConfigAddress.workspace(ws_path), ("projects", name)
+
+        if scope in (Scope.USER, Scope.SYSTEM):
+            return _global_address(scope), ("workspaces", workspace.name, "projects", name)
+
+        raise WtmError(f"cannot write a project annotation at {scope} scope")
+
+    def workspace_write_target(
+        self, workspace: Workspace, scope: Scope
+    ) -> tuple[ConfigAddress, tuple[str, ...]]:
+        """Resolve where a workspace annotation lands at *scope*: (address, key prefix)."""
+        if scope is Scope.WORKSPACE:
+            return ConfigAddress.workspace(workspace.path), ()
+
+        if scope in (Scope.USER, Scope.SYSTEM):
+            return _global_address(scope), ("workspaces", workspace.name)
+
+        raise WtmError(f"cannot write a workspace annotation at {scope} scope")
+
+    def worktree_write_target(
+        self, workspace: Workspace | None, project_dir: Path, name: str, scope: Scope
+    ) -> tuple[ConfigAddress, tuple[str, ...]]:
+        """Resolve where a worktree annotation lands at *scope*: (address, key prefix).
+
+        The inverse of the worktree probe table: worktree-local top-level, then
+        project-local ``[worktrees.NAME]``, then workspace-local
+        ``[projects.PROJECT.worktrees.NAME]``, then user/system
+        ``[workspaces.W.projects.PROJECT.worktrees.NAME]``. The workspace/user/
+        system tiers require the project's declared *workspace*.
+        """
+        wt_dir = project_dir / "worktrees" / name
+        if scope is Scope.WORKTREE:
+            return ConfigAddress.worktree(wt_dir), ()
+
+        if scope is Scope.PROJECT:
+            return ConfigAddress.project(project_dir), ("worktrees", name)
+
+        if workspace is None:
+            raise WtmError(f"project is not under a declared workspace: {project_dir}")
+
+        if scope is Scope.WORKSPACE:
+            return (
+                ConfigAddress.workspace(workspace.path),
+                ("projects", project_dir.name, "worktrees", name),
+            )
+
+        if scope in (Scope.USER, Scope.SYSTEM):
+            return (
+                _global_address(scope),
+                ("workspaces", workspace.name, "projects", project_dir.name, "worktrees", name),
+            )
+
+        raise WtmError(f"cannot write a worktree annotation at {scope} scope")
+
+    # --- generic key surface (arbitrary keys, cwd-inferred entity) -----------
+
+    def resolve_generic_target(self, cwd: Path | None) -> GenericTarget:
+        """Resolve the cwd-inferred entity a generic ``config`` key acts on.
+
+        Picks the deepest entity the cwd sits inside -- worktree, else project,
+        else the active workspace -- and returns a :class:`GenericTarget` naming
+        it: its label, its locality probe cascade (most-local-first), the
+        per-scope write-target resolver, its allowed write scopes, and the
+        auto-default scope (the deepest whose dir exists). The active workspace
+        is the floor; with none resolved this raises the no-active-workspace
+        error.
+        """
+        ws = self.active_workspace
+        project_dir = project_dir_for(ws.path, abspath(str(cwd))) if cwd is not None else None
+        if project_dir is not None:
+            wt_name = self._cwd_worktree_name(project_dir, abspath(str(cwd)))
+            if wt_name is not None:
+                return self._worktree_generic_target(ws, project_dir, wt_name)
+
+            return self._project_generic_target(ws, project_dir)
+
+        return self._workspace_generic_target(ws)
+
+    def _cwd_worktree_name(self, project_dir: Path, cwd: Path) -> str | None:
+        """Return the worktree name if *cwd* sits inside one under *project_dir*."""
+        worktrees_dir = project_dir / "worktrees"
+        if not within(cwd, worktrees_dir) or cwd == worktrees_dir:
+            return None
+
+        rel = cwd.relative_to(worktrees_dir)
+        wt_dir = worktrees_dir / rel.parts[0]
+
+        return worktree_name(wt_dir, worktrees_dir) or wt_dir.name
+
+    def _worktree_generic_target(
+        self, ws: Workspace, project_dir: Path, name: str
+    ) -> GenericTarget:
+        """The generic target for a cwd-bound worktree."""
+        wt_dir = project_dir / "worktrees" / name
+        default = (
+            Scope.WORKTREE
+            if wt_dir.is_dir()
+            else Scope.PROJECT
+            if project_dir.is_dir()
+            else Scope.WORKSPACE
+            if ws.path.is_dir()
+            else Scope.USER
+        )
+
+        return GenericTarget(
+            label=f"worktree '{name}'",
+            probes=self._worktree_probes(project_dir, name),
+            write_target=lambda scope: self.worktree_write_target(ws, project_dir, name, scope),
+            allowed_scopes=(
+                Scope.WORKTREE,
+                Scope.PROJECT,
+                Scope.WORKSPACE,
+                Scope.USER,
+                Scope.SYSTEM,
+            ),
+            default_scope=default,
+            inherit={"base_branch": self._base_branch_inherit(ws, project_dir.name)},
+        )
+
+    def _project_generic_target(self, ws: Workspace, project_dir: Path) -> GenericTarget:
+        """The generic target for a cwd-bound project."""
+        default = (
+            Scope.PROJECT
+            if project_dir.is_dir()
+            else Scope.WORKSPACE
+            if ws.path.is_dir()
+            else Scope.USER
+        )
+
+        return GenericTarget(
+            label=f"project '{project_dir.name}'",
+            probes=self._project_probes(ws, project_dir.name),
+            write_target=lambda scope: self.project_write_target(ws, project_dir.name, scope),
+            allowed_scopes=(Scope.PROJECT, Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
+            default_scope=default,
+            inherit={"base_branch": self._base_branch_inherit(ws, project_dir.name)},
+        )
+
+    def _workspace_generic_target(self, ws: Workspace) -> GenericTarget:
+        """The generic target for the active workspace (the cwd floor)."""
+        default = Scope.WORKSPACE if ws.path.is_dir() else Scope.USER
+
+        return GenericTarget(
+            label=f"workspace '{ws.name}'",
+            probes=self._workspace_probes(ws),
+            write_target=lambda scope: self.workspace_write_target(ws, scope),
+            allowed_scopes=(Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
+            default_scope=default,
+            inherit={"base_branch": self._base_branch_inherit(ws, None)},
+        )
+
+    def _base_branch_inherit(self, ws: Workspace, project: str | None) -> list[_TierProbe]:
+        """The tier-tagged base_branch chain for an entity, most-local-first.
+
+        Concatenates the project cascade (tier ``project``, when a *project* is
+        given), the workspace-own cascade (tier ``workspace``), and the global
+        top-level default (tier ``global``) -- so the fold's most-local winner
+        matches :meth:`base_branch_provenance` exactly. A worktree inherits its
+        containing project's chain (base_branch is a project-tier concept, with
+        no worktree tier of its own).
+        """
+        rungs: list[_TierProbe] = []
+        if project is not None:
+            rungs += [_TierProbe("project", p) for p in self._project_probes(ws, project)]
+        rungs += [_TierProbe("workspace", p) for p in self._workspace_probes(ws)]
+        rungs += [_TierProbe("global", p) for p in _global_probes()]
+
+        return rungs
+
+    def resolve_generic_value(
+        self, target: GenericTarget, key: str
+    ) -> tuple[object | None, list[SourceRung]]:
+        """Resolve *key* over *target*'s cascade: (effective value, full chain).
+
+        The effective value is the most-local present one (``None`` when unset);
+        the chain lists every rung that carries *key*, most-local-first, as
+        :class:`SourceRung` records -- the material for ``config get --sources``.
+        An inheritable key (see :data:`INHERITABLE_KEYS`) folds the entity's own
+        cascade plus its ancestors' (tier-tagged), so the effective value matches
+        what a real command would use; every other key stays entity-local. A
+        scalar/array/table kind clash for *key* across scopes is a hard error,
+        matching :func:`_merge_locality` (one rule for every read surface).
+        """
+        rungs = target.inherit.get(key)
+        tiered = (
+            rungs if rungs is not None else [_TierProbe(None, probe) for probe in target.probes]
+        )
+        chain: list[SourceRung] = []
+        prev: object = None
+        for tiered_probe in tiered:
+            probe = tiered_probe.probe
+            table = _read_table(self._store, probe)
+            if key in table and key not in _CONTAINER_KEYS:
+                value = table[key]
+                _check_kind(key, prev, value, probe)
+                chain.append(SourceRung(probe.scope, value, probe.file, tiered_probe.tier))
+                prev = value
+
+        effective = chain[0].value if chain else None
+
+        return effective, chain
+
     # --- workspace lookup ----------------------------------------------------
 
     def workspace_of(self, project_dir: Path) -> Workspace | None:
@@ -512,23 +820,36 @@ class Config:
 
         return best
 
+    def declared_project_names(self, workspace: Workspace) -> set[str]:
+        """Return the project names *declared* for *workspace* across its files.
+
+        The keys of every ``projects`` table along the workspace probe cascade
+        (workspace-local top-level, user/system ``[workspaces.NAME.projects]``).
+        A *declaration* listing -- distinct from on-disk discovery -- so ``config
+        show`` can surface annotated-but-inert projects.
+        """
+        names: set[str] = set()
+        for probe in self._workspace_probes(workspace):
+            table = _read_table(self._store, probe)
+            projects = table.get("projects")
+            if isinstance(projects, dict):
+                names.update(projects)
+
+        return names
+
     # --- per-project resolution ----------------------------------------------
 
     def project_annotation(self, workspace: Workspace, name: str) -> ProjectAnnotation:
-        """Merge a project's registry annotation with its project-local config.
+        """Resolve a project's effective annotation via the locality cascade.
 
-        Project-local scalars win; inline hooks accumulate (registry first,
-        then project-local).
+        Folds the project probe table (project-local top-level, workspace-local
+        ``[projects.NAME]``, user/system ``[workspaces.W.projects.NAME]``)
+        most-local-wins; inline hooks accumulate builtins-first across scopes.
+        Reserved container keys are excluded; the remainder lands in ``extra``.
         """
-        base = workspace.projects.get(name, ProjectAnnotation())
-        local_file = workspace.path / name / ".wtm" / "config.toml"
-        local = _parse_project_local(self._store.read(local_file))
+        payload, hooks = _merge_locality(self._store, self._project_probes(workspace, name))
 
-        return ProjectAnnotation(
-            description=local.description or base.description,
-            base_branch=local.base_branch or base.base_branch,
-            hooks=_merge_hooks(base.hooks, local.hooks),
-        )
+        return _annotation_from_payload(payload, hooks)
 
     def base_branch_for(self, workspace: Workspace, name: str) -> str | None:
         """Resolve a project's configured base branch (most-specific first)."""
@@ -539,42 +860,74 @@ class Config:
     ) -> tuple[str | None, str]:
         """Resolve a project's effective base branch and the tier it came from.
 
-        Evaluates a declarative cascade of ``(address, key)`` probes over the
-        generic value facility, most-specific-first, returning the first hit and
-        its tier: ``project`` (project-local file or the user/system registry
-        annotation), ``workspace`` (workspace-local file or the registry entry),
-        ``global`` (a top-level ``base_branch``), or ``(none)``. The project-local
-        file and the registry annotation share the ``project`` tier: both are
-        per-project overrides.
+        A Layer-2 inheritance over the containment chain: the project's own
+        locality-merged ``base_branch`` (tier ``project``, wherever in the
+        project probe table it won) outranks the workspace's own merged
+        ``base_branch`` (tier ``workspace``), which outranks the global top-level
+        default (tier ``global``); ``(none)`` when nothing is set.
         """
-        for address, key, tier in self._base_branch_cascade(workspace, name):
-            value = self.get_value(address, key)
+        if workspace is not None:
+            proj_payload, _ = _merge_locality(self._store, self._project_probes(workspace, name))
+            if proj_payload.get("base_branch"):
+                return str(proj_payload["base_branch"]), "project"
+
+            ws_payload, _ = _merge_locality(self._store, self._workspace_probes(workspace))
+            if ws_payload.get("base_branch"):
+                return str(ws_payload["base_branch"]), "workspace"
+
+        for address in (ConfigAddress.user(), ConfigAddress.system()):
+            value = self.get_value(address, "base_branch")
             if value:
-                return value, tier
+                return value, "global"
 
         return None, "(none)"
 
-    def _base_branch_cascade(
-        self, workspace: Workspace | None, name: str
-    ) -> list[tuple[ConfigAddress, Key, str]]:
-        """The ordered ``(address, key, tier)`` probes for a project's base branch."""
-        user, system = ConfigAddress.user(), ConfigAddress.system()
-        probes: list[tuple[ConfigAddress, Key, str]] = []
-        if workspace is not None:
-            ws_name, ws_path = workspace.name, workspace.path
-            proj_key = ("workspaces", ws_name, "projects", name, "base_branch")
-            ws_key = ("workspaces", ws_name, "base_branch")
-            # Project tier: project-local file, then the user registry annotation.
-            proj_addr = ConfigAddress.project(ws_path / name)
-            probes.append((proj_addr, ("project", "base_branch"), "project"))
-            probes.append((user, proj_key, "project"))
-            # Workspace tier: workspace-local file, then the user/system entry.
-            probes.append((ConfigAddress.workspace(ws_path), "base_branch", "workspace"))
-            probes.append((user, ws_key, "workspace"))
-            probes.append((system, ws_key, "workspace"))
-        # Global tier: the top-level default (user wins over system).
-        probes.append((user, "base_branch", "global"))
-        probes.append((system, "base_branch", "global"))
+    def _project_probes(self, workspace: Workspace, name: str) -> list[_Probe]:
+        """The project locality cascade, most-local-first."""
+        ws_path = workspace.path
+        proj_reg = ("workspaces", workspace.name, "projects", name)
+        return [
+            _Probe(Scope.PROJECT, ConfigAddress.project(ws_path / name).file, ()),
+            _Probe(Scope.WORKSPACE, ConfigAddress.workspace(ws_path).file, ("projects", name)),
+            _Probe(Scope.USER, _user_config_path(), proj_reg),
+            _Probe(Scope.SYSTEM, _system_config_path(), proj_reg),
+        ]
+
+    def _workspace_probes(self, workspace: Workspace) -> list[_Probe]:
+        """The workspace locality cascade, most-local-first."""
+        return [
+            _Probe(Scope.WORKSPACE, ConfigAddress.workspace(workspace.path).file, ()),
+            _Probe(Scope.USER, _user_config_path(), ("workspaces", workspace.name)),
+            _Probe(Scope.SYSTEM, _system_config_path(), ("workspaces", workspace.name)),
+        ]
+
+    def _worktree_probes(self, project_dir: Path, name: str) -> list[_Probe]:
+        """The worktree locality cascade, most-local-first."""
+        ws = self.workspace_of(project_dir)
+        wt_dir = project_dir / "worktrees" / name
+        probes = [
+            _Probe(Scope.WORKTREE, ConfigAddress.worktree(wt_dir).file, ()),
+            _Probe(Scope.PROJECT, ConfigAddress.project(project_dir).file, ("worktrees", name)),
+        ]
+        if ws is not None:
+            probes.append(
+                _Probe(
+                    Scope.WORKSPACE,
+                    ConfigAddress.workspace(ws.path).file,
+                    ("projects", project_dir.name, "worktrees", name),
+                )
+            )
+            for scope, path in (
+                (Scope.USER, _user_config_path()),
+                (Scope.SYSTEM, _system_config_path()),
+            ):
+                probes.append(
+                    _Probe(
+                        scope,
+                        path,
+                        ("workspaces", ws.name, "projects", project_dir.name, "worktrees", name),
+                    )
+                )
 
         return probes
 
@@ -597,7 +950,19 @@ class Config:
 
             return self.project_annotation(ws, project_dir.name).hooks
 
-        return _parse_worktree_local(self._store.read(worktree_dir / ".wtm" / "config.toml"))
+        # Worktree scope: accumulate across the full worktree probe cascade
+        # (worktree-local + project/workspace/user/system registries), mirroring
+        # the project scope -- a worktree hook declared in an ancestor registry
+        # must fire too. Fall back to the worktree-local file only when
+        # worktree_dir is not a real worktree under this project (e.g. the
+        # project-lifecycle sentinel or an unresolved `hook list` target).
+        worktrees_dir = project_dir / "worktrees"
+        if worktree_dir.parent == worktrees_dir:
+            name = worktree_name(worktree_dir, worktrees_dir) or worktree_dir.name
+            _, hooks = _merge_locality(self._store, self._worktree_probes(project_dir, name))
+            return hooks
+
+        return _parse_hooks(self._store.read(worktree_dir / ".wtm" / "config.toml").get("hooks"))
 
     # --- scope detection (fresh reads) ---------------------------------------
 
@@ -743,32 +1108,6 @@ class Config:
         doc.pop("base_branch", None)
         self._store.flush_user(doc)
 
-    def set_project_annotation(
-        self, workspace: str, project: str, key: str, value: str | None
-    ) -> None:
-        """Set (or clear) one project-annotation scalar under a workspace's registry entry.
-
-        Writes ``[workspaces.WORKSPACE.projects.PROJECT] key = value`` into the
-        user file (the user-scope fallback for a project whose dir does not yet
-        exist); a ``None``/empty *value* removes the key. The workspace must
-        already be declared at user scope.
-        """
-        doc = self._store.user_doc()
-        entry = _existing_entry(doc, workspace)
-        projects = entry.get("projects")
-        if projects is None:
-            projects = tomlkit.table(is_super_table=True)
-            entry["projects"] = projects
-        annotation = projects.get(project)
-        if annotation is None:
-            annotation = tomlkit.table()
-            projects[project] = annotation
-        if value:
-            annotation[key] = value
-        else:
-            annotation.pop(key, None)
-        self._store.flush_user(doc)
-
     # --- loading -------------------------------------------------------------
 
     @classmethod
@@ -792,7 +1131,7 @@ class Config:
         user = store.read(_user_config_path())
 
         registry = _build_registry(system, user, store)
-        default_workspace = user.get("default_workspace") or system.get("default_workspace")
+        default_workspace = _global_scalar(user, system, "default_workspace")
         active = _resolve_active(registry, cwd=cwd, default_workspace=default_workspace)
 
         xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
@@ -807,7 +1146,7 @@ class Config:
             _system_hooks_dir=system_dir,
             _user_hooks_dir=user_dir,
             _store=store,
-            default_base_branch=user.get("base_branch") or system.get("base_branch"),
+            default_base_branch=_global_scalar(user, system, "base_branch"),
             default_workspace=default_workspace,
         )
 
@@ -856,11 +1195,12 @@ class Config:
             effective_base_branch=effective,
             base_branch_source=source,
             hooks=annotation.hooks,
+            extra=annotation.extra,
             worktree=self._resolve_cwd_worktree(project_dir, abspath(str(cwd))),
         )
 
     def _resolve_cwd_worktree(self, project_dir: Path, cwd: Path) -> ResolvedWorktree | None:
-        """Resolve the cwd-bound worktree under *project_dir*, else ``None``."""
+        """Resolve the cwd-bound worktree under *project_dir* via the locality cascade."""
         worktrees_dir = project_dir / "worktrees"
         if not within(cwd, worktrees_dir) or cwd == worktrees_dir:
             return None
@@ -868,11 +1208,15 @@ class Config:
         rel = cwd.relative_to(worktrees_dir)
         wt_dir = worktrees_dir / rel.parts[0]
         name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
+        payload, hooks = _merge_locality(self._store, self._worktree_probes(project_dir, name))
+        extra = {k: v for k, v in payload.items() if k != "description"}
 
         return ResolvedWorktree(
             name=name,
             dir=wt_dir,
-            hooks=_parse_worktree_local(self._store.read(wt_dir / ".wtm" / "config.toml")),
+            description=_str_or_none(payload.get("description")),
+            hooks=hooks,
+            extra=extra,
         )
 
 
@@ -896,67 +1240,164 @@ def resolve_project_dir(config: Config, workspace: str | None, project: str | No
     return project_dir
 
 
+# --- locality merge engine ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Probe:
+    """One rung of a locality cascade: a scope, its file, and the table path.
+
+    *table_path* is the sequence of keys to descend from the file root to reach
+    the entity's own table (empty for a self-config file whose root *is* the
+    entity's table).
+    """
+
+    scope: Scope
+    file: Path
+    table_path: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _TierProbe:
+    """A probe tagged with the definition tier it contributes to a read.
+
+    *tier* is the inheritance level (``project`` / ``workspace`` / ``global``)
+    the *probe*'s value belongs to, or ``None`` for a plain (entity-local) key
+    whose scope already names the source. The tier is orthogonal to the probe's
+    scope (a project-tier value can live in the user file, say).
+    """
+
+    tier: str | None
+    probe: _Probe
+
+
+def _read_table(store: _Store, probe: _Probe) -> dict:
+    """Return the raw table *probe* points at (``{}`` when any step is absent)."""
+    node: object = store.read(probe.file)
+    for part in probe.table_path:
+        if not isinstance(node, dict):
+            return {}
+
+        node = node.get(part)
+    if not isinstance(node, dict):
+        return {}
+
+    return node
+
+
+def _merge_locality(store: _Store, probes: Sequence[_Probe]) -> tuple[dict[str, object], HookSpec]:
+    """Fold *probes* least-to-most-local into (payload, hooks).
+
+    *probes* are ordered most-local-first (the caller's natural cascade order);
+    the fold runs in reverse so more-local values overwrite. Reserved keys are
+    stripped from the scalar payload: ``hooks`` accumulates into a single
+    :class:`HookSpec` (builtins-first across scopes), ``projects`` / ``worktrees``
+    are child-descent containers handled elsewhere, and ``path`` /
+    ``default_workspace`` are declaration keys that own their typed surfaces (so
+    a workspace registry entry's own ``path`` never leaks into ``extra``). A kind
+    mismatch (scalar / array / table) for the same key across scopes is a hard
+    error.
+    """
+    payload: dict[str, object] = {}
+    hooks = HookSpec()
+    for probe in reversed(probes):
+        table = _read_table(store, probe)
+        hooks = _merge_hooks(hooks, _parse_hooks(table.get("hooks")))
+        for key, value in table.items():
+            if key in RESERVED_KEYS:
+                continue
+
+            _check_kind(key, payload.get(key), value, probe)
+            payload[key] = value
+
+    return payload, hooks
+
+
+def _check_kind(key: str, prev: object, value: object, probe: _Probe) -> None:
+    """Raise on a scalar/array/table kind clash for *key* across scopes."""
+    if prev is None or _kind(prev) == _kind(value):
+        return
+
+    raise WtmError(
+        f"config key '{key}' has conflicting kinds across scopes "
+        f"({_kind(prev)} vs {_kind(value)} at {probe.file})"
+    )
+
+
+def _kind(value: object) -> str:
+    """Classify a config value as ``table`` / ``array`` / ``scalar``."""
+    if isinstance(value, dict):
+        return "table"
+
+    if isinstance(value, (list, tuple)):
+        return "array"
+
+    return "scalar"
+
+
 # --- registry construction ---------------------------------------------------
 
 
 def _build_registry(system: dict, user: dict, store: _Store) -> dict[str, Workspace]:
-    """Build the workspace registry from system + user files (user wins)."""
-    registry: dict[str, Workspace] = {}
+    """Build the workspace registry: declaration discovery, then payload probing.
+
+    Phase 1 discovers each workspace's *declaration* -- its name, ``path``, and
+    winning ``scope`` -- from the system/user files only (a workspace-local file
+    cannot relocate its own workspace, so ``path`` is a global declaration).
+    Phase 2 fills the payload (``description`` / ``base_branch`` / ``hooks`` /
+    ``extra``) through the single presence-based locality merge over the
+    workspace probe cascade, so the registry and probe engines never diverge.
+    """
+    # Phase 1: declaration index (name -> path + declaring scope; user wins).
+    declarations: dict[str, tuple[Path, Scope]] = {}
     for scope, table in ((Scope.SYSTEM, system), (Scope.USER, user)):
         for name, entry in (table.get("workspaces") or {}).items():
-            registry[name] = _merge_workspace(registry.get(name), name, entry, scope)
+            prev = declarations.get(name)
+            if "path" not in entry and prev is None:
+                raise WtmError(f"workspace '{name}' has no path")
 
-    # Fold each workspace's own local file on top of the registry declaration.
-    for name, ws in list(registry.items()):
-        local = store.read(ws.path / ".wtm" / "config.toml")
-        registry[name] = _apply_workspace_local(ws, local)
+            path = expand_path(entry["path"]) if "path" in entry else prev[0]
+            declarations[name] = (path, scope)
+
+    # Phase 2: fold each workspace's payload through the probe engine.
+    registry: dict[str, Workspace] = {}
+    for name, (path, scope) in declarations.items():
+        ws = Workspace(name=name, path=path, scope=scope)
+        payload, hooks = _merge_locality(store, _workspace_probes_for(name, path))
+        registry[name] = replace(
+            ws,
+            description=_str_or_none(payload.get("description")),
+            base_branch=_str_or_none(payload.get("base_branch")),
+            hooks=hooks,
+            extra={k: v for k, v in payload.items() if k not in ("description", "base_branch")},
+        )
 
     return registry
 
 
-def _merge_workspace(prev: Workspace | None, name: str, entry: dict, scope: Scope) -> Workspace:
-    """Merge a ``[workspaces.NAME]`` entry onto any earlier-scope declaration."""
-    if "path" not in entry and prev is None:
-        raise WtmError(f"workspace '{name}' has no path")
+def _workspace_probes_for(name: str, path: Path) -> list[_Probe]:
+    """The workspace locality cascade for a bare (name, path), most-local-first.
 
-    path = expand_path(entry["path"]) if "path" in entry else prev.path
-    hooks = _parse_hooks(entry.get("hooks"))
-    projects = _parse_projects(entry.get("projects"))
-
-    if prev is None:
-        return Workspace(
-            name=name,
-            path=path,
-            description=entry.get("description"),
-            base_branch=entry.get("base_branch"),
-            hooks=hooks,
-            projects=projects,
-            scope=scope,
-        )
-
-    return replace(
-        prev,
-        path=path,
-        description=entry.get("description") or prev.description,
-        base_branch=entry.get("base_branch") or prev.base_branch,
-        hooks=_merge_hooks(prev.hooks, hooks),
-        projects=_merge_projects(prev.projects, projects),
-        scope=scope,
-    )
+    A free function mirroring :meth:`Config._workspace_probes`, usable during the
+    registry build before any :class:`Workspace` object exists.
+    """
+    return [
+        _Probe(Scope.WORKSPACE, ConfigAddress.workspace(path).file, ()),
+        _Probe(Scope.USER, _user_config_path(), ("workspaces", name)),
+        _Probe(Scope.SYSTEM, _system_config_path(), ("workspaces", name)),
+    ]
 
 
-def _apply_workspace_local(ws: Workspace, local: dict) -> Workspace:
-    """Merge a workspace's own ``.wtm/config.toml`` onto its registry entry."""
-    if not local:
-        return ws
+def _global_probes() -> list[_Probe]:
+    """The global top-level cascade (user then system), most-local-first.
 
-    return replace(
-        ws,
-        description=local.get("description") or ws.description,
-        base_branch=local.get("base_branch") or ws.base_branch,
-        hooks=_merge_hooks(ws.hooks, _parse_hooks(local.get("hooks"))),
-        projects=_merge_projects(ws.projects, _parse_projects(local.get("projects"))),
-    )
+    The tail of an inheritable key's chain: the top-level default read from the
+    two non-entity files (e.g. the global ``base_branch``).
+    """
+    return [
+        _Probe(Scope.USER, _user_config_path(), ()),
+        _Probe(Scope.SYSTEM, _system_config_path(), ()),
+    ]
 
 
 # --- active workspace resolution ---------------------------------------------
@@ -1027,9 +1468,25 @@ def _workspace_for_cwd(registry: dict[str, Workspace], cwd: Path) -> str | None:
 # --- config paths ------------------------------------------------------------
 
 
+def _global_scalar(user: dict, system: dict, key: str) -> str | None:
+    """Resolve a global top-level scalar presence-based (user present else system)."""
+    if key in user:
+        return user[key]
+
+    if key in system:
+        return system[key]
+
+    return None
+
+
 def _system_config_path() -> Path:
     """The system config file path (env override or default)."""
     return Path(os.environ.get("WTM_SYSTEM_CONFIG") or "/etc/wtm/config.toml")
+
+
+def _global_address(scope: Scope) -> ConfigAddress:
+    """The user/system ConfigAddress for *scope* (the two non-entity files)."""
+    return ConfigAddress.system() if scope is Scope.SYSTEM else ConfigAddress.user()
 
 
 def _user_config_path() -> Path:
@@ -1090,33 +1547,21 @@ def _parse_hooks(table: dict | None) -> HookSpec:
     )
 
 
-def _parse_projects(table: dict | None) -> dict[str, ProjectAnnotation]:
-    """Parse a ``[projects]`` table into name -> :class:`ProjectAnnotation`."""
-    result: dict[str, ProjectAnnotation] = {}
-    for name, entry in (table or {}).items():
-        result[name] = ProjectAnnotation(
-            description=entry.get("description"),
-            base_branch=entry.get("base_branch"),
-            hooks=_parse_hooks(entry.get("hooks")),
-        )
-
-    return result
-
-
-def _parse_project_local(table: dict) -> ProjectAnnotation:
-    """Parse a project-local file dict's ``[project]`` table."""
-    project = table.get("project") or {}
+def _annotation_from_payload(payload: dict[str, object], hooks: HookSpec) -> ProjectAnnotation:
+    """Split a locality-merged payload into the known scalars plus ``extra``."""
+    extra = {k: v for k, v in payload.items() if k not in ("description", "base_branch")}
 
     return ProjectAnnotation(
-        description=project.get("description"),
-        base_branch=project.get("base_branch"),
-        hooks=_parse_hooks(project.get("hooks")),
+        description=_str_or_none(payload.get("description")),
+        base_branch=_str_or_none(payload.get("base_branch")),
+        hooks=hooks,
+        extra=extra,
     )
 
 
-def _parse_worktree_local(table: dict) -> HookSpec:
-    """Parse a worktree-local file dict's ``[hooks]`` table."""
-    return _parse_hooks(table.get("hooks"))
+def _str_or_none(value: object) -> str | None:
+    """Coerce a present scalar to ``str``; ``None`` stays ``None``."""
+    return None if value is None else str(value)
 
 
 def _merge_hooks(a: HookSpec, b: HookSpec) -> HookSpec:
@@ -1130,25 +1575,6 @@ def _merge_hooks(a: HookSpec, b: HookSpec) -> HookSpec:
         builtins=b.builtins if b.builtins is not None else a.builtins,
         dir=b.dir or a.dir,
     )
-
-
-def _merge_projects(
-    a: dict[str, ProjectAnnotation], b: dict[str, ProjectAnnotation]
-) -> dict[str, ProjectAnnotation]:
-    """Merge two project-annotation maps by name (b's scalars win; hooks accumulate)."""
-    result = dict(a)
-    for name, ann in b.items():
-        prev = result.get(name)
-        if prev is None:
-            result[name] = ann
-        else:
-            result[name] = ProjectAnnotation(
-                description=ann.description or prev.description,
-                base_branch=ann.base_branch or prev.base_branch,
-                hooks=_merge_hooks(prev.hooks, ann.hooks),
-            )
-
-    return result
 
 
 def _flag_env(name: str) -> bool:

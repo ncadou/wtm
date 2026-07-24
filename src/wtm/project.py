@@ -49,7 +49,8 @@ class ProjectSet:
 
     name: str
     dir: Path
-    local: bool  # True: wrote <project>/.wtm/config.toml; False: the registry annotation
+    scope: Scope  # the scope the annotation was written to
+    address: ConfigAddress  # the file it landed in
 
 
 @dataclass(frozen=True)
@@ -156,49 +157,73 @@ class Project:
         *,
         base_branch: str | None,
         description: str | None,
+        scope: Scope | None = None,
     ) -> ProjectSet:
         """Edit a project's annotation scalars (base_branch / description).
 
-        Writes the project-local ``<project>/.wtm/config.toml`` ``[project]``
-        table when the project dir exists, else falls back to the user-scope
-        registry annotation ``[workspaces.WS.projects.PROJECT]`` -- the most-local
-        home that exists. The fallback requires the containing workspace to be
-        declared at user scope. A field passed as ``""`` clears it; at least one
-        field must be given.
+        Writes the annotation at *scope* (one of project / workspace / user /
+        system). When *scope* is ``None`` the auto-default is the deepest scope
+        whose directory exists: project-local ``<project>/.wtm/config.toml`` when
+        the project dir exists, else workspace-local ``[projects.PROJECT]`` when
+        the workspace dir exists, else the user-scope registry annotation
+        ``[workspaces.WS.projects.PROJECT]``. Every scope but ``worktree`` is
+        writable. A field passed as ``""`` clears it; at least one field must be
+        given.
         """
         if base_branch is None and description is None:
             raise WtmError("nothing to set (pass --base-branch or --description)")
 
         project_dir = resolve_project_dir(self.config, workspace, project)
-        fields = (("description", description), ("base_branch", base_branch))
-
-        if project_dir.is_dir():
-            address = ConfigAddress.project(project_dir)
-            for key, value in fields:
-                if value is None:
-                    continue
-                if value == "":
-                    self.config.unset_value(address, ("project", key))
-                else:
-                    self.config.set_value(address, ("project", key), value)
-
-            return ProjectSet(name=project_dir.name, dir=project_dir, local=True)
-
         ws = self.config.workspace_of(project_dir)
         if ws is None:
-            raise WtmError(
-                f"project dir does not exist and is not under a declared workspace: {project_dir}"
-            )
-        if Scope.USER not in self.config.declaring_scopes(ws.name):
-            raise WtmError(
-                f"project dir does not exist and workspace '{ws.name}' is not "
-                "declared at user scope; create the project dir first"
-            )
-        for key, value in fields:
-            if value is not None:
-                self.config.set_project_annotation(ws.name, project_dir.name, key, value or None)
+            raise WtmError(f"project is not under a declared workspace: {project_dir}")
 
-        return ProjectSet(name=project_dir.name, dir=project_dir, local=False)
+        scope = scope if scope is not None else self._default_project_scope(project_dir, ws.path)
+        if scope not in _PROJECT_WRITE_SCOPES:
+            raise WtmError(
+                f"cannot write a project annotation at '{scope}' scope "
+                f"(choose one of {_scope_list(_PROJECT_WRITE_SCOPES)})"
+            )
+        if scope in (Scope.USER, Scope.SYSTEM) and scope not in self.config.declaring_scopes(
+            ws.name
+        ):
+            raise WtmError(
+                f"workspace '{ws.name}' is not declared at {scope} scope; "
+                f"cannot place a project annotation there"
+            )
+
+        address, prefix = self.config.project_write_target(ws, project_dir.name, scope)
+        self._write_scalars(address, prefix, base_branch=base_branch, description=description)
+
+        return ProjectSet(name=project_dir.name, dir=project_dir, scope=scope, address=address)
+
+    def _default_project_scope(self, project_dir: Path, ws_path: Path) -> Scope:
+        """The deepest scope whose directory exists (project > workspace > user)."""
+        if project_dir.is_dir():
+            return Scope.PROJECT
+
+        if ws_path.is_dir():
+            return Scope.WORKSPACE
+
+        return Scope.USER
+
+    def _write_scalars(
+        self,
+        address: ConfigAddress,
+        prefix: tuple[str, ...],
+        *,
+        base_branch: str | None,
+        description: str | None,
+    ) -> None:
+        """Set/clear the annotation scalars under *prefix* at *address*."""
+        for key, value in (("description", description), ("base_branch", base_branch)):
+            if value is None:
+                continue
+            full = (*prefix, key) if prefix else key
+            if value == "":
+                self.config.unset_value(address, full)
+            else:
+                self.config.set_value(address, full, value)
 
     def show(self, workspace: str | None, project: str | None) -> ProjectShown:
         """Return a read-only detail view for a project (its resolved annotation)."""
@@ -285,6 +310,14 @@ class Project:
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+_PROJECT_WRITE_SCOPES = (Scope.PROJECT, Scope.WORKSPACE, Scope.USER, Scope.SYSTEM)
+
+
+def _scope_list(scopes: tuple[Scope, ...]) -> str:
+    """Render a scope tuple as a ``project, workspace, ...`` string."""
+    return ", ".join(scope.value for scope in scopes)
 
 
 def _scaffold_project(project_dir: Path) -> None:

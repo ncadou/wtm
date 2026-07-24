@@ -73,6 +73,7 @@ class WorkspaceSet:
     name: str
     resolved: Path | None  # new path (absolute) when the path was changed
     missing: bool  # new path does not exist on disk
+    scope: Scope | None  # where scalars landed (None when only --path was set)
 
 
 @dataclass(frozen=True)
@@ -188,16 +189,18 @@ class Workspaces:
         path: str | None,
         description: str | None,
         base_branch: str | None,
+        scope: Scope | None = None,
     ) -> WorkspaceSet:
         """Edit an existing workspace's scalars (partial update).
 
         ``--path`` always writes the user-scope registry entry (the declaration
         is *found* via its path, so it cannot live in the workspace-local file);
-        it refuses a system-only name. ``--description`` / ``--base-branch`` write
-        the workspace-local ``<ws>/.wtm/config.toml`` when the workspace dir
-        exists, else fall back to the registry entry -- the most-local home that
-        exists. A field passed as ``""`` is removed; ``path`` may not be emptied.
-        At least one field must be given.
+        it refuses a system-only name. ``--description`` / ``--base-branch`` land
+        at *scope* (one of workspace / user / system); when *scope* is ``None``
+        the auto-default is the deepest scope whose directory exists -- the
+        workspace-local ``<ws>/.wtm/config.toml`` when the workspace dir exists,
+        else the user-scope registry entry. A field passed as ``""`` is removed;
+        ``path`` may not be emptied. At least one field must be given.
         """
         if path is None and description is None and base_branch is None:
             raise WtmError("nothing to set (pass --path, --description, or --base-branch)")
@@ -214,16 +217,66 @@ class Workspaces:
             _, resolved = _prepare_path(path)
             missing, _ = self._materialise(resolved, create=False)
 
-        # Scalars land in the workspace-local file when its dir exists, else in
-        # the user-scope registry entry (system-only refused only for the latter).
-        target = resolved if resolved is not None else ws.path
+        scalar_scope: Scope | None = None
         if description is not None or base_branch is not None:
-            if target.is_dir():
-                self._set_local_scalars(target, description=description, base_branch=base_branch)
-            else:
-                self._set_registry_scalars(name, description=description, base_branch=base_branch)
+            ws_dir = resolved if resolved is not None else ws.path
+            scalar_scope = self._set_scalars(
+                name, ws, ws_dir, scope, description=description, base_branch=base_branch
+            )
 
-        return WorkspaceSet(name=name, resolved=resolved, missing=missing)
+        return WorkspaceSet(name=name, resolved=resolved, missing=missing, scope=scalar_scope)
+
+    def _set_scalars(
+        self,
+        name: str,
+        ws,
+        ws_dir: Path,
+        scope: Scope | None,
+        *,
+        description: str | None,
+        base_branch: str | None,
+    ) -> Scope:
+        """Place description/base_branch at *scope* (auto: deepest existing dir)."""
+        scope = scope if scope is not None else self._default_workspace_scope(ws_dir)
+        if scope not in _WORKSPACE_WRITE_SCOPES:
+            raise WtmError(
+                f"cannot write a workspace annotation at '{scope}' scope "
+                f"(choose one of {_scope_list(_WORKSPACE_WRITE_SCOPES)})"
+            )
+
+        # user / system land in the registry entry, which must already declare
+        # the workspace at that scope (system-only is refused for a user write).
+        if scope is Scope.USER:
+            self._require_user_scope(name)
+        elif scope is Scope.SYSTEM:
+            self._require_scope(name, scope)
+
+        address, prefix = self.config.workspace_write_target(ws, scope)
+        self._write_scalars(address, prefix, description=description, base_branch=base_branch)
+
+        return scope
+
+    def _default_workspace_scope(self, ws_dir: Path) -> Scope:
+        """The deepest scope whose directory exists (workspace > user)."""
+        return Scope.WORKSPACE if ws_dir.is_dir() else Scope.USER
+
+    def _write_scalars(
+        self,
+        address: ConfigAddress,
+        prefix: tuple[str, ...],
+        *,
+        description: str | None,
+        base_branch: str | None,
+    ) -> None:
+        """Set/clear description/base_branch under *prefix* at *address*."""
+        for key, value in (("description", description), ("base_branch", base_branch)):
+            if value is None:
+                continue
+            full = (*prefix, key) if prefix else key
+            if value == "":
+                self.config.unset_value(address, full)
+            else:
+                self.config.set_value(address, full, value)
 
     def _set_registry_path(self, name: str, path: str) -> None:
         """Write ``path`` to the user-scope registry entry (system-only refused)."""
@@ -231,25 +284,10 @@ class Workspaces:
         persist, _ = _prepare_path(path)
         self.config.set_workspace(name, path=persist)
 
-    def _set_registry_scalars(
-        self, name: str, *, description: str | None, base_branch: str | None
-    ) -> None:
-        """Write description/base_branch to the user-scope registry entry."""
-        self._require_user_scope(name)
-        self.config.set_workspace(name, description=description, base_branch=base_branch)
-
-    def _set_local_scalars(
-        self, ws_dir: Path, *, description: str | None, base_branch: str | None
-    ) -> None:
-        """Write/clear description/base_branch in ``<ws>/.wtm/config.toml`` (top-level)."""
-        address = ConfigAddress.workspace(ws_dir)
-        for key, value in (("description", description), ("base_branch", base_branch)):
-            if value is None:
-                continue
-            if value == "":
-                self.config.unset_value(address, key)
-            else:
-                self.config.set_value(address, key, value)
+    def _require_scope(self, name: str, scope: Scope) -> None:
+        """Raise unless *name* is declared at *scope* (for a system-scope write)."""
+        if scope not in self.config.declaring_scopes(name):
+            raise WtmError(f"workspace '{name}' is not declared at {scope} scope")
 
     def _require_user_scope(self, name: str) -> None:
         """Raise unless *name* is declared at user scope (route system-only via add)."""
@@ -398,6 +436,14 @@ class Workspaces:
 
 
 # --- module helpers ----------------------------------------------------------
+
+
+_WORKSPACE_WRITE_SCOPES = (Scope.WORKSPACE, Scope.USER, Scope.SYSTEM)
+
+
+def _scope_list(scopes: tuple[Scope, ...]) -> str:
+    """Render a scope tuple as a ``workspace, user, ...`` string."""
+    return ", ".join(scope.value for scope in scopes)
 
 
 def _valid_workspace_name(name: str) -> None:

@@ -151,5 +151,10 @@ list    [TARGET] [--types]                                 list installed hooks,
   `.d` entry).
 - `wtm hook list [TARGET] [--types]` lists hooks grouped by event across scopes,
   builtin files and inline config hooks alike (inline ones marked `(config)`);
-  `--types` prints a compact per-event summary. `hook install`/`delete` manage
-  builtin files only — inline hooks are edited in the config file.
+  `--types` prints a compact per-event summary.
+- `wtm hook set EVENT "CMD" [--scope …]` / `wtm hook unset EVENT [--scope …]`
+  write an inline hook (`[...hooks.on] EVENT = "CMD"`) at the cwd-inferred
+  entity's table-path; `--scope` defaults to the deepest existing dir. A `set`
+  replaces the command in that one file; commands still accumulate across scopes
+  at read time. `hook install`/`delete` manage builtin files; `hook set`/`unset`
+  manage inline commands.

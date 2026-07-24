@@ -15,6 +15,7 @@ __all__ = [
     "WorktreeDeleted",
     "WorktreeLeft",
     "WorktreeRenamed",
+    "WorktreeSet",
 ]
 
 import os
@@ -23,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 from wtm import git
-from wtm.config import Config, resolve_project_dir
+from wtm.config import Config, ConfigAddress, Scope, Workspace, resolve_project_dir
 from wtm.core import (
     Context,
     WtmError,
@@ -31,6 +32,7 @@ from wtm.core import (
     current_dir,
     derive_context,
     reject_traversal,
+    worktree_name,
 )
 from wtm.hooks import run_hooks
 from wtm.target import TargetMode, looks_like_path, resolve_target, split_target
@@ -84,6 +86,16 @@ class WorktreeRenamed:
     branch_renamed: bool  # whether the branch was renamed (-b)
     old_branch: str | None  # branch before the rename, when renamed
     new_branch: str | None  # branch after the rename, when renamed
+
+
+@dataclass(frozen=True)
+class WorktreeSet:
+    """Result of :meth:`Worktree.set`: what was annotated and where."""
+
+    name: str
+    dir: Path
+    scope: Scope  # the scope the annotation was written to
+    address: ConfigAddress  # the file it landed in
 
 
 class Worktree:
@@ -211,6 +223,84 @@ class Worktree:
             return None
 
         return self.config.base_branch_for(ws, project_dir.name)
+
+    # --- annotation ----------------------------------------------------------
+
+    def set(self, args: list[str], *, description: str | None, scope: Scope | None) -> WorktreeSet:
+        """Annotate a worktree's ``description`` (partial update).
+
+        The target is a ``WORKTREE``-mode grammar (``[[WORKSPACE] PROJECT] NAME |
+        DIR | cwd``). Writes at *scope* (worktree / project / workspace / user /
+        system); when *scope* is ``None`` the auto-default is the deepest scope
+        whose directory exists: worktree-local ``<worktree>/.wtm/config.toml``
+        when the worktree dir exists, else project-local ``[worktrees.NAME]``
+        when the project dir exists, else workspace-local, else the user-scope
+        registry. A field passed as ``""`` clears it; at least one field must be
+        given.
+        """
+        if description is None:
+            raise WtmError("nothing to set (pass --description)")
+
+        wt_dir, project_dir, name = self._resolve_worktree_target(args)
+        ws = self.config.workspace_of(project_dir)
+
+        if scope is None:
+            scope = self._default_worktree_scope(wt_dir, project_dir, ws)
+        if scope not in _WORKTREE_WRITE_SCOPES:
+            raise WtmError(
+                f"cannot write a worktree annotation at '{scope}' scope "
+                f"(choose one of {_scope_list(_WORKTREE_WRITE_SCOPES)})"
+            )
+        if scope in (Scope.WORKSPACE, Scope.USER, Scope.SYSTEM) and ws is None:
+            raise WtmError(f"project is not under a declared workspace: {project_dir}")
+        if scope in (Scope.USER, Scope.SYSTEM) and scope not in self.config.declaring_scopes(
+            ws.name
+        ):
+            raise WtmError(
+                f"workspace '{ws.name}' is not declared at {scope} scope; "
+                f"cannot place a worktree annotation there"
+            )
+
+        address, prefix = self.config.worktree_write_target(ws, project_dir, name, scope)
+        full = (*prefix, "description") if prefix else "description"
+        if description == "":
+            self.config.unset_value(address, full)
+        else:
+            self.config.set_value(address, full, description)
+
+        return WorktreeSet(name=name, dir=wt_dir, scope=scope, address=address)
+
+    def _resolve_worktree_target(self, args: list[str]) -> tuple[Path, Path, str]:
+        """Resolve a worktree target into (worktree dir, project dir, name).
+
+        Pure path math over the ``WORKTREE`` grammar: the resolved worktree dir
+        is ``<project>/worktrees/<name>``, so the project dir and the (possibly
+        nested) name fall out of the ``worktrees/`` split. Rejects an out-of-tree
+        ``-d`` destination, which has no project/worktrees anchor to annotate.
+        """
+        wt_dir = resolve_target(self.config, TargetMode.WORKTREE, args)
+        for parent in wt_dir.parents:
+            if parent.name == "worktrees":
+                name = worktree_name(wt_dir, parent)
+                if name is not None:
+                    return wt_dir, parent.parent, name
+
+        raise WtmError(f"not a worktree under a project's worktrees/: {wt_dir}")
+
+    def _default_worktree_scope(
+        self, wt_dir: Path, project_dir: Path, ws: Workspace | None
+    ) -> Scope:
+        """The deepest scope whose directory exists (worktree > project > ws > user)."""
+        if wt_dir.is_dir():
+            return Scope.WORKTREE
+
+        if project_dir.is_dir():
+            return Scope.PROJECT
+
+        if ws is not None and ws.path.is_dir():
+            return Scope.WORKSPACE
+
+        return Scope.USER
 
     def enter(self, args: list[str], *, do_install: bool, strict: bool) -> Path:
         """Resolve a worktree (running install then enter hooks); return its dir.
@@ -459,6 +549,20 @@ class Worktree:
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+_WORKTREE_WRITE_SCOPES = (
+    Scope.WORKTREE,
+    Scope.PROJECT,
+    Scope.WORKSPACE,
+    Scope.USER,
+    Scope.SYSTEM,
+)
+
+
+def _scope_list(scopes: tuple[Scope, ...]) -> str:
+    """Render a scope tuple as a ``worktree, project, ...`` string."""
+    return ", ".join(scope.value for scope in scopes)
 
 
 def _resolve_base_ref(git_dir: Path, base: str) -> str:

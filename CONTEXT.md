@@ -130,29 +130,40 @@ loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
 on `Config`, three write/read tiers: a **generic value facility**
 (`get_value`/`set_value`/`unset_value` over a `ConfigAddress` naming any scope
 plus a bare or tuple key -- the substrate everything else is built on), the
-**typed read view** (the `Workspace`/`ProjectAnnotation`/`HookSpec` dataclasses;
-scalars resolve most-specific-first via declarative cascades over the value
-facility, e.g. `base_branch_provenance`), and the **structural registry
-mutations** (`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
+**typed read view** (the `Workspace`/`ProjectAnnotation`/`ResolvedWorktree`/
+`HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
+key resolves by a single **uniform locality merge** -- `_merge_locality` folds a
+most-local-first probe table so increased locality always outranks lesser, the
+most-local *present* value wins, `hooks.on` accumulates, and Layer 2 climbs the
+containment chain for the few inheritable keys, only `base_branch` today, via
+`base_branch_provenance`), and the **structural registry mutations**
+(`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
 `set`/`clear_base_branch`, `set_project_annotation`) that write only the user
 file and own their cross-key fixups (a rename follows a dangling
-`default_workspace`). All I/O is one comment-preserving `tomlkit` round-trip with
-an atomic replace; a write does not refresh the loaded snapshot (`wtm` loads
-once, acts, exits). Writes name their target scope explicitly (every scope,
-system and worktree included, is writable); the *most-local home that exists*
-placement -- the entity's own `.wtm/config.toml` when its dir is present, else
-the user-file entry/annotation -- is the calling command's policy
-(`wtm.workspace` / `wtm.project`), not the engine's. Workspace *declarations*
-(`add`/`set --path`/`rename`/`default`) stay user-file-only and refuse
-system-only names. `WTM_NO_CONFIG` suppresses all reads and refuses all writes;
-there is no `WTM_NO_SYSTEM` (point `WTM_SYSTEM_CONFIG` at an absent path to skip
-system scope).
+`default_workspace`). An entity stores its own config at its file's **top level**
+(no `[project]` wrapper); a container nests a child under `<child-plural>.<name>`
+once per ancestor above the file. All I/O is one comment-preserving `tomlkit`
+round-trip with an atomic replace; a write does not refresh the loaded snapshot
+(`wtm` loads once, acts, exits). Writes name their target scope explicitly (every
+scope, system and worktree included, is writable) via `-s/--scope` on the
+calling command (default: the deepest scope whose dir exists); the
+`*_write_target` resolvers map a scope to its `(address, key-prefix)` write site,
+and `resolve_generic_target`/`resolve_generic_value` expose the same cascade to
+the generic `config set/get/unset` and inline `hook set/unset` surfaces over the
+cwd-inferred entity (for an *inheritable* key -- `base_branch` today, per
+`INHERITABLE_KEYS` -- the generic read folds the entity's own cascade plus its
+ancestors' so `config get` reports the same effective value a real command uses,
+and `--sources` labels each rung by its definition tier). Workspace *declarations* (`add`/`set --path`/`rename`/
+`default`) stay user-file-only and refuse system-only names. `WTM_NO_CONFIG`
+suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
+`WTM_SYSTEM_CONFIG` at an absent path to skip system scope).
 
 **Scope**:
 Where a hook/config is discovered/declared, from most general to most specific:
 `system`, `user`, `workspace`, `project`, `worktree`. Config scopes mirror hook
-scopes; each scope has its own config file, scalars resolve most-specific-first,
-and hooks accumulate.
+scopes; each scope has its own config file, every key resolves by the uniform
+locality merge (most-local present value wins; clearing removes the key), and
+hooks accumulate.
 
 **Source / Target** (import):
 `wtm import` folds a legacy plain clone (the *source*) into the bare-repo
