@@ -563,7 +563,6 @@ def test_inheritable_declaration_key_is_reserved(
 
     with pytest.raises(WtmError, match="reserved key"):
         validate_arbitrary_key("inheritable")
-
     ws = tmp_path / "w"
     proj = ws / "proj"
     proj.mkdir(parents=True)
@@ -573,6 +572,19 @@ def test_inheritable_declaration_key_is_reserved(
     cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
     annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
     assert "inheritable" not in annotation.extra
+
+
+def test_validate_inheritable_element_rules() -> None:
+    # Anything hand-writable into `inheritable` is CLI-writable too, except keys
+    # whose (non-)inheritance is hardcoded: reserved keys and NON_INHERITABLE_KEYS.
+    from wtm.config import validate_inheritable_element
+
+    validate_inheritable_element("deploy_env")  # arbitrary key: allowed
+    validate_inheritable_element("base_branch")  # already builtin-inheritable: harmless
+    with pytest.raises(WtmError, match="never inheritable"):
+        validate_inheritable_element("description")
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_inheritable_element("hooks")
 
 
 def test_project_annotation_extra_reflects_inherited_key(
@@ -848,6 +860,132 @@ def test_set_value_refused_under_no_config(
     config = Config.load()
     with pytest.raises(WtmError, match="WTM_NO_CONFIG"):
         config.set_value(ConfigAddress.workspace(tmp_path / "w"), "k", "v")
+
+
+# --- array value facility ----------------------------------------------------
+
+
+def test_add_to_array_creates_and_dedupes(user_cfg: Path, tmp_path: Path) -> None:
+    # Set semantics: first add creates the array, a repeat add is a no-op.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().add_to_array(address, "worktree_ports", "3001")
+    Config.load().add_to_array(address, "worktree_ports", "3002")
+    Config.load().add_to_array(address, "worktree_ports", "3001")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'worktree_ports = ["3001", "3002"]' in text
+
+
+def test_remove_from_array_strips_all_occurrences(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('ports = ["a", "b", "a"]\n')
+    address = ConfigAddress.workspace(ws)
+    Config.load().remove_from_array(address, "ports", "a")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'ports = ["b"]' in text
+
+
+def test_remove_from_array_absent_is_noop(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().remove_from_array(address, "ports", "x")  # file/key absent
+    assert not (ws / ".wtm" / "config.toml").exists()
+
+
+def test_add_to_array_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('port = "3001"\n')
+    address = ConfigAddress.workspace(ws)
+    with pytest.raises(WtmError, match="not an array"):
+        Config.load().add_to_array(address, "port", "x")
+
+
+def test_add_to_array_refused_under_no_config(
+    user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WTM_NO_CONFIG", "1")
+    with pytest.raises(WtmError, match="WTM_NO_CONFIG"):
+        Config.load().add_to_array(ConfigAddress.workspace(tmp_path / "w"), "ports", "1")
+
+
+def test_array_read_under_lock_preserves_concurrent_element(
+    user_cfg: Path, tmp_path: Path
+) -> None:
+    # Two independent Configs (simulating two processes) both loaded before either
+    # writes: the fresh re-read under the lock keeps both leases (no lost element).
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    a = Config.load()
+    b = Config.load()
+    a.add_to_array(address, "leased", "3001")
+    b.add_to_array(address, "leased", "3002")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert '"3001"' in text and '"3002"' in text
+
+
+def test_scalar_write_does_not_clobber_concurrent_key(user_cfg: Path, tmp_path: Path) -> None:
+    # Every write is a fresh read-modify-write: two Configs loaded before either
+    # writes a *different* scalar to the same file -- both keys survive. The
+    # workspace is declared so its local file is cached at load (a stale-cache
+    # write would clobber; the fresh re-read under the lock does not).
+    ws = tmp_path / "w"
+    ws.mkdir()
+    user_cfg.write_text(f'[workspaces.w]\npath = "{ws}"\n')
+    address = ConfigAddress.workspace(ws)
+    a = Config.load()
+    b = Config.load()
+    a.set_value(address, "k1", "v1")
+    b.set_value(address, "k2", "v2")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'k1 = "v1"' in text
+    assert 'k2 = "v2"' in text
+
+
+def test_mixed_scalar_and_array_writes_coexist(user_cfg: Path, tmp_path: Path) -> None:
+    # A scalar write and an array mutation to the same file from two Configs both
+    # loaded beforehand do not clobber one another.
+    ws = tmp_path / "w"
+    ws.mkdir()
+    user_cfg.write_text(f'[workspaces.w]\npath = "{ws}"\n')
+    address = ConfigAddress.workspace(ws)
+    a = Config.load()
+    b = Config.load()
+    a.set_value(address, "editor", "nvim")
+    b.add_to_array(address, "ports", "3001")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'editor = "nvim"' in text
+    assert 'ports = ["3001"]' in text
+
+
+def test_structural_write_does_not_clobber_concurrent_key(user_cfg: Path, tmp_path: Path) -> None:
+    # The structural tier (add_workspace) rides the same transaction: a concurrent
+    # top-level base_branch write on the user file survives the workspace add.
+    (tmp_path / "one").mkdir()
+    a = Config.load()
+    b = Config.load()
+    a.set_base_branch("trunk")
+    b.add_workspace("one", str(tmp_path / "one"))
+    text = user_cfg.read_text()
+    assert 'base_branch = "trunk"' in text
+    assert "[workspaces.one]" in text
+
+
+def test_arrays_do_not_merge_across_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A generic array reads most-local-whole-array (replace), never a cross-scope
+    # union -- so distinct per-tier names are the way to keep per-scope arrays.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('ports = ["p1"]\n')
+    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nports=["w1"]\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, _ = cfg.resolve_generic_value(target, "ports")
+    assert list(effective) == ["p1"]  # project-local whole array wins, no union
 
 
 # --- add ---------------------------------------------------------------------

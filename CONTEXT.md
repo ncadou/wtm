@@ -128,7 +128,8 @@ not cascade: `project enter` fires `project-enter` across its scopes but never
 other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It
 loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
 on `Config`, three write/read tiers: a **generic value facility**
-(`get_value`/`set_value`/`unset_value` over a `ConfigAddress` naming any scope
+(`get_value`/`set_value`/`unset_value` plus element-wise
+`add_to_array`/`remove_from_array` over a `ConfigAddress` naming any scope
 plus a bare or tuple key -- the substrate everything else is built on), the
 **typed read view** (the `Workspace`/`ProjectAnnotation`/`ResolvedWorktree`/
 `HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
@@ -143,8 +144,20 @@ file and own their cross-key fixups (a rename follows a dangling
 `default_workspace`). An entity stores its own config at its file's **top level**
 (no `[project]` wrapper); a container nests a child under `<child-plural>.<name>`
 once per ancestor above the file. All I/O is one comment-preserving `tomlkit`
-round-trip with an atomic replace; a write does not refresh the loaded snapshot
-(`wtm` loads once, acts, exits). Writes name their target scope explicitly (every
+round-trip with an atomic replace, serialised by a **per-directory lock**
+(`flock` on the file's containing dir -- stable, unlike the file, which
+`os.replace` swaps on every write, and leaving no lock artifact to clean up);
+every write (scalar or array, generic or structural) funnels through one
+`_transaction` primitive that re-reads the file fresh under the lock and applies
+just its delta -- a read-modify-write, so a concurrent writer's *other* keys
+survive (and a no-op change is elided, neither creating an empty file nor
+churning an existing one). The load-time *resolution* snapshot
+(registry/active/hooks, built once by `Config.load`) is not refreshed
+mid-invocation (`wtm` loads once, acts, exits); it is the per-write disk read
+that is always fresh. Arrays are string-valued and do
+*not* merge across scopes (a read takes the most-local scope's whole array,
+unlike `hooks.on`/`inheritable`); distinct per-tier names keep per-scope arrays
+from shadowing one another. Writes name their target scope explicitly (every
 scope, system and worktree included, is writable) via `-s/--scope` on the
 calling command (default: the deepest scope whose dir exists); the
 `*_write_target` resolvers map a scope to its `(address, key-prefix)` write site,
@@ -222,7 +235,11 @@ additive: arbitrary keys stay entity-local by default and the builtin
 classifications are fixed. Membership is always a curated decision -- hardcoded
 or user-declared -- never inferred from a key's name, type, or value.
 `inheritable` is itself a **reserved key** (refused as an arbitrary key, never
-leaked into `extra`). One builtin carve-out: `base_branch` has no worktree tier,
+leaked into `extra`), maintained via the array flags -- `config set inheritable
+KEY --array-add/--array-remove` is the one reserved array those flags may touch,
+each element validated by `validate_inheritable_element` (a reserved key or a
+hardcoded-non-inheritable builtin -- `NON_INHERITABLE_KEYS`, i.e. `description`
+-- is refused). One builtin carve-out: `base_branch` has no worktree tier,
 so a worktree-local `base_branch` is ignored (aligning `config get` with
 `create`), whereas a user-declared inheritable key set worktree-local *is*
 honoured.

@@ -69,12 +69,15 @@ __all__ = [
     "Workspace",
     "resolve_project_dir",
     "validate_arbitrary_key",
+    "validate_inheritable_element",
 ]
 
+import fcntl
 import os
 import tempfile
 import tomllib
 from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -329,6 +332,10 @@ _SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
 # always a curated decision -- hardcoded here or opted in by the user -- never
 # inferred from its name, type, or value.
 INHERITABLE_KEYS = frozenset({"base_branch"})
+# Builtin entity-specific keys whose non-inheritance is hardcoded: a shared
+# default they can never be. They must be refused as elements of a user's
+# `inheritable` array (opting them in would contradict the hardcoded rule).
+NON_INHERITABLE_KEYS = frozenset({"description"})
 # The reserved key naming the user's own additional non-entity-specific keys. It
 # is a TOML array of key names; it accumulates (unions) across scopes like
 # `hooks.on`, and never appears in an entity's `extra` payload.
@@ -347,6 +354,24 @@ def validate_arbitrary_key(key: str) -> None:
         raise WtmError(
             f"'{key}' is a reserved key; use its dedicated command "
             f"(reserved: {', '.join(sorted(RESERVED_KEYS))})"
+        )
+
+
+def validate_inheritable_element(key: str) -> None:
+    """Reject a key that may not be opted into the ``inheritable`` allowlist.
+
+    Anything hand-writable into ``inheritable`` is CLI-writable too, *except*
+    where it contradicts a hardcoded rule: a reserved key (its own typed surface,
+    :func:`validate_arbitrary_key`) or a hardcoded-non-inheritable builtin
+    (:data:`NON_INHERITABLE_KEYS`, e.g. ``description``). The builtin
+    :data:`INHERITABLE_KEYS` (``base_branch``) are already inheritable -- opting
+    them in is harmless and allowed.
+    """
+    validate_arbitrary_key(key)
+    if key in NON_INHERITABLE_KEYS:
+        raise WtmError(
+            f"'{key}' is never inheritable (it describes a single entity); "
+            f"it cannot be added to the inheritable allowlist"
         )
 
 
@@ -403,43 +428,119 @@ class _Store:
 
     def set(self, path: Path, key: Key, value: str) -> None:
         """Set *key* = *value* in *path*, creating tables and the file as needed."""
-        doc = self._writable_doc(path)
-        parts = _key_parts(key)
-        table = _descend_for_write(doc, parts[:-1])
-        _set_leaf(table if parts[:-1] else doc, parts[-1], value)
-        self._flush(path, doc)
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            table = _descend_for_write(doc, parts[:-1])
+            _set_leaf(table if parts[:-1] else doc, parts[-1], value)
 
     def unset(self, path: Path, key: Key) -> None:
         """Remove *key* from *path* (a no-op when it is absent)."""
-        doc = self._writable_doc(path)
-        parts = _key_parts(key)
-        node: object = doc
-        for part in parts[:-1]:
-            if not isinstance(node, dict) or part not in node:
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            node: object = doc
+            for part in parts[:-1]:
+                if not isinstance(node, dict) or part not in node:
+                    return
+
+                node = node[part]
+            if isinstance(node, dict):
+                node.pop(parts[-1], None)
+
+    def array_add(self, path: Path, key: Key, value: str) -> None:
+        """Add *value* (a string) to the array at *key* in *path* (set semantics).
+
+        Creates an empty array on first add; the add is idempotent (a value
+        already present is a no-op). A non-array value already at *key* is a kind
+        clash (hard error), matching :func:`_merge_locality`.
+        """
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            table = _descend_for_write(doc, parts[:-1])
+            container = table if parts[:-1] else doc
+            array = _writable_array(container, parts[-1], key)
+            if value not in [_unwrap_scalar(item) for item in array]:
+                array.append(value)
+
+    def array_remove(self, path: Path, key: Key, value: str) -> None:
+        """Strip every occurrence of *value* from the array at *key* in *path*.
+
+        The mirror of :meth:`array_add`: a no-op when the key or the value is
+        absent. A non-array value at *key* is a kind clash (hard error).
+        """
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            node: object = doc
+            for part in parts[:-1]:
+                if not isinstance(node, dict) or part not in node:
+                    return
+
+                node = node[part]
+            if not isinstance(node, dict) or parts[-1] not in node:
                 return
 
-            node = node[part]
-        if isinstance(node, dict):
-            node.pop(parts[-1], None)
-        self._flush(path, doc)
+            array = _writable_array(node, parts[-1], key)
+            for item in [i for i in array if _unwrap_scalar(i) == value]:
+                array.remove(item)
 
-    def user_doc(self) -> tomlkit.TOMLDocument:
-        """Return the writable user-file document (for the structural write tier)."""
-        return self._writable_doc(_user_config_path())
+    @contextmanager
+    def user_transaction(self):
+        """A write transaction over the user file, for the structural write tier.
 
-    def flush_user(self, doc: tomlkit.TOMLDocument) -> None:
-        """Write back a user-file document mutated by the structural write tier."""
-        self._flush(_user_config_path(), doc)
+        Yields the freshly re-read user-file document; the mutation happens inside
+        the ``with`` block and is flushed on clean exit (see :meth:`_transaction`).
+        """
+        with self._transaction(_user_config_path()) as doc:
+            yield doc
 
-    def _writable_doc(self, path: Path) -> tomlkit.TOMLDocument:
-        """Return a fresh document for *path*, refusing under ``WTM_NO_CONFIG``."""
+    @contextmanager
+    def _transaction(self, path: Path):
+        """Hold the per-file lock, yield *path* re-read fresh, flush on clean exit.
+
+        The single write primitive behind every mutation. Because :meth:`_flush`
+        rewrites the *whole* document, a write must base itself on the current
+        on-disk state, not the load-once :attr:`_docs` snapshot: the fresh re-read
+        (cache-bypassed) under the lock lets a concurrent writer's *other* keys
+        survive this read-modify-write. The flush is elided when the mutation left
+        the document unchanged, so a no-op (e.g. removing an absent key) neither
+        creates an empty file nor churns an existing one. An exception inside the
+        block skips the flush (no partial write) and still releases the lock.
+        Refused under ``WTM_NO_CONFIG`` (before any lock is acquired).
+        """
         if self._no_config:
             raise WtmError("cannot write config while WTM_NO_CONFIG is set")
 
-        return self.doc(path)
+        with self._locked(path):
+            self._docs.pop(path, None)
+            doc = self.doc(path)
+            before = tomlkit.dumps(doc)
+            yield doc
+            if tomlkit.dumps(doc) != before:
+                self._flush(path, doc)
+
+    @contextmanager
+    def _locked(self, path: Path):
+        """Hold an exclusive lock over *path*'s containing directory for a write.
+
+        ``flock`` the config file's parent dir rather than a sidecar: the dir
+        pre-exists (created here on first write) and is *never* replaced, whereas
+        the file itself is swapped by ``os.replace`` (a new inode), so a lock on
+        it would not span the write. Locking the stable directory leaves no lock
+        artifact to clean up, and the kernel drops the lock on process exit (no
+        stale lock on crash). Granularity is per-config-dir (~ per-scope), which
+        is effectively per-file here.
+        """
+        directory = path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def _flush(self, path: Path, doc: tomlkit.TOMLDocument) -> None:
-        """Cache *doc* and write it to *path* atomically."""
+        """Cache *doc* and write it to *path* atomically (call inside :meth:`_transaction`)."""
         self._docs[path] = doc
         _atomic_write(path, tomlkit.dumps(doc))
 
@@ -488,6 +589,28 @@ def _set_leaf(table, key: str, value: str) -> None:
         table._insert_at(0, key, value)
     else:
         table[key] = value
+
+
+def _writable_array(container, key: str, full_key: Key):
+    """Return the tomlkit array at *container[key]*, creating an empty one if absent.
+
+    A present non-array value is a kind clash (hard error), aligning array
+    mutation with the read-side :func:`_check_kind` rule. *full_key* names the
+    key for the error message.
+    """
+    existing = container.get(key)
+    if existing is None:
+        container[key] = tomlkit.array()
+
+        return container[key]
+    if not isinstance(existing, (list, tuple)):
+        raise WtmError(
+            f"config key '{full_key if isinstance(full_key, str) else '.'.join(full_key)}' "
+            f"is a {_kind(_unwrap_scalar(existing))}, not an array; "
+            f"cannot mutate it element-wise"
+        )
+
+    return existing
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -602,6 +725,19 @@ class Config:
     def unset_value(self, address: ConfigAddress, key: Key) -> None:
         """Remove one scalar at *key* from the file *address* names (a no-op if absent)."""
         self._store.unset(address.file, key)
+
+    def add_to_array(self, address: ConfigAddress, key: Key, value: str) -> None:
+        """Add *value* (a string) to the array at *key* in the file *address* names.
+
+        Set semantics: the add is idempotent (a value already present is a
+        no-op). Read-modify-write under a per-file lock; the file is created on
+        first add. Refused under ``WTM_NO_CONFIG``.
+        """
+        self._store.array_add(address.file, key, value)
+
+    def remove_from_array(self, address: ConfigAddress, key: Key, value: str) -> None:
+        """Strip every occurrence of *value* from the array at *key* (a no-op if absent)."""
+        self._store.array_remove(address.file, key, value)
 
     # --- scope write targets -------------------------------------------------
 
@@ -1095,16 +1231,15 @@ class Config:
         Only the caller-supplied scalars are written (``path`` always; the rest
         when given). The caller owns collision/validation policy.
         """
-        doc = self._store.user_doc()
-        workspaces = _workspaces_table(doc)
-        entry = tomlkit.table()
-        entry["path"] = path
-        if description:
-            entry["description"] = description
-        if base_branch:
-            entry["base_branch"] = base_branch
-        workspaces[name] = entry
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            workspaces = _workspaces_table(doc)
+            entry = tomlkit.table()
+            entry["path"] = path
+            if description:
+                entry["description"] = description
+            if base_branch:
+                entry["base_branch"] = base_branch
+            workspaces[name] = entry
 
     def set_workspace(
         self,
@@ -1119,21 +1254,20 @@ class Config:
         Only the fields passed as non-``None`` are touched. A field passed as the
         empty string is *removed*; ``path`` may not be emptied (validated upstream).
         """
-        doc = self._store.user_doc()
-        entry = _existing_entry(doc, name)
-        for key, value in (
-            ("path", path),
-            ("description", description),
-            ("base_branch", base_branch),
-        ):
-            if value is None:
-                continue
+        with self._store.user_transaction() as doc:
+            entry = _existing_entry(doc, name)
+            for key, value in (
+                ("path", path),
+                ("description", description),
+                ("base_branch", base_branch),
+            ):
+                if value is None:
+                    continue
 
-            if value == "":
-                entry.pop(key, None)
-            else:
-                entry[key] = value
-        self._store.flush_user(doc)
+                if value == "":
+                    entry.pop(key, None)
+                else:
+                    entry[key] = value
 
     def rename_workspace(self, old: str, new: str) -> bool:
         """Rename the registry key *old* to *new*, preserving the entry's subtables.
@@ -1141,15 +1275,14 @@ class Config:
         Fixes a top-level ``default_workspace`` that pointed at *old*. Returns
         whether that fixup happened.
         """
-        doc = self._store.user_doc()
-        entry = _existing_entry(doc, old)
-        workspaces = doc["workspaces"]
-        workspaces[new] = entry
-        del workspaces[old]
-        fixed = doc.get("default_workspace") == old
-        if fixed:
-            doc["default_workspace"] = new
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            entry = _existing_entry(doc, old)
+            workspaces = doc["workspaces"]
+            workspaces[new] = entry
+            del workspaces[old]
+            fixed = doc.get("default_workspace") == old
+            if fixed:
+                doc["default_workspace"] = new
 
         return fixed
 
@@ -1159,39 +1292,34 @@ class Config:
         Also clears a top-level ``default_workspace`` that pointed at *name*.
         Returns whether that fixup happened.
         """
-        doc = self._store.user_doc()
-        _existing_entry(doc, name)  # existence check
-        del doc["workspaces"][name]
-        fixed = doc.get("default_workspace") == name
-        if fixed:
-            del doc["default_workspace"]
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            _existing_entry(doc, name)  # existence check
+            del doc["workspaces"][name]
+            fixed = doc.get("default_workspace") == name
+            if fixed:
+                del doc["default_workspace"]
 
         return fixed
 
     def set_default(self, name: str) -> None:
         """Set the top-level ``default_workspace`` key in the user file."""
-        doc = self._store.user_doc()
-        _set_leaf(doc, "default_workspace", name)
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            _set_leaf(doc, "default_workspace", name)
 
     def clear_default(self) -> None:
         """Remove the top-level ``default_workspace`` key from the user file."""
-        doc = self._store.user_doc()
-        doc.pop("default_workspace", None)
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            doc.pop("default_workspace", None)
 
     def set_base_branch(self, value: str) -> None:
         """Set the top-level ``base_branch`` (global default fork point) in the user file."""
-        doc = self._store.user_doc()
-        _set_leaf(doc, "base_branch", value)
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            _set_leaf(doc, "base_branch", value)
 
     def clear_base_branch(self) -> None:
         """Remove the top-level ``base_branch`` key from the user file."""
-        doc = self._store.user_doc()
-        doc.pop("base_branch", None)
-        self._store.flush_user(doc)
+        with self._store.user_transaction() as doc:
+            doc.pop("base_branch", None)
 
     # --- loading -------------------------------------------------------------
 

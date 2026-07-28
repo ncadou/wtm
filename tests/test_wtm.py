@@ -3971,6 +3971,72 @@ def test_config_unset_removes_key(root: Path) -> None:
     assert "editor" not in (root / "proj" / ".wtm" / "config.toml").read_text()
 
 
+def test_config_set_array_add_and_remove(root: Path) -> None:
+    # --array-add builds a string array (set semantics: the repeat is a no-op);
+    # --array-remove strips the element again.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "worktree_ports", "3001", "--array-add", root=root, cwd=cwd)
+    run("config", "set", "worktree_ports", "3002", "--array-add", root=root, cwd=cwd)
+    run("config", "set", "worktree_ports", "3001", "--array-add", root=root, cwd=cwd)
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert 'worktree_ports = ["3001", "3002"]' in text
+    res = run("config", "set", "worktree_ports", "3001", "--array-remove", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert 'worktree_ports = ["3002"]' in (cwd / ".wtm" / "config.toml").read_text()
+
+
+def test_config_set_array_flags_mutually_exclusive(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run(
+        "config", "set", "x", "1", "--array-add", "--array-remove", root=root, cwd=root / "proj"
+    )
+    assert res.returncode == 1
+    assert "mutually exclusive" in res.stderr.lower()
+
+
+def test_config_set_inheritable_array_opts_key_in(root: Path) -> None:
+    # `config set inheritable KEY --array-add` maintains the reserved allowlist,
+    # and the opted-in key then actually inherits (config get from a project).
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n')
+    _seed_repo(root, "proj")
+    env = {"WTM_CONFIG": str(cfg)}
+    add = run(
+        "config",
+        "set",
+        "inheritable",
+        "deploy_env",
+        "--array-add",
+        "-s",
+        "user",
+        root=root,
+        cwd=root,
+        extra_env=env,
+    )
+    assert add.returncode == 0, add.stderr
+    assert 'inheritable = ["deploy_env"]' in cfg.read_text()
+    got = run(
+        "config",
+        "get",
+        "deploy_env",
+        "--sources",
+        root=root,
+        cwd=root / "proj",
+        extra_env=env,
+    )
+    assert got.returncode == 0, got.stderr
+    assert "staging  [workspace]" in got.stdout
+
+
+def test_config_set_inheritable_rejects_hardcoded_non_inheritable(root: Path) -> None:
+    # `description` is hardcoded never-inheritable: opting it in is refused.
+    _seed_repo(root, "proj")
+    res = run("config", "set", "inheritable", "description", "--array-add", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "never inheritable" in res.stderr.lower()
+
+
 def test_config_set_workspace_entity_from_root_cwd(root: Path) -> None:
     # Standing at the workspace root (no project), the entity floor is the
     # active workspace; the key lands workspace-local top-level.

@@ -76,6 +76,40 @@ same way annotations do.
   from (its scope) and the file it lives in.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
 
+### Array keys (`--array-add` / `--array-remove`)
+
+`config set` also mutates a string **array** element-wise, instead of writing a
+scalar:
+
+- `wtm config set KEY VALUE --array-add [-s SCOPE]` — add `VALUE` to the array at
+  `KEY` (**set semantics**: idempotent, a value already present is a no-op);
+  creates the array on first add.
+- `wtm config set KEY VALUE --array-remove [-s SCOPE]` — strip every occurrence
+  of `VALUE` from that array.
+
+Values are always stored as **strings**. Mutating a key that already holds a
+scalar or table is a hard error (the same kind-clash rule reads enforce). Arrays
+do **not** merge across scopes (unlike `hooks.on` / `inheritable`): a read takes
+the most-local scope's whole array. Give each tier a distinct name when you want
+per-tier arrays that don't shadow one another — e.g. a per-worktree port
+registry beside a per-project one:
+
+```toml
+# workspace scope
+project_ports = ["8080"]
+# worktree scope
+worktree_ports = ["3001", "3002"]
+```
+
+Every config write is serialised by a **per-directory lock** (`flock` on the
+config file's containing dir, which is stable — unlike the file, replaced on
+every write) and is a **read-modify-write**: it re-reads the file fresh under
+the lock and applies just its delta, so a concurrent writer's *other* keys
+survive (no clobber when two invocations touch the same file, and no lost
+element when they mutate the same array). A write that changes nothing (e.g.
+removing an absent key) is elided — it neither creates an empty file nor churns
+an existing one.
+
 An **inheritable** key resolves up the containment chain rather than staying
 entity-local — it is a *non-entity-specific* key: a shared default describing a
 whole subtree (like `base_branch`), not a property of one node (like
@@ -87,13 +121,21 @@ its definition level (`project` / `workspace` / `global`) — matching
 
 Two builtin keys are classified in code: `base_branch` inherits, `description`
 does not. Every arbitrary key is **entity-local by default**. To opt one into
-inheritance, name it in a top-level `inheritable` array:
+inheritance, name it in a top-level `inheritable` array — maintained through the
+same array flags (the one reserved key those flags may touch):
 
 ```toml
 inheritable = ["deploy_env", "team"]   # these arbitrary keys inherit like base_branch
 deploy_env = "staging"                 # a global default every entity may inherit
 ```
 
+```sh
+wtm config set inheritable deploy_env --array-add     # opt a key into inheritance
+wtm config set inheritable deploy_env --array-remove  # opt it back out
+```
+
+Each element is validated: a reserved key or a hardcoded-non-inheritable builtin
+(`description`) is refused (opting it in would contradict the hardcoded rule).
 The `inheritable` declaration **accumulates** (unions) across scopes like
 `hooks.on`: a workspace may name a key to opt it in for all its projects, even
 if the global file does not. Membership is always a curated decision — hardcoded

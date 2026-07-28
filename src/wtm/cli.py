@@ -26,6 +26,7 @@ from wtm.config import (
     Workspace,
     resolve_project_dir,
     validate_arbitrary_key,
+    validate_inheritable_element,
 )
 from wtm.core import (
     WtmError,
@@ -2103,6 +2104,12 @@ def config_set(
     key: str = typer.Argument(..., metavar="KEY", help="Arbitrary (non-reserved) config key"),
     value: str = typer.Argument(..., metavar="VALUE", help="Value to write"),
     scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+    array_add: bool = typer.Option(
+        False, "--array-add", help="Add VALUE to the array at KEY (set semantics, idempotent)"
+    ),
+    array_remove: bool = typer.Option(
+        False, "--array-remove", help="Remove every occurrence of VALUE from the array at KEY"
+    ),
 ) -> None:
     """Set an arbitrary config KEY on the cwd-inferred entity.
 
@@ -2111,13 +2118,39 @@ def config_set(
     entity's cascade to write, defaulting to the deepest scope whose directory
     exists. Reserved keys (``hooks``/``projects``/``worktrees``/``path``/
     ``default_workspace``) have their own commands and are refused here.
+
+    With ``--array-add`` / ``--array-remove`` the write is an element-wise array
+    mutation instead of a scalar set: VALUE is added to (idempotently, set
+    semantics) or stripped from the string array at KEY, under a per-file lock.
+    The one reserved array a user may mutate this way is ``inheritable`` (the
+    opt-in allowlist of extra inheritable keys); each element it takes is
+    validated (a reserved or hardcoded-non-inheritable key such as
+    ``description`` is refused).
     """
-    validate_arbitrary_key(key)
+    if array_add and array_remove:
+        raise WtmError("--array-add and --array-remove are mutually exclusive")
+
+    array = array_add or array_remove
+    if key == "inheritable" and array:
+        validate_inheritable_element(value)
+    else:
+        validate_arbitrary_key(key)
     config = ctx.obj.config
     target = config.resolve_generic_target(current_dir(resolve=False))
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
-    config.set_value(address, (*prefix, key) if prefix else key, value)
+    full_key = (*prefix, key) if prefix else key
+    if array_add:
+        config.add_to_array(address, full_key, value)
+        log(f"{target.label}: {key} += {value} [{scope.value}] ({address.file})")
+
+        return
+    if array_remove:
+        config.remove_from_array(address, full_key, value)
+        log(f"{target.label}: {key} -= {value} [{scope.value}] ({address.file})")
+
+        return
+    config.set_value(address, full_key, value)
     log(f"{target.label}: set {key} [{scope.value}] ({address.file})")
 
 
