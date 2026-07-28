@@ -274,10 +274,12 @@ class GenericTarget:
     for messages, *probes* is its locality cascade (most-local-first, feeding
     reads), *write_target* maps a scope to its ``(address, prefix)`` write site,
     *allowed_scopes* gates ``-s/--scope``, and *default_scope* is the auto-default
-    (the deepest scope whose dir exists). *inherit* maps an inheritable key (see
-    :data:`INHERITABLE_KEYS`) to its extended, tier-tagged probe list -- the
-    entity's own cascade followed by its ancestors' -- so ``config get`` reports
-    the same effective value a real command would take.
+    (the deepest scope whose dir exists). *inherit* maps each inheritable key
+    (see :meth:`Config.inheritable_keys` -- the builtin :data:`INHERITABLE_KEYS`
+    unioned with the user-declared ``inheritable`` array) to its extended,
+    tier-tagged probe list -- the entity's own cascade followed by its
+    ancestors' -- so ``config get`` reports the same effective value a real
+    command would take.
     """
 
     label: str
@@ -311,23 +313,35 @@ class SourceRung:
 
 Key = str | tuple[str, ...]
 
-RESERVED_KEYS = frozenset({"hooks", "projects", "worktrees", "path", "default_workspace"})
+RESERVED_KEYS = frozenset(
+    {"hooks", "projects", "worktrees", "path", "default_workspace", "inheritable"}
+)
 _CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
 # Keys whose tables are pure containers of named children (rendered as
 # super-tables so a fresh nested write produces dotted headers, no empty parent).
 _SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
-# Keys whose read resolution inherits down the containment chain (Layer 2): the
-# generic `config get` folds an entity's own cascade plus its ancestors' for
-# these, so it reports the same effective value a real command would use.
+# Builtin non-entity-specific keys: shared defaults whose read resolution
+# inherits down the containment chain (Layer 2), rather than staying entity-local.
+# The generic `config get` folds an entity's own cascade plus its ancestors' for
+# these, so it reports the same effective value a real command would use. The
+# effective set is this builtin allowlist unioned with the user-declared
+# `inheritable` array (see :meth:`Config.inheritable_keys`); a key's membership is
+# always a curated decision -- hardcoded here or opted in by the user -- never
+# inferred from its name, type, or value.
 INHERITABLE_KEYS = frozenset({"base_branch"})
+# The reserved key naming the user's own additional non-entity-specific keys. It
+# is a TOML array of key names; it accumulates (unions) across scopes like
+# `hooks.on`, and never appears in an entity's `extra` payload.
+INHERITABLE_DECL_KEY = "inheritable"
 
 
 def validate_arbitrary_key(key: str) -> None:
     """Reject a reserved name as an arbitrary ``config`` key (raises on clash).
 
-    The container tables (``hooks`` / ``projects`` / ``worktrees``) and the
-    user-file declarations (``path`` / ``default_workspace``) own their own
-    typed surfaces; the generic key facility must not shadow them.
+    The container tables (``hooks`` / ``projects`` / ``worktrees``), the
+    user-file declarations (``path`` / ``default_workspace``), and the
+    ``inheritable`` allowlist own their own typed surfaces; the generic key
+    facility must not shadow them.
     """
     if key in RESERVED_KEYS:
         raise WtmError(
@@ -721,7 +735,9 @@ class Config:
                 Scope.SYSTEM,
             ),
             default_scope=default,
-            inherit={"base_branch": self._base_branch_inherit(ws, project_dir.name)},
+            inherit=self._inherit_map(
+                ws, project_dir.name, own=self._worktree_probes(project_dir, name)
+            ),
         )
 
     def _project_generic_target(self, ws: Workspace, project_dir: Path) -> GenericTarget:
@@ -740,7 +756,7 @@ class Config:
             write_target=lambda scope: self.project_write_target(ws, project_dir.name, scope),
             allowed_scopes=(Scope.PROJECT, Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
             default_scope=default,
-            inherit={"base_branch": self._base_branch_inherit(ws, project_dir.name)},
+            inherit=self._inherit_map(ws, project_dir.name, own=None),
         )
 
     def _workspace_generic_target(self, ws: Workspace) -> GenericTarget:
@@ -753,18 +769,38 @@ class Config:
             write_target=lambda scope: self.workspace_write_target(ws, scope),
             allowed_scopes=(Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
             default_scope=default,
-            inherit={"base_branch": self._base_branch_inherit(ws, None)},
+            inherit=self._inherit_map(ws, None, own=None),
         )
 
-    def _base_branch_inherit(self, ws: Workspace, project: str | None) -> list[_TierProbe]:
-        """The tier-tagged base_branch chain for an entity, most-local-first.
+    def _inherit_map(
+        self, ws: Workspace, project: str | None, *, own: list[_Probe] | None
+    ) -> dict[str, list[_TierProbe]]:
+        """The tier-tagged inherit chain for every inheritable key of an entity.
+
+        Maps each effective inheritable key (see :meth:`inheritable_keys`) to its
+        most-local-first chain. ``base_branch`` uses the project-anchored chain
+        (:meth:`_ancestor_tiers`); every other (user-declared) key prepends the
+        entity's own cascade *own* (tier ``None``, so its most-local value can win
+        wholesale) before the same ancestor tiers. A worktree's own cascade is
+        thus honoured for a user key, but ``base_branch`` stays a project-tier
+        concept with no worktree tier of its own -- keeping ``config get
+        base_branch`` aligned with :meth:`base_branch_provenance` / ``create``.
+        """
+        ancestors = self._ancestor_tiers(ws, project)
+        own_rungs = [_TierProbe(None, p) for p in own] if own else []
+        mapping: dict[str, list[_TierProbe]] = {}
+        for key in self.inheritable_keys(ws, project):
+            mapping[key] = ancestors if key == "base_branch" else own_rungs + ancestors
+
+        return mapping
+
+    def _ancestor_tiers(self, ws: Workspace, project: str | None) -> list[_TierProbe]:
+        """The project/workspace/global ancestor rungs for an entity, most-local-first.
 
         Concatenates the project cascade (tier ``project``, when a *project* is
         given), the workspace-own cascade (tier ``workspace``), and the global
-        top-level default (tier ``global``) -- so the fold's most-local winner
-        matches :meth:`base_branch_provenance` exactly. A worktree inherits its
-        containing project's chain (base_branch is a project-tier concept, with
-        no worktree tier of its own).
+        top-level default (tier ``global``) -- the shared tail of every
+        inheritable key's chain, matching :meth:`base_branch_provenance` exactly.
         """
         rungs: list[_TierProbe] = []
         if project is not None:
@@ -774,6 +810,63 @@ class Config:
 
         return rungs
 
+    def inheritable_keys(self, ws: Workspace | None, project: str | None) -> frozenset[str]:
+        """The effective non-entity-specific key set for an entity's resolution.
+
+        The builtin :data:`INHERITABLE_KEYS` unioned with every user-declared
+        ``inheritable`` array found along the entity's containment chain: the
+        project cascade (when a *project* is given), the workspace-own cascade,
+        and the global top-level. The declaration *accumulates* across scopes
+        (a workspace may opt a key in for all its projects), so a key is
+        inheritable for an entity if any relevant scope names it.
+        """
+        keys: set[str] = set(INHERITABLE_KEYS)
+        probes: list[_Probe] = []
+        if ws is not None:
+            if project is not None:
+                probes += self._project_probes(ws, project)
+            probes += self._workspace_probes(ws)
+        probes += _global_probes()
+        for probe in probes:
+            declared = _read_table(self._store, probe).get(INHERITABLE_DECL_KEY)
+            if isinstance(declared, (list, tuple)):
+                keys.update(str(k) for k in declared)
+
+        return frozenset(keys)
+
+    def _inherited_extra(
+        self,
+        local: dict[str, object],
+        ws: Workspace | None,
+        project: str | None,
+    ) -> dict[str, object]:
+        """Fold inherited ancestor values into an entity's own ``extra`` payload.
+
+        Starts from *local* (the entity's Layer-1 locality-merged arbitrary
+        keys); for every user-declared inheritable key (see
+        :meth:`inheritable_keys`, excluding the builtin ``base_branch`` which owns
+        its typed :meth:`base_branch_provenance` surface) that is *absent*
+        entity-locally, injects the effective inherited value from the ancestor
+        chain. Entity-local values already win (they are the most-local rung, and
+        *local* already reflects the entity's own cascade), so this only supplies
+        keys a descendant left unset -- keeping ``config show`` and the resolved
+        view in step with ``config get``.
+        """
+        if ws is None:
+            return local
+
+        ancestors = self._ancestor_tiers(ws, project)
+        merged = dict(local)
+        for key in self.inheritable_keys(ws, project):
+            if key == "base_branch" or key in local:
+                continue
+
+            chain = _fold_tiers(self._store, ancestors, key)
+            if chain:
+                merged[key] = chain[0].value
+
+        return merged
+
     def resolve_generic_value(
         self, target: GenericTarget, key: str
     ) -> tuple[object | None, list[SourceRung]]:
@@ -782,7 +875,7 @@ class Config:
         The effective value is the most-local present one (``None`` when unset);
         the chain lists every rung that carries *key*, most-local-first, as
         :class:`SourceRung` records -- the material for ``config get --sources``.
-        An inheritable key (see :data:`INHERITABLE_KEYS`) folds the entity's own
+        An inheritable key (see :meth:`inheritable_keys`) folds the entity's own
         cascade plus its ancestors' (tier-tagged), so the effective value matches
         what a real command would use; every other key stays entity-local. A
         scalar/array/table kind clash for *key* across scopes is a hard error,
@@ -792,17 +885,7 @@ class Config:
         tiered = (
             rungs if rungs is not None else [_TierProbe(None, probe) for probe in target.probes]
         )
-        chain: list[SourceRung] = []
-        prev: object = None
-        for tiered_probe in tiered:
-            probe = tiered_probe.probe
-            table = _read_table(self._store, probe)
-            if key in table and key not in _CONTAINER_KEYS:
-                value = table[key]
-                _check_kind(key, prev, value, probe)
-                chain.append(SourceRung(probe.scope, value, probe.file, tiered_probe.tier))
-                prev = value
-
+        chain = _fold_tiers(self._store, tiered, key)
         effective = chain[0].value if chain else None
 
         return effective, chain
@@ -848,8 +931,10 @@ class Config:
         Reserved container keys are excluded; the remainder lands in ``extra``.
         """
         payload, hooks = _merge_locality(self._store, self._project_probes(workspace, name))
+        annotation = _annotation_from_payload(payload, hooks)
+        extra = self._inherited_extra(annotation.extra, workspace, name)
 
-        return _annotation_from_payload(payload, hooks)
+        return replace(annotation, extra=extra)
 
     def base_branch_for(self, workspace: Workspace, name: str) -> str | None:
         """Resolve a project's configured base branch (most-specific first)."""
@@ -1209,7 +1294,8 @@ class Config:
         wt_dir = worktrees_dir / rel.parts[0]
         name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
         payload, hooks = _merge_locality(self._store, self._worktree_probes(project_dir, name))
-        extra = {k: v for k, v in payload.items() if k != "description"}
+        local = {k: v for k, v in payload.items() if k != "description"}
+        extra = self._inherited_extra(local, self.workspace_of(project_dir), project_dir.name)
 
         return ResolvedWorktree(
             name=name,
@@ -1313,6 +1399,31 @@ def _merge_locality(store: _Store, probes: Sequence[_Probe]) -> tuple[dict[str, 
     return payload, hooks
 
 
+def _fold_tiers(store: _Store, tiered: Sequence[_TierProbe], key: str) -> list[SourceRung]:
+    """Fold *key* over a tier-tagged probe list into its most-local-first chain.
+
+    Reads every rung, keeping those that carry *key* (skipping container tables),
+    as :class:`SourceRung` records in most-local-first order -- the shared engine
+    behind both ``config get`` (:meth:`Config.resolve_generic_value`) and the
+    inheritance-aware ``extra`` fold in the resolved view / registry. A
+    scalar/array/table kind clash for *key* across rungs is a hard error,
+    matching :func:`_merge_locality` (one rule for every read surface). The head
+    of the returned chain, when non-empty, is the effective value.
+    """
+    chain: list[SourceRung] = []
+    prev: object = None
+    for tiered_probe in tiered:
+        probe = tiered_probe.probe
+        table = _read_table(store, probe)
+        if key in table and key not in _CONTAINER_KEYS:
+            value = table[key]
+            _check_kind(key, prev, value, probe)
+            chain.append(SourceRung(probe.scope, value, probe.file, tiered_probe.tier))
+            prev = value
+
+    return chain
+
+
 def _check_kind(key: str, prev: object, value: object, probe: _Probe) -> None:
     """Raise on a scalar/array/table kind clash for *key* across scopes."""
     if prev is None or _kind(prev) == _kind(value):
@@ -1363,16 +1474,47 @@ def _build_registry(system: dict, user: dict, store: _Store) -> dict[str, Worksp
     registry: dict[str, Workspace] = {}
     for name, (path, scope) in declarations.items():
         ws = Workspace(name=name, path=path, scope=scope)
-        payload, hooks = _merge_locality(store, _workspace_probes_for(name, path))
+        probes = _workspace_probes_for(name, path)
+        payload, hooks = _merge_locality(store, probes)
+        local = {k: v for k, v in payload.items() if k not in ("description", "base_branch")}
         registry[name] = replace(
             ws,
             description=_str_or_none(payload.get("description")),
             base_branch=_str_or_none(payload.get("base_branch")),
             hooks=hooks,
-            extra={k: v for k, v in payload.items() if k not in ("description", "base_branch")},
+            extra=_workspace_inherited_extra(store, probes, local),
         )
 
     return registry
+
+
+def _workspace_inherited_extra(
+    store: _Store, ws_probes: list[_Probe], local: dict[str, object]
+) -> dict[str, object]:
+    """Fold global-tier inherited values into a workspace's own ``extra``.
+
+    A workspace's only ancestor is the global top-level default, so a
+    user-declared inheritable key absent workspace-locally falls back to the
+    global value. Mirrors :meth:`Config._inherited_extra` for the registry build,
+    which runs before any :class:`Config` exists. ``base_branch`` is excluded (it
+    owns the typed :meth:`Config.base_branch_provenance` surface).
+    """
+    keys: set[str] = set(INHERITABLE_KEYS)
+    for probe in (*ws_probes, *_global_probes()):
+        declared = _read_table(store, probe).get(INHERITABLE_DECL_KEY)
+        if isinstance(declared, (list, tuple)):
+            keys.update(str(k) for k in declared)
+
+    merged = dict(local)
+    for key in keys:
+        if key == "base_branch" or key in local:
+            continue
+
+        chain = _fold_tiers(store, [_TierProbe("global", p) for p in _global_probes()], key)
+        if chain:
+            merged[key] = chain[0].value
+
+    return merged
 
 
 def _workspace_probes_for(name: str, path: Path) -> list[_Probe]:

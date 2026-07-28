@@ -3897,6 +3897,47 @@ def test_config_get_base_branch_sources_lists_inheritance_tiers(root: Path) -> N
     )
 
 
+def test_config_get_user_declared_key_inherits(root: Path) -> None:
+    # A key named in the top-level `inheritable` array folds ancestor tiers: from
+    # a project, `config get` reports the workspace-own value, tagged by tier.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "get",
+        "deploy_env",
+        "--sources",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "staging  [workspace]" in res.stdout
+
+
+def test_config_show_reflects_inherited_user_key(root: Path) -> None:
+    # `config show` (the resolved-view read path) agrees with `config get`: a
+    # declared inheritable key absent project-locally surfaces on the descendant.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "show",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "deploy_env" in res.stdout
+    assert "staging" in res.stdout
+
+
 def test_config_set_user_scope_renders_dotted_headers(root: Path) -> None:
     # A fresh deep user-scope generic write produces dotted [workspaces.W.
     # projects.P] headers -- no empty [workspaces] / [projects] container lines.

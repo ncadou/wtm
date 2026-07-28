@@ -4,7 +4,10 @@ Date: 2026-07-24
 
 ## Status
 
-Accepted (implemented)
+Accepted — fully implemented. All six phases below and the four addenda have
+shipped (see the phase-completion note under **Implementation phases**). The
+locality/inheritance invariants are guarded by `tests/test_config.py` and
+`tests/test_wtm.py`.
 
 ## Context
 
@@ -91,7 +94,9 @@ outside the payload cascade.
   (including inheritance steps), while `config show --sources` labels each value
   with its winning scope only.
 - Reserved names (`hooks`, `projects`, `worktrees`, `path`,
-  `default_workspace`) are rejected as arbitrary keys.
+  `default_workspace`) are rejected as arbitrary keys. (The 2026-07-28 addendum
+  adds `inheritable` to this set; the effective list today is the six names in
+  `RESERVED_KEYS`.)
 - An inline-hook writer (`hook set/unset EVENT "cmd" -s SCOPE`) writes
   `[…hooks.on]` at the entity's table-path, reusing the same prefix machinery.
 
@@ -109,7 +114,9 @@ outside the payload cascade.
 
 ## Implementation phases
 
-Each phase is independently shippable:
+All six phases are shipped (each was independently shippable, and each landed in
+order); the four addenda below record the follow-on corrections and extensions
+made after phase 6.
 
 1. Resolver rewrite: probe tables, generic Layer-1 merge + provenance, Layer-2
    inheritance registry, kind-clash errors, top-level self layout; retire
@@ -167,3 +174,76 @@ the read view still reports provenance via `base_branch_provenance`. And the
 generic write path now marks its container tables (`workspaces` / `projects` /
 `worktrees`) as super-tables like the structural writers, so a fresh deep write
 renders dotted `[workspaces.W.projects.P]` headers with no empty parent lines.
+
+## Addendum (2026-07-28): user-extensible inheritability
+
+Layer 2's inheritable-key registry was a hardcoded frozenset (`base_branch`
+only), so the *entity-specific vs non-entity-specific* distinction it encodes
+was closed to users: an arbitrary key could cascade *within* an entity (Layer 1)
+but never inherit *between* entities (Layer 2), no matter how default-like it
+was. The two are one axis — an **inheritable** key is exactly a
+*non-entity-specific* one: a shared default describing a whole subtree (it flows
+down the containment chain), as opposed to a property of a single node
+(`description`, `path`), which must never inherit.
+
+Users now opt an arbitrary key onto that axis via a top-level `inheritable`
+array of key names. The effective set is the builtin `INHERITABLE_KEYS` unioned
+with every `inheritable` array found along the entity's chain; the declaration
+**accumulates across scopes** (like `hooks.on`), so a workspace can opt a key in
+for all its projects. It is additive opt-in only — arbitrary keys stay
+entity-local by default, and the builtin classifications are fixed
+(`base_branch` in, `description` out). `inheritable` is a reserved key (refused
+as an arbitrary key, never leaked into `extra`).
+
+Inheritance for a declared key reaches every read surface uniformly, not just
+`config get`: the generalized inherit-chain builder feeds `GenericTarget.inherit`
+for the whole effective set, and a shared tier-fold (`_fold_tiers`) injects
+inherited ancestor values into the resolved view's / registry's `extra` for keys
+a descendant leaves unset — so `config show` and `config get` agree (the same
+divergence class the previous addendum closed for `base_branch`).
+
+`base_branch` keeps one carve-out: it is a project-tier concept with no worktree
+tier of its own, so a worktree-local `base_branch` is ignored (keeping
+`config get` aligned with `base_branch_provenance` / `create`), whereas a
+user-declared inheritable key set worktree-local *is* honoured. That is the only
+place a builtin's chain differs from the generic one.
+
+## Addendum (2026-07-28): CLI/env surface and rationale left implicit
+
+The Decision recorded the resolution engine but glossed three parts of the shipped
+surface. Documenting them here (no behaviour change) so the ADR matches the code.
+
+- **The `config base-branch` command.** The "Write placement and CLI" bullets
+  cover `project set` / `workspace set` / `worktree set`, the generic
+  `config set/get/unset`, and `hook set/unset`, but omit the dedicated
+  `wtm config base-branch [VALUE] [--clear]`. It is the read/set/clear surface for
+  the **global top-level** `base_branch` default (the inheritance floor below the
+  workspace tier): with no VALUE it prints the effective global default annotated
+  with its winning scope, and set/clear write the user-scope top-level key. It is
+  a thin wrapper over the `set_base_branch` / `clear_base_branch` structural
+  mutations named in the Decision — a convenience peer of the generic surface, not
+  a new mechanism.
+
+- **System-scope selection is env-only; there is no `WTM_NO_SYSTEM`.** The system
+  file is `$WTM_SYSTEM_CONFIG` (default `/etc/wtm/config.toml`). `WTM_NO_CONFIG`
+  is the all-or-nothing isolation knob — it suppresses *every* scope's reads and
+  refuses *every* write. There is deliberately no per-scope suppression flag; to
+  drop just the system scope, point `WTM_SYSTEM_CONFIG` at a path that does not
+  exist (an absent file resolves to an empty document). This keeps the env
+  surface to two knobs and the "skip a scope" idiom uniform (an absent file, not a
+  flag).
+
+- **Inheritability is a curated allowlist, never inferred.** A key joins Layer 2
+  only by explicit decision — the hardcoded `INHERITABLE_KEYS` (`base_branch`) or
+  the user's accumulating `inheritable` array — and *never* by heuristic on the
+  key's name, type, or value. Type/shape-inferred inheritance (e.g. "scalars
+  inherit, tables don't") was rejected: it would make a key's cross-entity
+  behaviour an implicit property of its data rather than a stated intent, and
+  would silently reclassify a key when its value changed shape. The
+  entity-specific-vs-shared-default distinction is a modelling choice, so it stays
+  a curated decision.
+
+Reserved-key reconciliation: the Decision's reserved list predates the
+`inheritable` key added in the earlier 2026-07-28 addendum. The effective set is
+now the six names in `RESERVED_KEYS`: `hooks`, `projects`, `worktrees`, `path`,
+`default_workspace`, `inheritable`.

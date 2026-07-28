@@ -77,15 +77,33 @@ same way annotations do.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
 
 An **inheritable** key resolves up the containment chain rather than staying
-entity-local. Today only `base_branch` inherits: `config get base_branch` folds
-the entity's own cascade plus its ancestors' (project → workspace → global
-default), so it reports the same effective value `create` would use. For an
-inheritable key `--sources` labels each rung by its definition level
-(`project` / `workspace` / `global`) — matching `config show` — rather than its
-raw scope, and still names the file.
+entity-local — it is a *non-entity-specific* key: a shared default describing a
+whole subtree (like `base_branch`), not a property of one node (like
+`description`). `config get` on such a key folds the entity's own cascade plus
+its ancestors' (project → workspace → global default), so it reports the same
+effective value a real command would use; for it `--sources` labels each rung by
+its definition level (`project` / `workspace` / `global`) — matching
+`config show` — rather than its raw scope, and still names the file.
 
-Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default_workspace`)
-have their own commands and are refused as arbitrary keys.
+Two builtin keys are classified in code: `base_branch` inherits, `description`
+does not. Every arbitrary key is **entity-local by default**. To opt one into
+inheritance, name it in a top-level `inheritable` array:
+
+```toml
+inheritable = ["deploy_env", "team"]   # these arbitrary keys inherit like base_branch
+deploy_env = "staging"                 # a global default every entity may inherit
+```
+
+The `inheritable` declaration **accumulates** (unions) across scopes like
+`hooks.on`: a workspace may name a key to opt it in for all its projects, even
+if the global file does not. Membership is always a curated decision — hardcoded
+(builtins) or declared by you — never inferred from a key's name, type, or
+value. `base_branch` stays a project-tier concept with no worktree tier of its
+own, so a worktree-local `base_branch` is ignored (keeping `config get` aligned
+with `create`); a user-declared inheritable key set worktree-local *is* honoured.
+
+Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default_workspace`,
+`inheritable`) have their own surfaces and are refused as arbitrary keys.
 
 ## Inline hooks (`hook set/unset`)
 

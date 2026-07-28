@@ -134,9 +134,9 @@ plus a bare or tuple key -- the substrate everything else is built on), the
 `HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
 key resolves by a single **uniform locality merge** -- `_merge_locality` folds a
 most-local-first probe table so increased locality always outranks lesser, the
-most-local *present* value wins, `hooks.on` accumulates, and Layer 2 climbs the
-containment chain for the few inheritable keys, only `base_branch` today, via
-`base_branch_provenance`), and the **structural registry mutations**
+most-local *present* value wins, `hooks.on` accumulates, and **inheritance**
+climbs the **entity** chain for the few **inheritable keys**, only `base_branch`
+today, via `base_branch_provenance`), and the **structural registry mutations**
 (`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
 `set`/`clear_base_branch`, `set_project_annotation`) that write only the user
 file and own their cross-key fixups (a rename follows a dangling
@@ -150,10 +150,13 @@ calling command (default: the deepest scope whose dir exists); the
 `*_write_target` resolvers map a scope to its `(address, key-prefix)` write site,
 and `resolve_generic_target`/`resolve_generic_value` expose the same cascade to
 the generic `config set/get/unset` and inline `hook set/unset` surfaces over the
-cwd-inferred entity (for an *inheritable* key -- `base_branch` today, per
-`INHERITABLE_KEYS` -- the generic read folds the entity's own cascade plus its
-ancestors' so `config get` reports the same effective value a real command uses,
-and `--sources` labels each rung by its definition tier). Workspace *declarations* (`add`/`set --path`/`rename`/
+cwd-inferred entity (for an *inheritable* key -- the builtin `base_branch` per
+`INHERITABLE_KEYS`, or any key named in the user's accumulating `inheritable`
+array -- the generic read folds the entity's own cascade plus its ancestors' so
+`config get` reports the same effective value a real command uses, and
+`--sources` labels each rung by its definition tier; inheritance reaches
+`config show`/the resolved view too, via a shared tier-fold that fills a
+descendant's `extra` with inherited values). Workspace *declarations* (`add`/`set --path`/`rename`/
 `default`) stay user-file-only and refuse system-only names. `WTM_NO_CONFIG`
 suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
 `WTM_SYSTEM_CONFIG` at an absent path to skip system scope).
@@ -163,7 +166,66 @@ Where a hook/config is discovered/declared, from most general to most specific:
 `system`, `user`, `workspace`, `project`, `worktree`. Config scopes mirror hook
 scopes; each scope has its own config file, every key resolves by the uniform
 locality merge (most-local present value wins; clearing removes the key), and
-hooks accumulate.
+hooks accumulate. A scope is *not* an **entity**: the same word (`workspace`,
+`project`, `worktree`) names both a config *file tier* here and the
+config-*owning* thing that **inheritance** runs between -- keeping the two apart
+is the point of the next four terms.
+
+**Entity**:
+A thing that owns config: a **workspace**, **project**, or **worktree**, plus
+the implicit *global* root above them all. Entities nest
+(`global > workspace > project > worktree`), and that nesting is the axis
+**inheritance** runs along. Orthogonal to **scope** (a *file* an entity's config
+lives in): resolving one entity's config folds several scope files, and the
+resolved value may then inherit from an ancestor *entity*.
+_Avoid_: object, node, level
+
+**Locality**:
+How local to the **entity** the **scope** file a config value is written in is.
+One entity's config is scattered across several scope files (its own file, its
+project's `[worktrees.N]` table, the user file's `[workspaces.W...]` table);
+locality ranks those placements most-local-first, and the **locality merge**
+picks the most-local present value. A property of where a value sits -- not of
+the file, which is a fixed slot; a within-entity notion, never a claim about
+ancestor entities.
+
+**Locality merge**:
+The most-local-file-wins fold collapsing one **entity**'s config across the
+**scope** files that describe it (`_merge_locality`). Presence-based: any present
+value at a more-local file overrides a less-local one, clearing removes the key,
+`hooks.on` accumulates. A plain *override* that runs strictly *within* a single
+entity -- contrast **inheritance**, which crosses entities.
+_Avoid_: cascade (overloaded), scope inheritance
+
+**Inheritance** (entity inheritance):
+A value falling from an ancestor **entity** to a descendant that leaves it
+unset -- a worktree from its project, a project from its workspace, a workspace
+from the global default (`base_branch_provenance`). Runs *between* entities (each
+ancestor's contribution is itself already **locality-merged**) and only for an
+**inheritable key**. The one thing "inherit" should ever describe here: a
+most-local *file* winning within one entity is a **locality merge**, not
+inheritance.
+_Avoid_: cascade, scope inheritance, override
+
+**Inheritable key** (non-entity-specific key):
+A config key that undergoes **inheritance** -- equivalently, a
+*non-entity-specific* key: a shared default describing a whole subtree (it flows
+down the containment chain), as opposed to an *entity-specific* key describing a
+single node (`description`, `path`), which must never inherit. The two framings
+are one axis. The effective set is the builtin `INHERITABLE_KEYS` allowlist
+(`base_branch` only today) unioned with the user's `inheritable` array -- a
+top-level TOML array of key names that *accumulates* across scopes (like
+`hooks.on`), so a workspace may opt a key in for all its projects
+(`Config.inheritable_keys`). Every other key is entity-local (resolved by
+**locality merge** alone, never falling to a descendant entity). Opt-in is
+additive: arbitrary keys stay entity-local by default and the builtin
+classifications are fixed. Membership is always a curated decision -- hardcoded
+or user-declared -- never inferred from a key's name, type, or value.
+`inheritable` is itself a **reserved key** (refused as an arbitrary key, never
+leaked into `extra`). One builtin carve-out: `base_branch` has no worktree tier,
+so a worktree-local `base_branch` is ignored (aligning `config get` with
+`create`), whereas a user-declared inheritable key set worktree-local *is*
+honoured.
 
 **Source / Target** (import):
 `wtm import` folds a legacy plain clone (the *source*) into the bare-repo

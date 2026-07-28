@@ -452,6 +452,184 @@ def test_generic_get_non_inheritable_key_stays_entity_local(
     assert chain == []
 
 
+# --- user-declared inheritable keys (non-entity-specific opt-in) -------------
+
+
+def test_user_declared_key_inherits_from_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An arbitrary key named in the `inheritable` array folds ancestor tiers just
+    # like base_branch: a project without its own value reports the workspace one.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "deploy_env")
+    assert effective == "staging"
+    assert chain[0].tier == "workspace"
+
+
+def test_undeclared_arbitrary_key_stays_entity_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without an `inheritable` declaration, a workspace-own key is invisible to a
+    # project entity (default is entity-local).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "deploy_env")
+    assert effective is None
+    assert chain == []
+
+
+def test_inheritable_declaration_unions_across_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The declaration accumulates: a workspace-local `inheritable` opts a key in
+    # for its projects even when the global file does not name it.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('inheritable = ["team"]\nteam = "core"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "team")
+    assert effective == "core"
+    assert chain[0].tier == "workspace"
+
+
+def test_user_declared_key_project_local_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A project-local value outranks the inherited workspace tier for a declared
+    # inheritable key (entity-own is the most-local rung).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('deploy_env="prod"\n')
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "deploy_env")
+    assert effective == "prod"
+    assert [(r.tier, r.value) for r in chain] == [("project", "prod"), ("workspace", "staging")]
+
+
+def test_user_declared_key_worktree_local_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unlike base_branch, a general inheritable key set worktree-local IS honoured
+    # (the worktree's own tier participates in its chain).
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('deploy_env="scratch"\n')
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    target = cfg.resolve_generic_target(wt)
+    effective, _ = cfg.resolve_generic_value(target, "deploy_env")
+    assert effective == "scratch"
+
+
+def test_base_branch_worktree_local_still_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # base_branch stays a project-tier concept: a worktree-local value is ignored
+    # by `config get`, keeping it aligned with create/base_branch_provenance.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('base_branch="wt-local"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    target = cfg.resolve_generic_target(wt)
+    effective, _ = cfg.resolve_generic_value(target, "base_branch")
+    assert effective == "wsdefault"
+
+
+def test_inheritable_declaration_key_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `inheritable` owns a typed surface: it is a reserved key (never an arbitrary
+    # one) and never leaks into an entity's extra payload.
+    from wtm.config import validate_arbitrary_key
+
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key("inheritable")
+
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = (
+        f'inheritable = ["x"]\n[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nx="1"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert "inheritable" not in annotation.extra
+
+
+def test_project_annotation_extra_reflects_inherited_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `config show`'s read path (project_annotation.extra) agrees with `config
+    # get`: a declared inheritable key absent project-locally surfaces inherited.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["deploy_env"] == "staging"
+
+
+def test_worktree_extra_reflects_inherited_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The resolved worktree view inherits a declared key from the workspace tier.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    resolved = cfg.resolve_view(cwd=wt)
+    worktree = resolved.project.worktree
+    assert worktree is not None
+    assert worktree.extra["deploy_env"] == "staging"
+
+
+def test_workspace_extra_reflects_inherited_global_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A workspace inherits a declared key from the global top-level default.
+    ws = tmp_path / "w"
+    ws.mkdir(parents=True)
+    body = f'inheritable = ["deploy_env"]\ndeploy_env="global"\n[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    assert cfg.workspaces["a"].extra["deploy_env"] == "global"
+
+
+def test_project_declared_key_does_not_inherit_when_undeclared_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sanity: a declared inheritable key with no ancestor value resolves to unset,
+    # and a non-declared key never inherits even if an ancestor sets it.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'inheritable = ["team"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert "team" not in annotation.extra  # declared inheritable, but no value anywhere
+    assert "deploy_env" not in annotation.extra  # value exists but not declared inheritable
+
+
 def test_project_presence_beats_registry_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
