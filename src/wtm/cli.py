@@ -20,9 +20,13 @@ from typer.core import TyperGroup
 from wtm import git
 from wtm.config import (
     Config,
+    ConfigTree,
     GenericTarget,
     HookSpec,
     ResolvedConfig,
+    ResolvedProject,
+    ResolvedWorkspace,
+    ResolvedWorktree,
     Workspace,
     resolve_project_dir,
     validate_arbitrary_key,
@@ -49,6 +53,7 @@ from wtm.locate import (
     narrow_by_context,
 )
 from wtm.output import (
+    config_tree_json,
     emit_env_line,
     emit_shell,
     log,
@@ -61,7 +66,14 @@ from wtm.output import (
     worktree_list_lines,
 )
 from wtm.project import Project
-from wtm.target import TargetMode, TokenKind, looks_like_path, slot_kind, split_workspace_project
+from wtm.target import (
+    TargetMode,
+    TokenKind,
+    looks_like_path,
+    slot_kind,
+    split_target,
+    split_workspace_project,
+)
 from wtm.workspace import Workspaces
 from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated, WorktreeRenamed
 
@@ -1945,25 +1957,123 @@ app.add_typer(config_app, name="config", rich_help_panel="Command groups")
 @config_app.command(name="show")
 def config_show(
     ctx: typer.Context,
-    sources: bool = typer.Option(
-        False, "-s", "--sources", help="Annotate where each value comes from"
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[TARGET]",
+        help="Entity to root a level dump at (grammar per the level flag)",
     ),
-    hooks: bool = typer.Option(False, "--hooks", help="Also show accumulated inline hooks"),
+    all_workspaces: bool = typer.Option(
+        False, "--all", help="Dump every workspace, fully descended (no TARGET)"
+    ),
+    workspace: bool = typer.Option(
+        False, "--workspace", help="Dump a whole workspace: [WORKSPACE], else active"
+    ),
+    project: bool = typer.Option(
+        False, "--project", help="Dump a whole project + its worktrees: [[WORKSPACE] PROJECT]"
+    ),
+    worktree: bool = typer.Option(
+        False, "--worktree", help="Dump one worktree: [[WORKSPACE] PROJECT] NAME"
+    ),
+    sources: bool = typer.Option(
+        False, "-s", "--sources", help="Annotate where each value comes from (default view only)"
+    ),
+    hooks: bool = typer.Option(
+        False, "--hooks", help="Also show accumulated inline hooks (default view only)"
+    ),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Emit as JSON instead of text"),
 ) -> None:
     """Show the effective merged config for the current context.
 
-    A read-only view of the resolved configuration. All declared workspaces are
-    listed; the active one descends only as far as the cwd sits -- the cwd-bound
-    project's effective annotation (registry annotation merged with its
-    ``.wtm/config.toml``, project-local winning), and its worktree tier when the
-    cwd is inside a worktree. Arbitrary (non-reserved) keys resolved along that
-    cwd descent are always shown. ``--sources`` annotates the actual tier each
-    value resolves from and flags inert annotations (projects with no dir on
-    disk); ``--hooks`` also renders accumulated inline hooks per scope along that
-    chain.
+    With no level flag, a read-only cwd-oriented view: all declared workspaces
+    are listed; the active one descends only as far as the cwd sits -- the
+    cwd-bound project's effective annotation and its worktree tier when the cwd
+    is inside one. ``--sources`` annotates the tier each value resolves from and
+    flags inert annotations; ``--hooks`` renders accumulated inline hooks.
+
+    A level flag instead dumps a full subtree, rooted at the chosen entity and
+    descending every project and worktree below it (on-disk unioned with
+    declared): ``--all`` every workspace, ``--workspace`` one workspace,
+    ``--project`` one project, ``--worktree`` one worktree. The entity is named
+    by TARGET (grammar per the level; cwd-inferred when omitted). A subtree dump
+    is effective-values-only: ``--sources``/``--hooks`` are rejected with it, and
+    ``--json`` (orthogonal, valid on the default view too) emits the nested tree.
     """
     config = ctx.obj.config
+    args = args or []
+    level = _config_show_level(all_workspaces, workspace, project, worktree)
+
+    if level is None:
+        if args:
+            raise WtmError(
+                "a TARGET requires a level flag (--all/--workspace/--project/--worktree)"
+            )
+        _config_show_default(config, sources, hooks, as_json)
+
+        return
+
+    if sources or hooks:
+        raise WtmError("--sources/--hooks apply to the default view, not a level dump")
+    tree = _config_show_tree(config, level, args)
+    if as_json:
+        print(config_tree_json(tree))
+
+        return
+    _print_config_tree(tree)
+
+
+def _config_show_level(
+    all_workspaces: bool, workspace: bool, project: bool, worktree: bool
+) -> str | None:
+    """Resolve the mutually-exclusive level flags to a level name (or ``None``)."""
+    chosen = [
+        name
+        for name, on in (
+            ("all", all_workspaces),
+            ("workspace", workspace),
+            ("project", project),
+            ("worktree", worktree),
+        )
+        if on
+    ]
+    if len(chosen) > 1:
+        raise WtmError("--all/--workspace/--project/--worktree are mutually exclusive")
+
+    return chosen[0] if chosen else None
+
+
+def _config_show_tree(config: Config, level: str, args: list[str]) -> ConfigTree:
+    """Decode TARGET per *level* (via the target grammar) and resolve the subtree."""
+    if level == "all":
+        if args:
+            raise WtmError("--all takes no TARGET")
+
+        return config.resolve_tree("all")
+
+    if level == "workspace":
+        if len(args) > 1:
+            raise WtmError("--workspace takes at most a WORKSPACE")
+
+        return config.resolve_tree("workspace", workspace=args[0] if args else None)
+
+    if level == "project":
+        ws, proj = split_workspace_project(args)
+
+        return config.resolve_tree("project", workspace=ws, project=proj)
+
+    # worktree: [[WORKSPACE] PROJECT] NAME (cwd-inferred when no tokens)
+    ws, proj, name = split_target(args) if args else (None, None, None)
+
+    return config.resolve_tree("worktree", workspace=ws, project=proj, name=name)
+
+
+def _config_show_default(config: Config, sources: bool, hooks: bool, as_json: bool) -> None:
+    """The cwd-oriented default view (unchanged behavior; JSON variant orthogonal)."""
     view = config.resolve_view()
+    if as_json:
+        print(config_tree_json(_default_view_as_tree(config, view)))
+
+        return
+
     print(f"active workspace: {config.active or '(none)'}")
     if config.default_base_branch:
         origin = f"  [{config.base_branch_source().value}]" if sources else ""
@@ -1985,15 +2095,22 @@ def config_show(
     _print_effective_project(view, sources, hooks)
 
 
+def _default_view_as_tree(config: Config, view: ResolvedConfig) -> ConfigTree:
+    """Wrap the cwd-capped view as a single-project ``ConfigTree`` for ``--json``.
+
+    Only the cwd-bound project (and its worktree) are resolved in the default
+    view, so JSON of it is that project node, or the empty ``all`` root when the
+    cwd is not inside a project.
+    """
+    if view.project is None:
+        return ConfigTree(level="all", default_base_branch=config.default_base_branch)
+
+    return ConfigTree(level="project", project=view.project)
+
+
 def _workspace_project_names(config: Config, ws: Workspace) -> set[str]:
     """Projects to list under *ws*: on-disk dirs unioned with declared names."""
-    on_disk = {
-        entry.name
-        for entry in (ws.path.iterdir() if ws.path.is_dir() else [])
-        if entry.is_dir() and (entry / ".git").is_dir()
-    }
-
-    return on_disk | config.declared_project_names(ws)
+    return config.project_names(ws)
 
 
 def _print_workspace_project(config: Config, ws: Workspace, pname: str, sources: bool) -> None:
@@ -2049,6 +2166,62 @@ def _print_scope_hooks(indent: str, spec: HookSpec, sources: bool, scope: str) -
         for command in commands:
             origin = f"  [{scope}]" if sources else ""
             print(f"{indent}hook {event} = {command}{origin}")
+
+
+def _print_config_tree(tree: ConfigTree) -> None:
+    """Render a scoped subtree dump as text, rooted at the requested level.
+
+    Effective-values-only (no ``--sources``/``--hooks``): each entity prints its
+    scalars plus arbitrary keys, then descends every child. The workspace/project
+    headers only appear when they are part of the dumped subtree.
+    """
+    if tree.level == "all":
+        if tree.default_base_branch:
+            print(f"default base_branch: {tree.default_base_branch}")
+        for ws in tree.workspaces:
+            _print_workspace_tree(ws, "")
+
+        return
+
+    if tree.workspace is not None:
+        _print_workspace_tree(tree.workspace, "")
+    elif tree.project is not None:
+        _print_project_tree(tree.project, "")
+    elif tree.worktree is not None:
+        _print_worktree_tree(tree.worktree, "")
+
+
+def _print_workspace_tree(ws: ResolvedWorkspace, indent: str) -> None:
+    """Render one workspace node and descend its projects."""
+    print(f"{indent}workspace {ws.entry.name}: {ws.entry.path}")
+    if ws.entry.description:
+        print(f"{indent}  description: {ws.entry.description}")
+    if ws.entry.base_branch:
+        print(f"{indent}  base_branch: {ws.entry.base_branch}")
+    _print_extra(f"{indent}  ", ws.entry.extra)
+    for project in ws.projects:
+        _print_project_tree(project, f"{indent}  ")
+
+
+def _print_project_tree(project: ResolvedProject, indent: str) -> None:
+    """Render one project node and descend its worktrees."""
+    inert = "" if project.exists else "  (no .git on disk)"
+    print(f"{indent}project {project.name}: {project.dir}{inert}")
+    if project.description:
+        print(f"{indent}  description: {project.description}")
+    if project.effective_base_branch:
+        print(f"{indent}  base_branch: {project.effective_base_branch}")
+    _print_extra(f"{indent}  ", project.extra)
+    for worktree in project.worktrees:
+        _print_worktree_tree(worktree, f"{indent}  ")
+
+
+def _print_worktree_tree(worktree: ResolvedWorktree, indent: str) -> None:
+    """Render one worktree leaf (no base_branch tier)."""
+    print(f"{indent}worktree {worktree.name}: {worktree.dir}")
+    if worktree.description:
+        print(f"{indent}  description: {worktree.description}")
+    _print_extra(f"{indent}  ", worktree.extra)
 
 
 def _tilde(path: Path) -> str:

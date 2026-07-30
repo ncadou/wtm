@@ -1497,3 +1497,84 @@ def test_worktree_set_roundtrips_through_read_cascade(user_cfg: Path, tmp_path: 
     resolved = Config.load(cwd=wt).resolve_view(cwd=wt)
     assert resolved.project.worktree is not None
     assert resolved.project.worktree.description == "round"
+
+
+# --- full subtree dump (resolve_tree) ----------------------------------------
+
+
+def test_declared_worktree_names_unions_probe_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    body = (
+        f'[workspaces.w]\npath = "{ws}"\n'
+        '[workspaces.w.projects.api.worktrees.feat]\ndescription = "x"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    assert cfg.declared_worktree_names(cfg.workspaces["w"], "api") == {"feat"}
+
+
+def test_resolve_tree_all_descends_and_unions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On-disk unioned with declared, across projects and worktrees; an inert
+    # (no .git) declared project still appears.
+    ws = tmp_path / "w"
+    (ws / "api" / ".git").mkdir(parents=True)
+    (ws / "api" / "worktrees" / "main").mkdir(parents=True)
+    body = (
+        f'[workspaces.w]\npath = "{ws}"\n'
+        '[workspaces.w.projects.api]\nbase_branch = "develop"\n'
+        '[workspaces.w.projects.api.worktrees.planned]\ndescription = "later"\n'
+        '[workspaces.w.projects.ghost]\ndescription = "gone"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    tree = cfg.resolve_tree("all")
+    assert tree.level == "all"
+    (ws_node,) = tree.workspaces
+    names = {p.name for p in ws_node.projects}
+    assert names == {"api", "ghost"}
+    api = next(p for p in ws_node.projects if p.name == "api")
+    assert api.effective_base_branch == "develop"
+    assert {w.name for w in api.worktrees} == {"main", "planned"}
+    ghost = next(p for p in ws_node.projects if p.name == "ghost")
+    assert ghost.exists is False
+
+
+def test_resolve_tree_project_and_worktree_levels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    (ws / "api" / ".git").mkdir(parents=True)
+    (ws / "api" / "worktrees" / "feat").mkdir(parents=True)
+    body = f'[workspaces.w]\npath = "{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+
+    proj = cfg.resolve_tree("project", project="api")
+    assert proj.level == "project" and proj.project is not None
+    assert {w.name for w in proj.project.worktrees} == {"feat"}
+
+    wt = cfg.resolve_tree("worktree", project="api", name="feat")
+    assert wt.level == "worktree" and wt.worktree is not None
+    assert wt.worktree.name == "feat"
+
+
+def test_resolve_tree_unknown_workspace_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    cfg = _load(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n', cwd=tmp_path)
+    with pytest.raises(WtmError, match="unknown workspace"):
+        cfg.resolve_tree("workspace", workspace="nope")
+
+
+def test_resolve_tree_project_needs_token_or_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    cfg = _load(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n', cwd=tmp_path)
+    with pytest.raises(WtmError, match="no PROJECT given"):
+        cfg.resolve_tree("project", cwd=tmp_path)

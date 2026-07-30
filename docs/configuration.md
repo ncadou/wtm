@@ -164,6 +164,30 @@ keys resolved along the descent are always shown. `--sources` tags each value
 with its **winning** scope (the full chain lives in `config get KEY --sources`);
 `--hooks` also renders accumulated inline hooks per scope.
 
+### Dumping a whole subtree
+
+A level flag turns the cwd-capped view into a full subtree dump, rooted at a
+chosen entity and descending **every** project and worktree below it (on-disk
+names unioned with declared ones, so annotated-but-inert entities still show):
+
+```
+wtm config show --all                          # every workspace, fully
+wtm config show --workspace [WORKSPACE]        # one workspace (default: active)
+wtm config show --project [[WORKSPACE] PROJECT]# one project + its worktrees
+wtm config show --worktree [[WORKSPACE] PROJECT] NAME
+```
+
+The `TARGET` positional follows the target grammar for the chosen level and
+falls back to cwd inference when omitted; `--all` takes no target, and the four
+level flags are mutually exclusive. A subtree dump is effective-values-only:
+`--sources`/`--hooks` do not apply to it (they are rejected).
+
+`-j`/`--json` emits the result as a nested JSON object instead of text —
+`{workspaces: {…}}` for `--all`, else the single rooted node. Each node carries
+its scalars plus an `extra` object of arbitrary keys; worktree nodes never carry
+a `base_branch` (there is no worktree `base_branch` tier). `--json` is
+orthogonal: it also works on the default (no-level) cwd view.
+
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its
 `<workspace>/.wtm/config.toml`. Projects are discovered on disk and only

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 __all__ = [
     "MANAGED_ENV_VARS",
+    "config_tree_json",
     "emit_env_line",
     "emit_shell",
     "log",
@@ -25,6 +26,15 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wtm.config import (
+        ConfigTree,
+        ResolvedProject,
+        ResolvedWorkspace,
+        ResolvedWorktree,
+    )
 
 FlatRow = tuple[str, str, str, str, str]  # (project, name, path, branch, head)
 _FLAT_KEYS = ("project", "name", "path", "branch", "head")
@@ -178,3 +188,76 @@ def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:
     width = max(len(name) for name, _ in rows)
 
     return [f"{name.ljust(width)}  {annotation}".rstrip() for name, annotation in rows]
+
+
+def config_tree_json(tree: ConfigTree) -> str:
+    """Serialise a scoped ``config show`` subtree dump as a nested JSON object.
+
+    The machine-readable counterpart of the text tree renderer: rooted at the
+    requested level (worktree / project / workspace / all), effective values
+    only -- no provenance (``--sources``) and no hooks, per the dump contract.
+    Arbitrary keys nest under ``"extra"`` (collision-safe with reserved fields);
+    paths render as strings. Children are objects keyed by name.
+    """
+    if tree.level == "all":
+        root: dict[str, object] = {}
+        if tree.default_base_branch:
+            root["default_base_branch"] = tree.default_base_branch
+        root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in tree.workspaces}
+
+        return json.dumps(root, default=str)
+
+    if tree.level == "workspace":
+        assert tree.workspace is not None
+        node: dict[str, object] = _workspace_node(tree.workspace)
+    elif tree.level == "project":
+        assert tree.project is not None
+        node = _project_node(tree.project)
+    else:  # worktree
+        assert tree.worktree is not None
+        node = _worktree_node(tree.worktree)
+
+    return json.dumps(node, default=str)
+
+
+def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:
+    """One workspace object: scalars, extra, and its projects keyed by name."""
+    node: dict[str, object] = {"name": ws.entry.name, "path": str(ws.entry.path)}
+    if ws.entry.description:
+        node["description"] = ws.entry.description
+    if ws.entry.base_branch:
+        node["base_branch"] = ws.entry.base_branch
+    if ws.entry.extra:
+        node["extra"] = dict(sorted(ws.entry.extra.items()))
+    node["projects"] = {p.name: _project_node(p) for p in ws.projects}
+
+    return node
+
+
+def _project_node(project: ResolvedProject) -> dict[str, object]:
+    """One project object: scalars, effective base_branch, extra, and worktrees."""
+    node: dict[str, object] = {
+        "name": project.name,
+        "dir": str(project.dir),
+        "exists": project.exists,
+    }
+    if project.description:
+        node["description"] = project.description
+    if project.effective_base_branch:
+        node["base_branch"] = project.effective_base_branch
+    if project.extra:
+        node["extra"] = dict(sorted(project.extra.items()))
+    node["worktrees"] = {w.name: _worktree_node(w) for w in project.worktrees}
+
+    return node
+
+
+def _worktree_node(worktree: ResolvedWorktree) -> dict[str, object]:
+    """One worktree object: name, dir, description, extra (no base_branch tier)."""
+    node: dict[str, object] = {"name": worktree.name, "dir": str(worktree.dir)}
+    if worktree.description:
+        node["description"] = worktree.description
+    if worktree.extra:
+        node["extra"] = dict(sorted(worktree.extra.items()))
+
+    return node

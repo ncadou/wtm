@@ -58,11 +58,13 @@ from __future__ import annotations
 __all__ = [
     "Config",
     "ConfigAddress",
+    "ConfigTree",
     "GenericTarget",
     "HookSpec",
     "ProjectAnnotation",
     "ResolvedConfig",
     "ResolvedProject",
+    "ResolvedWorkspace",
     "ResolvedWorktree",
     "Scope",
     "SourceRung",
@@ -250,6 +252,7 @@ class ResolvedProject:
     hooks: HookSpec = field(default_factory=HookSpec)
     extra: dict[str, object] = field(default_factory=dict)
     worktree: ResolvedWorktree | None = None  # set only when cwd is in a worktree
+    worktrees: tuple[ResolvedWorktree, ...] = ()  # every worktree; only the tree dump fills it
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,37 @@ class ResolvedConfig:
     default_base_branch: str | None
     active_workspace: Workspace | None  # the active workspace's effective entry
     project: ResolvedProject | None  # the cwd-bound project, when cwd is inside one
+
+
+@dataclass(frozen=True)
+class ResolvedWorkspace:
+    """A workspace with every project (and their worktrees) fully descended.
+
+    The tree-dump analog of the shallow :class:`Workspace` entry: *entry* is the
+    declared workspace itself and *projects* its fully-resolved projects (on-disk
+    unioned with declared), each carrying its own ``worktrees`` tuple.
+    """
+
+    entry: Workspace
+    projects: tuple[ResolvedProject, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfigTree:
+    """A scoped subtree dump rooted at one entity level (see :meth:`Config.resolve_tree`).
+
+    Exactly one of *worktree* / *project* / *workspace* / *workspaces* is set,
+    per the requested root level (worktree / project / workspace / all). Every
+    node below the root is fully descended (on-disk unioned with declared);
+    *default_base_branch* is carried for the ``all`` root's header.
+    """
+
+    level: str  # worktree | project | workspace | all
+    default_base_branch: str | None = None
+    worktree: ResolvedWorktree | None = None
+    project: ResolvedProject | None = None
+    workspace: ResolvedWorkspace | None = None
+    workspaces: tuple[ResolvedWorkspace, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1056,6 +1090,24 @@ class Config:
 
         return names
 
+    def declared_worktree_names(self, workspace: Workspace, project: str) -> set[str]:
+        """Return the worktree names *declared* for a project across its files.
+
+        The keys of every ``worktrees`` table along the project probe cascade
+        (project-local top-level, workspace ``[projects.P.worktrees]``,
+        user/system ``[workspaces.W.projects.P.worktrees]``). A *declaration*
+        listing -- the worktree-level analog of :meth:`declared_project_names`,
+        so a tree dump can surface annotated-but-inert worktrees.
+        """
+        names: set[str] = set()
+        for probe in self._project_probes(workspace, project):
+            table = _read_table(self._store, probe)
+            worktrees = table.get("worktrees")
+            if isinstance(worktrees, dict):
+                names.update(worktrees)
+
+        return names
+
     # --- per-project resolution ----------------------------------------------
 
     def project_annotation(self, workspace: Workspace, name: str) -> ProjectAnnotation:
@@ -1421,6 +1473,19 @@ class Config:
         rel = cwd.relative_to(worktrees_dir)
         wt_dir = worktrees_dir / rel.parts[0]
         name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
+
+        return self.resolve_worktree(project_dir, name)
+
+    def resolve_worktree(self, project_dir: Path, name: str) -> ResolvedWorktree:
+        """Resolve a worktree's effective config by name via the locality cascade.
+
+        The by-name core shared by the cwd view and the tree dump: fold the
+        worktree probe table most-local-wins, split its ``description`` off, and
+        inherit the remaining arbitrary keys down the containment chain. The
+        ``base_branch`` carve-out (a worktree has no base_branch tier) is upheld
+        by the probes never carrying one to the effective view.
+        """
+        wt_dir = project_dir / "worktrees" / name
         payload, hooks = _merge_locality(self._store, self._worktree_probes(project_dir, name))
         local = {k: v for k, v in payload.items() if k != "description"}
         extra = self._inherited_extra(local, self.workspace_of(project_dir), project_dir.name)
@@ -1432,6 +1497,167 @@ class Config:
             hooks=hooks,
             extra=extra,
         )
+
+    # --- full subtree dump ---------------------------------------------------
+
+    def resolve_tree(
+        self,
+        level: str,
+        *,
+        workspace: str | None = None,
+        project: str | None = None,
+        name: str | None = None,
+        cwd: Path | None = None,
+    ) -> ConfigTree:
+        """Materialise a full subtree dump rooted at one entity *level*.
+
+        *level* is ``worktree`` / ``project`` / ``workspace`` / ``all``. Unlike
+        :meth:`resolve_view` (cwd-capped), every entity below the root is fully
+        descended -- projects are on-disk dirs unioned with declared names, and
+        each project's worktrees likewise. The root entity is named by the
+        (already grammar-split) *workspace* / *project* / *name* tokens, falling
+        back to cwd inference when omitted; ``all`` takes no tokens.
+        """
+        if level == "all":
+            workspaces = tuple(
+                self._resolve_workspace_tree(ws) for _, ws in sorted(self.workspaces.items())
+            )
+
+            return ConfigTree(
+                level="all",
+                default_base_branch=self.default_base_branch,
+                workspaces=workspaces,
+            )
+
+        ws_entry = self._tree_workspace(workspace)
+        if level == "workspace":
+            return ConfigTree(level="workspace", workspace=self._resolve_workspace_tree(ws_entry))
+
+        project_name = self._tree_project_name(ws_entry, project, name, level, cwd)
+        if level == "project":
+            return ConfigTree(
+                level="project", project=self._resolve_project_tree(ws_entry, project_name)
+            )
+
+        # level == "worktree"
+        wt_name = self._tree_worktree_name(ws_entry, project_name, name, cwd)
+
+        return ConfigTree(
+            level="worktree",
+            worktree=self.resolve_worktree(ws_entry.path / project_name, wt_name),
+        )
+
+    def _resolve_workspace_tree(self, ws: Workspace) -> ResolvedWorkspace:
+        """Fully descend *ws*: every project (on-disk unioned with declared)."""
+        projects = tuple(
+            self._resolve_project_tree(ws, pname) for pname in sorted(self.project_names(ws))
+        )
+
+        return ResolvedWorkspace(entry=ws, projects=projects)
+
+    def _resolve_project_tree(self, ws: Workspace, name: str) -> ResolvedProject:
+        """Resolve a project's effective annotation plus all its worktrees.
+
+        Like :meth:`_resolve_cwd_project` but cwd-independent: the ``worktrees``
+        tuple carries every worktree (on-disk unioned with declared), sorted.
+        """
+        project_dir = ws.path / name
+        annotation = self.project_annotation(ws, name)
+        effective, source = self.base_branch_provenance(ws, name)
+        worktrees = tuple(
+            self.resolve_worktree(project_dir, wt_name)
+            for wt_name in sorted(self._worktree_names(project_dir, name, ws))
+        )
+
+        return ResolvedProject(
+            name=name,
+            dir=project_dir,
+            exists=(project_dir / ".git").is_dir(),
+            description=annotation.description,
+            base_branch=annotation.base_branch,
+            effective_base_branch=effective,
+            base_branch_source=source,
+            hooks=annotation.hooks,
+            extra=annotation.extra,
+            worktrees=worktrees,
+        )
+
+    def project_names(self, ws: Workspace) -> set[str]:
+        """Projects under *ws*: on-disk ``<name>/.git`` dirs unioned with declared.
+
+        The discovery basis of a tree dump (and ``config show``'s workspace
+        listing): on-disk projects unioned with :meth:`declared_project_names`,
+        so annotated-but-inert projects still surface.
+        """
+        on_disk = {
+            entry.name
+            for entry in (ws.path.iterdir() if ws.path.is_dir() else [])
+            if entry.is_dir() and (entry / ".git").is_dir()
+        }
+
+        return on_disk | self.declared_project_names(ws)
+
+    def _worktree_names(self, project_dir: Path, name: str, ws: Workspace) -> set[str]:
+        """Worktrees under a project: on-disk ``worktrees/*`` dirs unioned with declared."""
+        worktrees_dir = project_dir / "worktrees"
+        on_disk = {
+            entry.name
+            for entry in (worktrees_dir.iterdir() if worktrees_dir.is_dir() else [])
+            if entry.is_dir()
+        }
+
+        return on_disk | self.declared_worktree_names(ws, name)
+
+    def _tree_workspace(self, workspace: str | None) -> Workspace:
+        """The workspace a tree dump roots in: the named one, else the active one."""
+        target = workspace if workspace is not None else self.active
+        if target is None:
+            raise WtmError("no WORKSPACE given and none is active")
+        ws = self.workspaces.get(target)
+        if ws is None:
+            raise WtmError(f"unknown workspace: {target}")
+
+        return ws
+
+    def _tree_project_name(
+        self,
+        ws: Workspace,
+        project: str | None,
+        name: str | None,
+        level: str,
+        cwd: Path | None,
+    ) -> str:
+        """The project a ``project``/``worktree`` dump roots in (token, else cwd)."""
+        if project is not None:
+            valid_project_name(project)
+
+            return project
+
+        # A worktree-level ``PROJECT NAME`` puts the project in *name*'s sibling
+        # slot; a bare worktree token (name only) still needs cwd inference.
+        cwd = cwd if cwd is not None else current_dir(resolve=False)
+        project_dir = project_dir_for(ws.path, abspath(str(cwd))) if cwd is not None else None
+        if project_dir is None:
+            raise WtmError("no PROJECT given and cwd is not under a project")
+
+        return project_dir.name
+
+    def _tree_worktree_name(
+        self, ws: Workspace, project: str, name: str | None, cwd: Path | None
+    ) -> str:
+        """The worktree a ``worktree`` dump roots in (token, else cwd inference)."""
+        if name is not None:
+            return name
+
+        cwd = cwd if cwd is not None else current_dir(resolve=False)
+        worktrees_dir = ws.path / project / "worktrees"
+        acwd = abspath(str(cwd)) if cwd is not None else None
+        if acwd is None or not within(acwd, worktrees_dir) or acwd == worktrees_dir:
+            raise WtmError("no NAME given and cwd is not inside a worktree")
+
+        wt_dir = worktrees_dir / acwd.relative_to(worktrees_dir).parts[0]
+
+        return worktree_name(wt_dir, worktrees_dir) or wt_dir.name
 
 
 def resolve_project_dir(config: Config, workspace: str | None, project: str | None) -> Path:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -3706,6 +3707,126 @@ def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
     assert "hook install" not in without.stdout
     with_hooks = run("config", "show", "--hooks", root=root, cwd=root / "proj")
     assert "hook install = make deps" in with_hooks.stdout
+
+
+def test_config_show_all_descends_every_project_and_worktree(root: Path) -> None:
+    # Unlike the default cwd view, --all fully descends every project and every
+    # worktree from the workspace root, regardless of cwd.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("config", "show", "--all", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "workspace" in res.stdout
+    assert "project proj:" in res.stdout
+    assert "base_branch: develop" in res.stdout
+    assert "worktree feat:" in res.stdout
+    assert "worktree main:" not in res.stdout
+
+
+def test_config_show_all_surfaces_inert_and_declared_worktree(root: Path) -> None:
+    # --all unions on-disk with declared: an inert (no .git) project and a
+    # declared-only worktree both appear.
+    _seed_repo(root, "proj")
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text(
+        '[projects.ghost]\ndescription = "gone"\n'
+        '[projects.proj.worktrees.planned]\ndescription = "not yet"\n'
+    )
+    res = run("config", "show", "--all", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "project ghost:" in res.stdout
+    assert "(no .git on disk)" in res.stdout
+    assert "worktree planned:" in res.stdout
+
+
+def test_config_show_project_from_cwd_and_worktree_base_branch_carveout(root: Path) -> None:
+    # --project roots at the cwd's project and descends its worktrees; the
+    # base_branch carve-out means no base_branch line ever prints on a worktree.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("config", "show", "--project", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "project proj:" in res.stdout
+    assert "base_branch: develop" in res.stdout
+    # The worktree block carries no base_branch line.
+    wt_block = res.stdout.split("worktree feat:", 1)[1]
+    assert "base_branch" not in wt_block
+
+
+def test_config_show_worktree_by_name(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    res = run("config", "show", "--worktree", "proj", "feat", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "worktree feat:" in res.stdout
+    assert "project proj:" not in res.stdout  # rooted at the worktree
+
+
+def test_config_show_all_json_is_nested_tree(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("config", "show", "--all", "--json", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    # The single seeded workspace holds proj -> feat.
+    (ws_node,) = payload["workspaces"].values()
+    proj_node = ws_node["projects"]["proj"]
+    assert proj_node["base_branch"] == "develop"
+    assert set(proj_node["worktrees"]) == {"feat"}
+    # base_branch carve-out: worktree nodes never carry base_branch.
+    assert "base_branch" not in proj_node["worktrees"]["feat"]
+
+
+def test_config_show_project_json_extra_nested(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    res = run("config", "show", "--project", "--json", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    node = json.loads(res.stdout)
+    assert node["name"] == "proj"
+    assert node["extra"] == {"editor": "nvim"}
+
+
+def test_config_show_json_orthogonal_on_default_view(root: Path) -> None:
+    # --json works on the plain (no-level) cwd view too.
+    _seed_repo(root, "proj")
+    res = run("config", "show", "--json", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    node = json.loads(res.stdout)
+    assert node["name"] == "proj"
+
+
+def test_config_show_level_flags_mutually_exclusive(root: Path) -> None:
+    res = run("config", "show", "--all", "--project", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "mutually exclusive" in res.stderr
+
+
+def test_config_show_target_without_level_errors(root: Path) -> None:
+    res = run("config", "show", "foo", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "requires a level flag" in res.stderr
+
+
+def test_config_show_sources_rejected_with_level(root: Path) -> None:
+    res = run("config", "show", "--all", "--sources", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "default view" in res.stderr
+
+
+def test_config_show_default_view_unchanged(root: Path) -> None:
+    # No level flag: the shallow cwd view still lists workspaces and only the
+    # cwd project name (no full descent).
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    res = run("config", "show", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "active workspace:" in res.stdout
+    assert "workspaces:" in res.stdout
+    assert "worktree feat:" not in res.stdout  # no descent from the ws root
 
 
 def test_project_set_writes_local_config(root: Path) -> None:

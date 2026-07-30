@@ -110,6 +110,10 @@ show [--sources] [--hooks]    the effective merged config for the current contex
                               cwd-bound project (and its worktree, if cwd is in one) with their resolved
                               values (--sources: the tier each value resolves from + inert-annotation flags;
                               --hooks: accumulated inline hooks per scope)
+show --all | --workspace |    dump a full subtree rooted at the chosen entity (TARGET per the level's grammar,
+     --project | --worktree   cwd-inferred when omitted), descending every project and worktree below it
+     [TARGET] [-j/--json]     (on-disk unioned with declared); effective-values-only (no --sources/--hooks);
+                              -j/--json emits a nested JSON tree (also valid on the default view)
 base-branch [VALUE] [--clear] get/set/clear the global default base_branch (user config); the getter
                               shows the effective value and the scope it comes from
 ```
