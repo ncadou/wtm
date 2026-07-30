@@ -92,7 +92,9 @@ outside the payload cascade.
 - A generic `config set/get/unset KEY [VALUE]` surface writes/reads arbitrary
   keys at a chosen scope; `config get KEY --sources` reports the full probe chain
   (including inheritance steps), while `config show --sources` labels each value
-  with its winning scope only.
+  with its winning scope only. (The 2026-07-30 addendum renames `--sources` to
+  `-o/--origin` on both commands and adds the element-wise `-a/--array` /
+  `-t/--table` modes.)
 - Reserved names (`hooks`, `projects`, `worktrees`, `path`,
   `default_workspace`) are rejected as arbitrary keys. (The 2026-07-28 addendum
   adds `inheritable` to this set; the effective list today is the six names in
@@ -115,7 +117,7 @@ outside the payload cascade.
 ## Implementation phases
 
 All six phases are shipped (each was independently shippable, and each landed in
-order); the four addenda below record the follow-on corrections and extensions
+order); the five addenda below record the follow-on corrections and extensions
 made after phase 6.
 
 1. Resolver rewrite: probe tables, generic Layer-1 merge + provenance, Layer-2
@@ -165,7 +167,8 @@ list stays most-local-first, no new precedence logic is needed. `--sources` now
 labels each rung by its **definition level** (`project` / `workspace` /
 `global`, matching `config show`) for an inheritable key, or its scope otherwise,
 and always names the file the value lives in — so the several rungs that share a
-scope (e.g. three `user`-file tiers) read distinctly.
+scope (e.g. three `user`-file tiers) read distinctly. (The flag is `-o/--origin`
+since the 2026-07-30 addendum; the behaviour described here is unchanged.)
 
 Two cleanups rode along. Layer 1's per-leaf provenance return from
 `_merge_locality` was dead (every caller discarded it, and it records only the
@@ -247,3 +250,52 @@ Reserved-key reconciliation: the Decision's reserved list predates the
 `inheritable` key added in the earlier 2026-07-28 addendum. The effective set is
 now the six names in `RESERVED_KEYS`: `hooks`, `projects`, `worktrees`, `path`,
 `default_workspace`, `inheritable`.
+
+## Addendum (2026-07-30): kind-symmetric element-wise writes, and `-o/--origin`
+
+Phase 4's generic surface grew array mutation as a pair of `config set` flags
+(`--array-add` / `--array-remove`), which put a *removal* on the `set` verb and
+left the third TOML kind — the **table** — with no CLI at all, writable only by
+hand or through the reserved `hooks` surface. The asymmetry was in the verbs, not
+the substrate: `_Store` already keyed every read and write by a bare-or-tuple
+`Key`, so nested writes worked underneath.
+
+The element-wise modes now hang off the **verb that matches the mutation**, one
+flag pair per kind:
+
+- `config set -a/--array KEY VALUE` adds (set semantics, idempotent);
+  `config unset -a/--array KEY VALUE` strips every occurrence.
+- `config set -t/--table KEY SUBKEY VALUE` sets a cell;
+  `config unset -t/--table KEY SUBKEY` removes one.
+
+`-a` and `-t` are mutually exclusive, and each mode validates its own positional
+arity. The table pair is a straight peer of the array pair in the substrate
+(`_Store.table_set` / `table_unset`, `Config.set_table_value` /
+`unset_table_value`), sharing the one `_transaction` primitive — per-directory
+lock, fresh re-read, no-op elision, `WTM_NO_CONFIG` refusal — so a concurrent
+writer's other keys survive a cell write exactly as they survive an array
+append. A new `_writable_table` mirrors `_writable_array`, extending the
+kind-clash rule to the third kind: `-t` onto a scalar or array (and `-a` onto a
+table) is a hard error, matching the read-side `_check_kind`. The
+`inheritable` allowlist keeps its carve-out as the one reserved array the flag
+may touch; element validation runs on the `set -a` add path only, since removing
+an element can never introduce an illegal one.
+
+`config get` gained the matching **readback**, since a kind the CLI can write
+should be a kind the CLI can print: a scalar prints bare (unchanged), an array
+one element per line, a table `subkey = value` per line (sorted), and a trailing
+`config get KEY SUBKEY` reads a single cell. Kind is auto-detected from the
+resolved value rather than selected by a flag — the resolver already returns the
+kind, so a read flag would only be able to contradict it.
+
+Separately, `--sources` is renamed **`-o/--origin`** on both read commands
+(`config get`, `config show`). The short form was the reason: `-s` meant
+`--scope` on `config set` / `unset` but `--sources` on `config get` / `show`, so
+one letter carried two meanings across sibling subcommands of the same noun.
+`-s` is now unambiguously `--scope` across the whole `config` surface. Both read
+commands were renamed together — leaving one as `--sources` would have traded a
+cross-verb collision for a cross-verb divergence. The flag's *behaviour* is
+unchanged: for an inheritable key it still labels each rung by definition tier
+(`project` / `workspace` / `global`) and otherwise by scope, and always names the
+file. Provenance output remains whole-value oriented; it does not render
+per-element or per-cell origins for arrays and tables.

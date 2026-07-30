@@ -3369,7 +3369,7 @@ def test_config_show_sources_flags_inert_annotation(tmp_path: Path) -> None:
         f'[workspaces.alpha]\npath = "{ws}"\n'
         '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
     )
-    res = _run_multi("config", "show", "--sources", config=config, cwd=tmp_path, workspace="alpha")
+    res = _run_multi("config", "show", "--origin", config=config, cwd=tmp_path, workspace="alpha")
     assert res.returncode == 0, res.stderr
     assert "[user]" in res.stdout
     assert "no such project on disk" in res.stdout
@@ -3636,7 +3636,7 @@ def test_config_base_branch_set_show_clear(root: Path) -> None:
 def test_config_show_reports_base_branch_source(root: Path) -> None:
     cfg = root / "cfg.toml"
     cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
-    res = run("config", "show", "--sources", root=root, extra_env={"WTM_CONFIG": str(cfg)})
+    res = run("config", "show", "--origin", root=root, extra_env={"WTM_CONFIG": str(cfg)})
     assert res.returncode == 0, res.stderr
     assert "default base_branch: main  [user]" in res.stdout
 
@@ -3646,7 +3646,7 @@ def test_config_show_surfaces_cwd_project_local_base_branch(root: Path) -> None:
     # surface (with a [project] source) when the cwd is inside that project.
     _seed_repo(root, "proj")
     run("project", "set", "proj", "-b", "develop", root=root)
-    res = run("config", "show", "--sources", root=root, cwd=root / "proj")
+    res = run("config", "show", "--origin", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
     assert "project proj:" in res.stdout
     assert "base_branch: develop  [project]" in res.stdout
@@ -3670,7 +3670,7 @@ def test_config_show_worktree_tier_only_when_cwd_inside(root: Path) -> None:
     (wt / ".wtm").mkdir(parents=True, exist_ok=True)
     (wt / ".wtm" / "config.toml").write_text('[hooks.on]\nenter = "echo hi"\n')
 
-    from_wt = run("config", "show", "--hooks", "--sources", root=root, cwd=wt)
+    from_wt = run("config", "show", "--hooks", "--origin", root=root, cwd=wt)
     assert from_wt.returncode == 0, from_wt.stderr
     assert "worktree feat:" in from_wt.stdout
     assert "hook enter = echo hi  [worktree]" in from_wt.stdout
@@ -3812,7 +3812,7 @@ def test_config_show_target_without_level_errors(root: Path) -> None:
 
 
 def test_config_show_sources_rejected_with_level(root: Path) -> None:
-    res = run("config", "show", "--all", "--sources", root=root, cwd=root)
+    res = run("config", "show", "--all", "--origin", root=root, cwd=root)
     assert res.returncode == 1
     assert "default view" in res.stderr
 
@@ -3955,12 +3955,12 @@ def test_config_set_scope_workspace_from_project_cwd(root: Path) -> None:
 
 
 def test_config_get_sources_shows_full_chain(root: Path) -> None:
-    # A key set at two tiers: --sources lists both, most-local first, and the
+    # A key set at two tiers: --origin lists both, most-local first, and the
     # most-local one wins. Each rung also names the file it lives in.
     _seed_repo(root, "proj")
     run("config", "set", "editor", "vi", "-s", "workspace", root=root, cwd=root / "proj")
     run("config", "set", "editor", "nvim", "-s", "project", root=root, cwd=root / "proj")
-    res = run("config", "get", "editor", "--sources", root=root, cwd=root / "proj")
+    res = run("config", "get", "editor", "--origin", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
     assert "nvim  [project]" in res.stdout
     assert "vi  [workspace]" in res.stdout
@@ -3989,7 +3989,7 @@ def test_config_get_base_branch_reports_inherited_value(root: Path) -> None:
 
 
 def test_config_get_base_branch_sources_lists_inheritance_tiers(root: Path) -> None:
-    # --sources labels each rung by its definition level (project/workspace/
+    # --origin labels each rung by its definition level (project/workspace/
     # global), most-local-first, so the two `user`-file rungs read distinctly.
     cfg = root / "cfg.toml"
     cfg.write_text(
@@ -4002,7 +4002,7 @@ def test_config_get_base_branch_sources_lists_inheritance_tiers(root: Path) -> N
         "config",
         "get",
         "base_branch",
-        "--sources",
+        "--origin",
         root=root,
         cwd=root / "proj",
         extra_env={"WTM_CONFIG": str(cfg)},
@@ -4030,7 +4030,7 @@ def test_config_get_user_declared_key_inherits(root: Path) -> None:
         "config",
         "get",
         "deploy_env",
-        "--sources",
+        "--origin",
         root=root,
         cwd=root / "proj",
         extra_env={"WTM_CONFIG": str(cfg)},
@@ -4093,31 +4093,86 @@ def test_config_unset_removes_key(root: Path) -> None:
 
 
 def test_config_set_array_add_and_remove(root: Path) -> None:
-    # --array-add builds a string array (set semantics: the repeat is a no-op);
-    # --array-remove strips the element again.
+    # `set -a` builds a string array (set semantics: the repeat is a no-op);
+    # `unset -a` strips the element again.
     _seed_repo(root, "proj")
     cwd = root / "proj"
-    run("config", "set", "worktree_ports", "3001", "--array-add", root=root, cwd=cwd)
-    run("config", "set", "worktree_ports", "3002", "--array-add", root=root, cwd=cwd)
-    run("config", "set", "worktree_ports", "3001", "--array-add", root=root, cwd=cwd)
+    run("config", "set", "worktree_ports", "3001", "-a", root=root, cwd=cwd)
+    run("config", "set", "worktree_ports", "3002", "-a", root=root, cwd=cwd)
+    run("config", "set", "worktree_ports", "3001", "-a", root=root, cwd=cwd)
     text = (cwd / ".wtm" / "config.toml").read_text()
     assert 'worktree_ports = ["3001", "3002"]' in text
-    res = run("config", "set", "worktree_ports", "3001", "--array-remove", root=root, cwd=cwd)
+    res = run("config", "unset", "worktree_ports", "3001", "-a", root=root, cwd=cwd)
     assert res.returncode == 0, res.stderr
     assert 'worktree_ports = ["3002"]' in (cwd / ".wtm" / "config.toml").read_text()
 
 
-def test_config_set_array_flags_mutually_exclusive(root: Path) -> None:
+def test_config_set_table_and_unset(root: Path) -> None:
+    # `set -t` builds a table one sub-key at a time; `unset -t` removes a cell.
     _seed_repo(root, "proj")
-    res = run(
-        "config", "set", "x", "1", "--array-add", "--array-remove", root=root, cwd=root / "proj"
-    )
+    cwd = root / "proj"
+    run("config", "set", "env", "REGION", "us-east", "-t", root=root, cwd=cwd)
+    run("config", "set", "env", "TIER", "prod", "-t", root=root, cwd=cwd)
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert 'REGION = "us-east"' in text
+    assert 'TIER = "prod"' in text
+    res = run("config", "unset", "env", "REGION", "-t", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert "REGION" not in text
+    assert 'TIER = "prod"' in text
+
+
+def test_config_get_readback_array_table_and_cell(root: Path) -> None:
+    # `get` renders arrays one-per-line, tables as sorted `subkey = value`, and
+    # a trailing SUBKEY reads a single cell.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "ports", "3001", "-a", root=root, cwd=cwd)
+    run("config", "set", "ports", "3002", "-a", root=root, cwd=cwd)
+    run("config", "set", "env", "TIER", "prod", "-t", root=root, cwd=cwd)
+    run("config", "set", "env", "REGION", "us-east", "-t", root=root, cwd=cwd)
+    arr = run("config", "get", "ports", root=root, cwd=cwd)
+    assert arr.stdout.split() == ["3001", "3002"]
+    tbl = run("config", "get", "env", root=root, cwd=cwd)
+    assert tbl.stdout == "REGION = us-east\nTIER = prod\n"
+    cell = run("config", "get", "env", "TIER", root=root, cwd=cwd)
+    assert cell.stdout.strip() == "prod"
+    missing = run("config", "get", "env", "NOPE", root=root, cwd=cwd)
+    assert missing.stdout.strip() == "(unset)"
+
+
+def test_config_set_table_kind_clash_on_scalar(root: Path) -> None:
+    # `-t` over a key already holding a scalar is a hard kind clash.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "env", "prod", root=root, cwd=cwd)
+    res = run("config", "set", "env", "TIER", "prod", "-t", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "not a table" in res.stderr.lower()
+
+
+def test_config_set_array_table_flags_mutually_exclusive(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("config", "set", "x", "1", "-a", "-t", root=root, cwd=root / "proj")
     assert res.returncode == 1
     assert "mutually exclusive" in res.stderr.lower()
 
 
+def test_config_set_bad_arity(root: Path) -> None:
+    # `-t` needs KEY SUBKEY VALUE; plain set needs KEY VALUE.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "env", "TIER", "-t", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "requires KEY SUBKEY VALUE" in res.stderr
+    res = run("config", "set", "only-key", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "requires KEY VALUE" in res.stderr
+
+
 def test_config_set_inheritable_array_opts_key_in(root: Path) -> None:
-    # `config set inheritable KEY --array-add` maintains the reserved allowlist,
+    # `config set inheritable KEY -a` maintains the reserved allowlist,
     # and the opted-in key then actually inherits (config get from a project).
     cfg = root / "cfg.toml"
     cfg.write_text(f'[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n')
@@ -4128,7 +4183,7 @@ def test_config_set_inheritable_array_opts_key_in(root: Path) -> None:
         "set",
         "inheritable",
         "deploy_env",
-        "--array-add",
+        "-a",
         "-s",
         "user",
         root=root,
@@ -4141,7 +4196,7 @@ def test_config_set_inheritable_array_opts_key_in(root: Path) -> None:
         "config",
         "get",
         "deploy_env",
-        "--sources",
+        "--origin",
         root=root,
         cwd=root / "proj",
         extra_env=env,
@@ -4150,10 +4205,33 @@ def test_config_set_inheritable_array_opts_key_in(root: Path) -> None:
     assert "staging  [workspace]" in got.stdout
 
 
+def test_config_unset_inheritable_array_opts_key_out(root: Path) -> None:
+    # `config unset inheritable KEY -a` removes the reserved-key element (the
+    # reserved name is not refused on this path).
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\ninheritable = ["deploy_env"]\n')
+    _seed_repo(root, "proj")
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run(
+        "config",
+        "unset",
+        "inheritable",
+        "deploy_env",
+        "-a",
+        "-s",
+        "user",
+        root=root,
+        cwd=root,
+        extra_env=env,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "deploy_env" not in cfg.read_text()
+
+
 def test_config_set_inheritable_rejects_hardcoded_non_inheritable(root: Path) -> None:
     # `description` is hardcoded never-inheritable: opting it in is refused.
     _seed_repo(root, "proj")
-    res = run("config", "set", "inheritable", "description", "--array-add", root=root, cwd=root)
+    res = run("config", "set", "inheritable", "description", "-a", root=root, cwd=root)
     assert res.returncode == 1
     assert "never inheritable" in res.stderr.lower()
 

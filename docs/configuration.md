@@ -71,28 +71,34 @@ else project, else the active workspace); `-s/--scope` picks the file tier the
 same way annotations do.
 
 - `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key.
-- `wtm config get KEY [--sources]` — resolve it (most-local wins); `--sources`
-  lists the full chain, most-local first, each rung showing where the value comes
-  from (its scope) and the file it lives in.
+- `wtm config get KEY [SUBKEY] [--origin]` — resolve it (most-local wins). A
+  scalar prints bare, an array one element per line, a table `subkey = value` per
+  line (sorted); pass `SUBKEY` to read a single table cell. `--origin` lists the
+  full chain, most-local first, each rung showing where the value comes from (its
+  scope) and the file it lives in.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
 
-### Array keys (`--array-add` / `--array-remove`)
+### Array keys (`-a` / `--array`) and table keys (`-t` / `--table`)
 
-`config set` also mutates a string **array** element-wise, instead of writing a
-scalar:
+`config set` / `config unset` also mutate a string **array** or a **table**
+element-wise, instead of writing a scalar:
 
-- `wtm config set KEY VALUE --array-add [-s SCOPE]` — add `VALUE` to the array at
-  `KEY` (**set semantics**: idempotent, a value already present is a no-op);
-  creates the array on first add.
-- `wtm config set KEY VALUE --array-remove [-s SCOPE]` — strip every occurrence
-  of `VALUE` from that array.
+- `wtm config set KEY VALUE -a [-s SCOPE]` — add `VALUE` to the array at `KEY`
+  (**set semantics**: idempotent, a value already present is a no-op); creates
+  the array on first add.
+- `wtm config unset KEY VALUE -a [-s SCOPE]` — strip every occurrence of `VALUE`
+  from that array.
+- `wtm config set KEY SUBKEY VALUE -t [-s SCOPE]` — set `SUBKEY = VALUE` in the
+  table at `KEY`; creates the table on first set.
+- `wtm config unset KEY SUBKEY -t [-s SCOPE]` — remove `SUBKEY` from that table.
 
-Values are always stored as **strings**. Mutating a key that already holds a
-scalar or table is a hard error (the same kind-clash rule reads enforce). Arrays
-do **not** merge across scopes (unlike `hooks.on` / `inheritable`): a read takes
-the most-local scope's whole array. Give each tier a distinct name when you want
-per-tier arrays that don't shadow one another — e.g. a per-worktree port
-registry beside a per-project one:
+`-a` and `-t` are mutually exclusive. Values are always stored as **strings**.
+Mutating a key that already holds a different kind (a scalar, or an array where a
+table is expected, or vice versa) is a hard error (the same kind-clash rule reads
+enforce). Arrays do **not** merge across scopes (unlike `hooks.on` /
+`inheritable`): a read takes the most-local scope's whole array. Give each tier a
+distinct name when you want per-tier arrays that don't shadow one another — e.g.
+a per-worktree port registry beside a per-project one:
 
 ```toml
 # workspace scope
@@ -115,7 +121,7 @@ entity-local — it is a *non-entity-specific* key: a shared default describing 
 whole subtree (like `base_branch`), not a property of one node (like
 `description`). `config get` on such a key folds the entity's own cascade plus
 its ancestors' (project → workspace → global default), so it reports the same
-effective value a real command would use; for it `--sources` labels each rung by
+effective value a real command would use; for it `--origin` labels each rung by
 its definition level (`project` / `workspace` / `global`) — matching
 `config show` — rather than its raw scope, and still names the file.
 
@@ -130,8 +136,8 @@ deploy_env = "staging"                 # a global default every entity may inher
 ```
 
 ```sh
-wtm config set inheritable deploy_env --array-add     # opt a key into inheritance
-wtm config set inheritable deploy_env --array-remove  # opt it back out
+wtm config set inheritable deploy_env -a     # opt a key into inheritance
+wtm config unset inheritable deploy_env -a   # opt it back out
 ```
 
 Each element is validated: a reserved key or a hardcoded-non-inheritable builtin
@@ -156,12 +162,12 @@ that one file; commands still accumulate across scopes at read time.
 
 ## Showing the effective config
 
-`wtm config show [--sources] [--hooks]` prints the effective merge for the
+`wtm config show [--origin] [--hooks]` prints the effective merge for the
 current context: it lists all workspaces, then descends only in the active one
 as far as the cwd sits — the cwd-bound project's resolved annotation and, when
 the cwd is inside a worktree, that worktree's tier. Arbitrary (non-reserved)
-keys resolved along the descent are always shown. `--sources` tags each value
-with its **winning** scope (the full chain lives in `config get KEY --sources`);
+keys resolved along the descent are always shown. `--origin` tags each value
+with its **winning** scope (the full chain lives in `config get KEY --origin`);
 `--hooks` also renders accumulated inline hooks per scope.
 
 ### Dumping a whole subtree
@@ -180,7 +186,7 @@ wtm config show --worktree [[WORKSPACE] PROJECT] NAME
 The `TARGET` positional follows the target grammar for the chosen level and
 falls back to cwd inference when omitted; `--all` takes no target, and the four
 level flags are mutually exclusive. A subtree dump is effective-values-only:
-`--sources`/`--hooks` do not apply to it (they are rejected).
+`--origin`/`--hooks` do not apply to it (they are rejected).
 
 `-j`/`--json` emits the result as a nested JSON object instead of text —
 `{workspaces: {…}}` for `--all`, else the single rooted node. Each node carries

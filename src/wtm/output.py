@@ -195,7 +195,7 @@ def config_tree_json(tree: ConfigTree) -> str:
 
     The machine-readable counterpart of the text tree renderer: rooted at the
     requested level (worktree / project / workspace / all), effective values
-    only -- no provenance (``--sources``) and no hooks, per the dump contract.
+    only -- no provenance (``--origin``) and no hooks, per the dump contract.
     Arbitrary keys nest under ``"extra"`` (collision-safe with reserved fields);
     paths render as strings. Children are objects keyed by name.
     """

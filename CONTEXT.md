@@ -129,7 +129,8 @@ other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It
 loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
 on `Config`, three write/read tiers: a **generic value facility**
 (`get_value`/`set_value`/`unset_value` plus element-wise
-`add_to_array`/`remove_from_array` over a `ConfigAddress` naming any scope
+`add_to_array`/`remove_from_array` and `set_table_value`/`unset_table_value`
+over a `ConfigAddress` naming any scope
 plus a bare or tuple key -- the substrate everything else is built on), the
 **typed read view** (the `Workspace`/`ProjectAnnotation`/`ResolvedWorktree`/
 `HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
@@ -167,7 +168,7 @@ cwd-inferred entity (for an *inheritable* key -- the builtin `base_branch` per
 `INHERITABLE_KEYS`, or any key named in the user's accumulating `inheritable`
 array -- the generic read folds the entity's own cascade plus its ancestors' so
 `config get` reports the same effective value a real command uses, and
-`--sources` labels each rung by its definition tier; inheritance reaches
+`--origin` labels each rung by its definition tier; inheritance reaches
 `config show`/the resolved view too, via a shared tier-fold that fills a
 descendant's `extra` with inherited values). Workspace *declarations* (`add`/`set --path`/`rename`/
 `default`) stay user-file-only and refuse system-only names. `WTM_NO_CONFIG`
@@ -235,9 +236,10 @@ additive: arbitrary keys stay entity-local by default and the builtin
 classifications are fixed. Membership is always a curated decision -- hardcoded
 or user-declared -- never inferred from a key's name, type, or value.
 `inheritable` is itself a **reserved key** (refused as an arbitrary key, never
-leaked into `extra`), maintained via the array flags -- `config set inheritable
-KEY --array-add/--array-remove` is the one reserved array those flags may touch,
-each element validated by `validate_inheritable_element` (a reserved key or a
+leaked into `extra`), maintained via the array flag -- `config set inheritable
+KEY -a` / `config unset inheritable KEY -a` is the one reserved array that flag
+may touch,
+each added element validated by `validate_inheritable_element` (a reserved key or a
 hardcoded-non-inheritable builtin -- `NON_INHERITABLE_KEYS`, i.e. `description`
 -- is refused). One builtin carve-out: `base_branch` has no worktree tier,
 so a worktree-local `base_branch` is ignored (aligning `config get` with

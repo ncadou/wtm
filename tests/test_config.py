@@ -902,6 +902,40 @@ def test_add_to_array_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) -> No
         Config.load().add_to_array(address, "port", "x")
 
 
+def test_set_table_value_creates_and_updates(user_cfg: Path, tmp_path: Path) -> None:
+    # Set semantics: first write creates the table, a later write adds/updates a cell.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().set_table_value(address, "env", "REGION", "us-east")
+    Config.load().set_table_value(address, "env", "TIER", "prod")
+    Config.load().set_table_value(address, "env", "REGION", "eu-west")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'REGION = "eu-west"' in text
+    assert 'TIER = "prod"' in text
+
+
+def test_unset_table_value_removes_cell_and_absent_is_noop(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[env]\nREGION = "us-east"\nTIER = "prod"\n')
+    address = ConfigAddress.workspace(ws)
+    Config.load().unset_table_value(address, "env", "REGION")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "REGION" not in text
+    assert 'TIER = "prod"' in text
+    Config.load().unset_table_value(address, "env", "NOPE")  # absent sub-key: no-op
+    Config.load().unset_table_value(address, "absent", "x")  # absent key: no-op
+
+
+def test_set_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('env = "prod"\n')
+    address = ConfigAddress.workspace(ws)
+    with pytest.raises(WtmError, match="not a table"):
+        Config.load().set_table_value(address, "env", "TIER", "prod")
+
+
 def test_add_to_array_refused_under_no_config(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

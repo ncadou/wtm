@@ -216,7 +216,7 @@ class Workspace:
     description: str | None = None
     base_branch: str | None = None  # scope-wide default for its projects
     hooks: HookSpec = field(default_factory=HookSpec)
-    scope: Scope = Scope.USER  # where it was ultimately declared (for --sources)
+    scope: Scope = Scope.USER  # where it was ultimately declared (for --origin)
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -329,7 +329,7 @@ class GenericTarget:
 
 @dataclass(frozen=True)
 class SourceRung:
-    """One resolved rung of a ``config get --sources`` chain.
+    """One resolved rung of a ``config get --origin`` chain.
 
     :param scope: the config scope (file tier) the value was read from.
     :param value: the value present at this rung.
@@ -516,6 +516,38 @@ class _Store:
             for item in [i for i in array if _unwrap_scalar(i) == value]:
                 array.remove(item)
 
+    def table_set(self, path: Path, key: Key, subkey: str, value: str) -> None:
+        """Set *subkey* = *value* in the table at *key* in *path* (set semantics).
+
+        Creates an empty table on first write; a non-table value already at *key*
+        is a kind clash (hard error), matching :func:`_merge_locality`.
+        """
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            container = _descend_for_write(doc, parts[:-1]) if parts[:-1] else doc
+            table = _writable_table(container, parts[-1], key)
+            table[subkey] = value
+
+    def table_unset(self, path: Path, key: Key, subkey: str) -> None:
+        """Remove *subkey* from the table at *key* in *path* (a no-op when absent).
+
+        The mirror of :meth:`table_set`: a no-op when the key or the sub-key is
+        absent. A non-table value at *key* is a kind clash (hard error).
+        """
+        with self._transaction(path) as doc:
+            parts = _key_parts(key)
+            node: object = doc
+            for part in parts[:-1]:
+                if not isinstance(node, dict) or part not in node:
+                    return
+
+                node = node[part]
+            if not isinstance(node, dict) or parts[-1] not in node:
+                return
+
+            table = _writable_table(node, parts[-1], key)
+            table.pop(subkey, None)
+
     @contextmanager
     def user_transaction(self):
         """A write transaction over the user file, for the structural write tier.
@@ -647,6 +679,28 @@ def _writable_array(container, key: str, full_key: Key):
     return existing
 
 
+def _writable_table(container, key: str, full_key: Key):
+    """Return the tomlkit table at *container[key]*, creating an empty one if absent.
+
+    A present non-table value is a kind clash (hard error), aligning table
+    mutation with the read-side :func:`_check_kind` rule. *full_key* names the
+    key for the error message.
+    """
+    existing = container.get(key)
+    if existing is None:
+        container[key] = tomlkit.table()
+
+        return container[key]
+    if not isinstance(existing, dict):
+        raise WtmError(
+            f"config key '{full_key if isinstance(full_key, str) else '.'.join(full_key)}' "
+            f"is a {_kind(_unwrap_scalar(existing))}, not a table; "
+            f"cannot set a sub-key"
+        )
+
+    return existing
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Atomically write *text* to *path* (creating parent dirs)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -772,6 +826,19 @@ class Config:
     def remove_from_array(self, address: ConfigAddress, key: Key, value: str) -> None:
         """Strip every occurrence of *value* from the array at *key* (a no-op if absent)."""
         self._store.array_remove(address.file, key, value)
+
+    def set_table_value(self, address: ConfigAddress, key: Key, subkey: str, value: str) -> None:
+        """Set *subkey* = *value* in the table at *key* in the file *address* names.
+
+        Set semantics: an empty table is created on first write; a non-table
+        value already at *key* is a kind clash. Read-modify-write under a
+        per-file lock. Refused under ``WTM_NO_CONFIG``.
+        """
+        self._store.table_set(address.file, key, subkey, value)
+
+    def unset_table_value(self, address: ConfigAddress, key: Key, subkey: str) -> None:
+        """Remove *subkey* from the table at *key* (a no-op if the key or sub-key is absent)."""
+        self._store.table_unset(address.file, key, subkey)
 
     # --- scope write targets -------------------------------------------------
 
@@ -1044,7 +1111,7 @@ class Config:
 
         The effective value is the most-local present one (``None`` when unset);
         the chain lists every rung that carries *key*, most-local-first, as
-        :class:`SourceRung` records -- the material for ``config get --sources``.
+        :class:`SourceRung` records -- the material for ``config get --origin``.
         An inheritable key (see :meth:`inheritable_keys`) folds the entity's own
         cascade plus its ancestors' (tier-tagged), so the effective value matches
         what a real command would use; every other key stays entity-local. A
