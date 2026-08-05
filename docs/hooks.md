@@ -144,14 +144,20 @@ list    [TARGET] [--types]                                 list installed hooks,
   `--scope user`, and `--scope workspace` need no target.
 - `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks (all
   scopes unless `--scope` restricts it). `HOOK` (the event) is the last
-  positional.
+  positional; everything before it is a `TARGET`, which — like `hook list`'s — is
+  a **locator** pinned to the worktree tier.
 - `wtm hook delete [TARGET] HOOK [--scope …] [-r]` removes a hook. `HOOK` is the
   last positional: an event (removes the bare `wtm-<event>` file; its
   `wtm-<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
   `.d` entry).
 - `wtm hook list [TARGET] [--types]` lists hooks grouped by event across scopes,
   builtin files and inline config hooks alike (inline ones marked `(config)`);
-  `--types` prints a compact per-event summary.
+  `--types` prints a compact per-event summary. Being read-only over an existing
+  worktree, its `TARGET` is a **locator** pinned to the worktree tier (see
+  [commands.md](commands.md#the-locator)): a bare name reaches another
+  workspace's worktree, and a name matching none is an error. `hook install`
+  writes into a `--scope` and `hook delete` is destructive, so those two keep the
+  positional target grammar.
 - `wtm hook set EVENT "CMD" [--scope …]` / `wtm hook unset EVENT [--scope …]`
   write an inline hook (`[...hooks.on] EVENT = "CMD"`) at the cwd-inferred
   entity's table-path; `--scope` defaults to the deepest existing dir. A `set`

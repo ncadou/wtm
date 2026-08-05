@@ -104,7 +104,7 @@ $WTM_WORKSPACE, the cwd, a default_workspace, or the sole declared one. Anything
 project-specific (shared data/tools dirs, direnv, sesh/tmux) is the concern of
 hooks, not wtm.
 
-Worktree targeting for enter/leave/delete/rename/hook (a leading WORKSPACE
+Worktree targeting for create/delete/rename/resolve/hook (a leading WORKSPACE
 reaches another workspace; without it the active one is used):
   WORKSPACE PROJECT NAME -> <WORKSPACE>/PROJECT/worktrees/NAME
   PROJECT NAME -> <workspace>/PROJECT/worktrees/NAME
@@ -113,6 +113,12 @@ reaches another workspace; without it the active one is used):
   DIR          -> a single arg is a path only if it starts with '/', './',
                   '../' or is '.'/'..'; otherwise it is a NAME
   (no arg)     -> cwd (delete requires an explicit target)
+
+enter/leave/list/project enter/project leave/hook list instead take a LOCATOR: a
+name matched across every declared workspace, deepest tier first (worktree >
+project > workspace), leading tokens qualifying its ancestors. One match wins,
+several print the qualified choices. Destructive verbs and not-yet-created names
+keep the positional grammar above.
 """
 
 
@@ -257,21 +263,6 @@ def _complete_project(ctx: typer.Context, incomplete: str) -> list[tuple[str, st
     return _labelled(candidates, _TARGET_PRECEDENCE)
 
 
-def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete the leading slots for the create-style ('[[WORKSPACE] PROJECT] NAME').
-
-    These use the ``NAME_ONLY`` target mode: slot 0 offers a WORKSPACE or a
-    PROJECT, slot 1 offers a PROJECT (reachable only via the WORKSPACE reading);
-    the new NAME being invented has nothing to offer. :func:`slot_kind` encodes
-    that rule so this callback no longer counts args by hand.
-    """
-    args = ctx.params.get("args") or []
-    config = Config.load()
-    candidates = _target_candidates(slot_kind(TargetMode.NAME_ONLY, args), config, args)
-
-    return _labelled(candidates, _TARGET_PRECEDENCE)
-
-
 def _complete_branch(ctx: typer.Context, incomplete: str) -> list[str]:
     """Complete -b/--branch for create/enter: the project's local + origin branches.
 
@@ -397,14 +388,35 @@ def _complete_target(ctx: typer.Context, incomplete: str) -> list[tuple[str, str
 
 
 def _complete_locate(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete an ``enter`` locator: the global name universe, narrowed by qualifiers.
+    """Complete an unpinned locator (``enter``/``leave``): the whole name universe.
 
     Slot 0 offers the flat union of every worktree, project, and workspace name
     across all workspaces (labelled by kind, each carrying its location context --
     see :func:`_locate_label`). A leading token narrows the next slot to the
     worktrees (and, for a workspace, the projects) it qualifies, mirroring the
-    runtime cascade. Builds its own index (the app callback has not fired) from the
-    filesystem, so it never touches git and never errors.
+    runtime cascade.
+    """
+    return _locate_completion(ctx, None)
+
+
+def _complete_locate_project(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete a PROJECT-pinned locator (``list``, ``project enter``/``leave``)."""
+    return _locate_completion(ctx, Tier.PROJECT)
+
+
+def _complete_locate_worktree(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete a WORKTREE-pinned locator (``hook list``)."""
+    return _locate_completion(ctx, Tier.WORKTREE)
+
+
+def _locate_completion(ctx: typer.Context, tier: Tier | None) -> list[tuple[str, str]]:
+    """Offer the locator candidates admissible at this slot under *tier*'s pin.
+
+    The shared body of the ``_complete_locate*`` callbacks: a pin narrows the
+    universe to the tier the command can actually resolve, so ``wtm list <TAB>``
+    offers projects rather than every name in the tree. Builds its own index (the
+    app callback has not fired) from the filesystem, so it never touches git and
+    never errors.
     """
     args = ctx.params.get("args") or []
     try:
@@ -414,10 +426,12 @@ def _complete_locate(ctx: typer.Context, incomplete: str) -> list[tuple[str, str
 
     multi_ws = len(index.workspaces) > 1
 
-    return _labelled_locations(_locate_candidates(args, index), multi_ws)
+    return _labelled_locations(_locate_candidates(args, index, tier), multi_ws)
 
 
-def _locate_candidates(args: list[str], index: LocationIndex) -> dict[str, list[Location]]:
+def _locate_candidates(
+    args: list[str], index: LocationIndex, tier: Tier | None = None
+) -> dict[str, list[Location]]:
     """Map the next locator slot to a name -> matching locations from *index*.
 
     Slot 0 (no args) is the whole universe (every worktree, project, workspace).
@@ -426,15 +440,23 @@ def _locate_candidates(args: list[str], index: LocationIndex) -> dict[str, list[
     qualifiers ``A B`` (workspace, project) offer that project's worktrees.
     Beyond that nothing completes. The locations (not just kinds) are kept so the
     label can show each target's location context.
+
+    A *tier* pin drops only the tiers that can be neither the leaf nor an
+    ancestor qualifier of it -- so a PROJECT pin drops worktree names (``wtm list
+    <TAB>`` offers projects, not every name in the tree) while still offering
+    workspaces, which qualify a project. A WORKTREE pin drops nothing: every tier
+    is either its leaf or one of its ancestors.
     """
     candidates: dict[str, list[Location]] = {}
+    want_worktree = tier is not Tier.PROJECT
 
     def add(name: str, location: Location) -> None:
         candidates.setdefault(name, []).append(location)
 
     if not args:
-        for wt in index.worktrees:
-            add(wt.name, wt)  # type: ignore[arg-type]
+        if want_worktree:
+            for wt in index.worktrees:
+                add(wt.name, wt)  # type: ignore[arg-type]
         for proj in index.projects:
             add(proj.project, proj)  # type: ignore[arg-type]
         for name in index.workspaces:
@@ -443,9 +465,10 @@ def _locate_candidates(args: list[str], index: LocationIndex) -> dict[str, list[
         return candidates
 
     quals = args
-    for wt in index.worktrees:
-        if _quals_prefix_worktree(quals, wt):
-            add(wt.name, wt)  # type: ignore[arg-type]
+    if want_worktree:
+        for wt in index.worktrees:
+            if _quals_prefix_worktree(quals, wt):
+                add(wt.name, wt)  # type: ignore[arg-type]
     if len(quals) == 1:
         # A read as a workspace also offers that workspace's projects (project entry).
         for proj in index.projects:
@@ -529,7 +552,7 @@ def _complete_event(incomplete: str) -> list[str]:
 
 
 def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete the '[PROJECT] NAME | [DIR] HOOK' variadic for hook run/delete.
+    """Complete the '[PROJECT] NAME | [DIR] HOOK' variadic for hook delete.
 
     HOOK (the event) is the trailing token, so any slot may be it: the target
     candidates admissible at this slot (via ``WORKTREE``-mode :func:`slot_kind`)
@@ -551,6 +574,209 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str
             candidates.setdefault(event, set()).add("event")
 
     return _labelled(candidates, _HOOK_PRECEDENCE)
+
+
+def _complete_locate_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete the 'LOCATOR | DIR HOOK' variadic for hook run.
+
+    The locator analog of :func:`_complete_hook_target`: ``hook run`` resolves its
+    target as a worktree-pinned locator, so the target slots offer the locator's
+    name universe (see :func:`_locate_candidates`) rather than the count-based
+    grammar's. HOOK is still the trailing token and so may appear at any slot, so
+    the event names are merged in as before; a name already offered as a target
+    keeps its locator label.
+    """
+    args = ctx.params.get("args") or []
+    try:
+        index = build_index(Config.load())
+    except Exception:
+        return []
+    offered = _labelled_locations(
+        _locate_candidates(args, index, Tier.WORKTREE), len(index.workspaces) > 1
+    )
+    names = {name for name, _ in offered}
+    events = [(event, "event") for event in EVENTS if event not in names]
+
+    return sorted(offered + events)
+
+
+# --- locator edge ------------------------------------------------------------
+#
+# The cli side of wtm.locate, shared by every locator-taking command: resolve the
+# positionals to a single Location (or die with a copy-runnable ambiguity), then
+# hand it over in whichever shape the caller's operation already speaks -- a
+# (workspace, project) pair, or a fully-qualified WORKSPACE PROJECT NAME triple.
+# A command that accepts one kind of target only passes a leaf-tier pin, so a
+# project-level command never resolves a same-named worktree.
+#
+# Which commands take a locator (and which deliberately do not) is a policy, not
+# an accident: a locator reaches globally and only sees what exists on disk, so
+# how much of a command's target it can resolve depends on what already exists.
+#
+# - Whole target (_locate_worktree_args / _locate_project): the leaf itself
+#   exists -- enter/leave, list, project enter/leave, hook list, hook run.
+# - Qualifiers only (_locate_parent_args): the leaf is being named into existence
+#   but its ancestors exist -- create, enter -c, resolve, worktree set,
+#   config show --worktree. Global reach without pretending to see the leaf; a
+#   qualifier the index has never heard of falls back to the literal token, so
+#   these commands keep working for a wholly absent target.
+# - Neither: the destructive verbs (delete, rename, hook delete) stay bounded by
+#   the cwd, because irreversible reaching must be spelled out positionally; and
+#   the project-tier commands whose only qualifier is a WORKSPACE (project
+#   new/clone/resolve/set/show) gain nothing, a workspace name being exact.
+
+
+def _locate_one(
+    ctx: typer.Context, args: list[str], *, command: str, tier: Tier | None = None
+) -> Location:
+    """Resolve a locator's tokens to exactly one :class:`Location`, or raise.
+
+    :param args: the locator tokens (non-empty).
+    :param command: the ``wtm`` sub-command name, so an ambiguity prints choices
+        that can be pasted straight back.
+    :param tier: an optional leaf-tier pin (see :func:`wtm.locate.locate`).
+    :returns: the sole matching location.
+    :raises WtmError: nothing matched, or several did and the current context
+        could not single one out.
+    """
+    resolution = locate(args, build_index(ctx.obj.config), tier=tier)
+    if isinstance(resolution, NotFound):
+        raise WtmError(f"no {_tier_noun(tier)} matches: {' '.join(args)}")
+    if isinstance(resolution, Ambiguous):
+        picked = _context_pick(ctx, resolution.candidates)
+        if picked is None:
+            raise WtmError(_ambiguous_message(args, resolution.candidates, command))
+
+        return picked
+
+    return resolution.location
+
+
+def _locate_project(
+    ctx: typer.Context, args: list[str], *, command: str
+) -> tuple[str | None, str | None]:
+    """Resolve a project-pinned locator to ``(workspace, project)``; no tokens is the cwd.
+
+    The shape every project-level operation already takes. Both ``None`` keeps
+    their cwd-inference path, so a bare command still means "the project I am in".
+    """
+    if not args:
+        return None, None
+    location = _locate_one(ctx, args, command=command, tier=Tier.PROJECT)
+
+    return location.workspace, location.project
+
+
+def _locate_worktree_args(ctx: typer.Context, args: list[str], *, command: str) -> list[str]:
+    """Resolve a worktree-pinned locator to a fully-qualified ``WORKSPACE PROJECT NAME``.
+
+    Returns positionals rather than a :class:`Location` so the existing
+    target-grammar operations can be called unchanged; the triple resolves
+    regardless of the active workspace, which is the portability win. A single
+    ``DIR`` and the no-token cwd default are not names to resolve, so they pass
+    straight through.
+    """
+    if not args or (len(args) == 1 and looks_like_path(args[0])):
+        return args
+    location = _locate_one(ctx, args, command=command, tier=Tier.WORKTREE)
+
+    return [location.workspace, location.project, location.name]
+
+
+def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) -> list[str]:
+    """Resolve a target's leading qualifiers by locator, keeping the last token literal.
+
+    The **qualifier-only locator**: the absent-leaf commands (``create``,
+    ``enter -c``, ``resolve``, ``worktree set``, ``config show --worktree``) name a
+    worktree that need not exist, so the leaf is not in the index -- but its
+    ancestors usually are. Locating just the qualifiers buys those commands the
+    same global reach as a full locator while leaving the leaf alone.
+
+    The qualifiers go in as a whole project-pinned locator query, so a lone
+    ``PROJECT`` and a ``WORKSPACE PROJECT`` pair both resolve through the ordinary
+    cascade. Two cases opt out, so the change is strictly additive:
+
+    - fewer than two tokens carry no qualifier at all (a ``DIR``, a lone ``NAME``
+      against the cwd project, or the cwd default);
+    - a qualifier matching *no* project anywhere is handed back untouched, because
+      these commands are path math and legitimately name an absent project too
+      (``wtm resolve newproj newwt``). Only a name the index has never heard of
+      falls through, so the literal reading is the sole possible one.
+
+    An ambiguous qualifier still errors, its choices carrying *leaf* so each
+    printed line stays runnable as typed.
+    """
+    if len(args) < 2:
+        return args
+
+    *quals, leaf = args
+    resolution = locate(quals, build_index(ctx.obj.config), tier=Tier.PROJECT)
+    if isinstance(resolution, NotFound):
+        return args
+    if isinstance(resolution, Ambiguous):
+        location = _context_pick(ctx, resolution.candidates)
+        if location is None:
+            raise WtmError(
+                _ambiguous_message(quals, resolution.candidates, command, suffix=f" {leaf}")
+            )
+    else:
+        location = resolution.location
+
+    return [location.workspace, location.project, leaf]
+
+
+def _context_pick(ctx: typer.Context, candidates: list[Location]) -> Location | None:
+    """Collapse an ambiguous locator by the current context, or ``None`` if it can't.
+
+    The current context is the active workspace and, from the cwd, its project;
+    :func:`narrow_by_context` keeps the sole candidate they name (project first,
+    then workspace alone) so a unique in-context match resolves silently instead
+    of erroring. A match never changes an already-unique resolution -- only the
+    ambiguous set is passed in -- so this can only turn a former error into a hit.
+    """
+    config = ctx.obj.config
+    workspace = config.active
+    project: str | None = None
+    if workspace is not None:
+        cwd = current_dir(resolve=False)
+        if cwd is not None:
+            project_dir = project_dir_for(config.workspaces[workspace].path, cwd)
+            if project_dir is not None:
+                project = project_dir.name
+
+    return narrow_by_context(candidates, workspace=workspace, project=project)
+
+
+def _ambiguous_message(
+    args: list[str], candidates: list[Location], command: str, *, suffix: str = ""
+) -> str:
+    """Render the ambiguity error: a header plus one copy-runnable command per candidate.
+
+    *suffix* is appended to each choice so a qualifier-only locator (whose tokens
+    are only the leading qualifiers) still prints the trailing positionals the
+    user typed, keeping every line runnable as-is.
+    """
+    tier = candidates[0].tier.value
+    lines = [f"'{' '.join(args)}' matches {len(candidates)} {tier}s:"]
+    lines.extend(f"  wtm {command} {_qualified(candidate)}{suffix}" for candidate in candidates)
+    lines.append("qualify it with a workspace and/or project to disambiguate")
+
+    return "\n".join(lines)
+
+
+def _qualified(location: Location) -> str:
+    """Return the fully-qualified positional form of a location (always portable)."""
+    if location.tier is Tier.WORKTREE:
+        return f"{location.workspace} {location.project} {location.name}"
+    if location.tier is Tier.PROJECT:
+        return f"{location.workspace} {location.project}"
+
+    return location.workspace
+
+
+def _tier_noun(tier: Tier | None) -> str:
+    """Name what a locator was looking for, for the not-found message."""
+    return tier.value if tier is not None else "worktree, project, or workspace"
 
 
 project_app = typer.Typer(
@@ -774,8 +1000,9 @@ def project_enter(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT]",
-        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
-        autocompletion=_complete_project,
+        help="Locator: a project name resolved across every workspace "
+        "(default: inferred from cwd)",
+        autocompletion=_complete_locate_project,
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
@@ -783,9 +1010,11 @@ def project_enter(
 
     Lands beside the project's ``.git``/``worktrees`` and exports the
     project-level WTM_* contract (no WTM_WORKTREE_DIR/WTM_BRANCH), pinning the
-    active workspace until leave.
+    active workspace until leave. The PROJECT is a locator pinned to the project
+    tier, so a bare name reaches another workspace's project; ``wtm enter`` finds
+    the same target through the unpinned cascade.
     """
-    workspace, project = split_workspace_project(args or [])
+    workspace, project = _locate_project(ctx, args or [], command="project enter")
     result = ctx.obj.project.enter(workspace, project, strict=strict)
     emit_shell(cd=result.dir, env=ctx.obj.project.resolve_env(workspace, project))
 
@@ -796,8 +1025,9 @@ def project_leave(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT]",
-        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
-        autocompletion=_complete_project,
+        help="Locator: a project name resolved across every workspace "
+        "(default: inferred from cwd)",
+        autocompletion=_complete_locate_project,
     ),
     no_cd: bool = typer.Option(False, "-C", "--no-cd", help="Run hooks without cd-ing out"),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
@@ -805,9 +1035,10 @@ def project_leave(
     """Fire project-leave hooks (cascading the worktree leave when inside one); cd out.
 
     Ends the project session: the WTM_* contract is unset even with -C (which
-    only suppresses the cd-out).
+    only suppresses the cd-out). The PROJECT is a project-pinned locator, as for
+    ``project enter``.
     """
-    workspace, project = split_workspace_project(args or [])
+    workspace, project = _locate_project(ctx, args or [], command="project leave")
     result = ctx.obj.project.leave(workspace, project, strict=strict)
     log(f"left project '{result.name}'")
     cd_dir = result.cd_dir if (not no_cd and result.cd_dir is not None) else None
@@ -900,8 +1131,8 @@ def create(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT] NAME",
-        help="Target: NAME, PROJECT NAME, or WORKSPACE PROJECT NAME",
-        autocompletion=_complete_project_arg,
+        help="Target: NAME, or NAME qualified by a PROJECT locator ([[WORKSPACE] PROJECT] NAME)",
+        autocompletion=_complete_locate_project,
     ),
     branch: str | None = typer.Option(
         None, "-b", "--branch", help="Branch name", autocompletion=_complete_branch
@@ -921,9 +1152,14 @@ def create(
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Add a worktree (and branch) to a project."""
+    """Add a worktree (and branch) to a project.
+
+    NAME is invented, so only its leading PROJECT qualifier is resolved -- as a
+    project-pinned locator, so ``wtm create otherproj feat`` reaches another
+    workspace's project.
+    """
     result = ctx.obj.worktree.create(
-        args or [],
+        _locate_parent_args(ctx, args or [], command="create"),
         branch=branch,
         base=base,
         destdir=destdir,
@@ -1002,8 +1238,9 @@ def hook_run(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT] NAME | [DIR] HOOK",
-        help="Worktree target followed by the event (HOOK) to run",
-        autocompletion=_complete_hook_target,
+        help="Locator: a worktree name resolved across every workspace (or a DIR), "
+        "followed by the event (HOOK) to run",
+        autocompletion=_complete_locate_hook_target,
     ),
     scope: Scope | None = typer.Option(
         None, "-s", "--scope", help="Restrict to one scope (default: all)"
@@ -1012,12 +1249,16 @@ def hook_run(
 ) -> None:
     """Run an event's hooks for a worktree (all scopes unless --scope given).
 
-    HOOK (the event) is the last positional; anything before it is the target.
+    HOOK (the event) is the last positional; anything before it is the target, a
+    worktree-pinned locator (as for ``hook list``), so a bare name reaches
+    another workspace's worktree. A DIR or no target is the cwd worktree.
     """
     if not args:
         raise WtmError("hook run requires an event (HOOK) as the last argument")
     *target, hook = args
-    ctx.obj.hooks.run(hook, target, scope=scope, strict=strict)
+    ctx.obj.hooks.run(
+        hook, _locate_worktree_args(ctx, target, command="hook run"), scope=scope, strict=strict
+    )
 
 
 @hook_app.command(name="delete")
@@ -1054,13 +1295,18 @@ def hook_list(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
-        help="Worktree target (default: cwd)",
-        autocompletion=_complete_target,
+        help="Locator: a worktree name resolved across every workspace, or a DIR (default: cwd)",
+        autocompletion=_complete_locate_worktree,
     ),
     types: bool = typer.Option(False, "-t", "--types", help="Show a compact per-event summary"),
 ) -> None:
-    """List installed hooks, grouped by event across scopes."""
-    grouped = ctx.obj.hooks.list(args or [])
+    """List installed hooks, grouped by event across scopes.
+
+    A read-only query over an existing worktree, so it takes a worktree-pinned
+    locator: a bare name reaches another workspace's worktree. A DIR or no arg is
+    the cwd worktree, as before.
+    """
+    grouped = ctx.obj.hooks.list(_locate_worktree_args(ctx, args or [], command="hook list"))
     for line in _render_hook_list(grouped, types=types):
         print(line)
 
@@ -1186,15 +1432,16 @@ def enter(
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """cd into a worktree, project, or workspace, resolved from a locator (experiment).
+    """cd into a worktree, project, or workspace, resolved from a locator.
 
     A single free NAME resolves across every declared workspace by tier cascade
     (a worktree named NAME beats a project beats a workspace); leading tokens
     qualify it (``PROJECT NAME`` / ``WORKSPACE NAME`` / ``WORKSPACE PROJECT
     NAME``). Exactly one match is entered with that tier's WTM_* contract;
-    several print the qualified choices and exit non-zero. ``-c`` keeps the
-    classic ``[[WORKSPACE] PROJECT] NAME`` create grammar (nothing to resolve
-    yet). A single DIR (``/``, ``./``, ``../``, ``.``/``..``) or no arg (the cwd
+    several print the qualified choices and exit non-zero. ``leave`` undoes this
+    with the same locator. ``-c`` keeps the ``[[WORKSPACE] PROJECT] NAME`` create
+    grammar -- the NAME may not exist yet, so only its PROJECT qualifier is
+    located. A single DIR (``/``, ``./``, ``../``, ``.``/``..``) or no arg (the cwd
     worktree) stays the worktree path, as before.
     """
     if not create:
@@ -1204,16 +1451,18 @@ def enter(
         return
 
     worktree = ctx.obj.worktree
-    # --create: restrict to PROJECT NAME / NAME and branch on existence.
-    if worktree.target_path(args or []).exists():
+    # --create: restrict to PROJECT NAME / NAME (the NAME may not exist, so only
+    # its qualifier is located) and branch on existence.
+    args = _locate_parent_args(ctx, args or [], command="enter -c")
+    if worktree.target_path(args).exists():
         if branch is not None:
             warn(f"branch '{branch}' ignored: worktree already exists")
-        dest = worktree.enter(args or [], do_install=do_install, strict=strict)
+        dest = worktree.enter(args, do_install=do_install, strict=strict)
         emit_shell(cd=dest, env=worktree.env_for_dir(dest))
         return
 
     result = worktree.create(
-        args or [],
+        args,
         branch=branch,
         base=base,
         destdir=None,
@@ -1242,10 +1491,10 @@ def _enter_via_locator(
     """Resolve a locator and cd into the matched worktree/project/workspace.
 
     A DIR single arg or the no-arg cwd default keep the worktree path (they are
-    not names to resolve). Otherwise the tokens are resolved by tier cascade: one
-    match is entered with that tier's WTM_* contract, several print the qualified
-    ``wtm enter ...`` choices and exit non-zero. ``-b/--base`` are worktree-create
-    options and are rejected here (this path never creates).
+    not names to resolve). Otherwise the tokens are resolved by the unpinned tier
+    cascade -- ``enter`` is tier-polymorphic -- and entered with that tier's
+    WTM_* contract. ``-b/--base`` are worktree-create options and are rejected
+    here (this path never creates).
     """
     branch, base = opts
     if branch is not None:
@@ -1258,41 +1507,11 @@ def _enter_via_locator(
     if not args or (len(args) == 1 and looks_like_path(args[0])):
         dest = worktree.enter(args, do_install=do_install, strict=strict)
         emit_shell(cd=dest, env=worktree.env_for_dir(dest))
+
         return
 
-    resolution = locate(args, build_index(ctx.obj.config))
-    if isinstance(resolution, NotFound):
-        raise WtmError(f"no worktree, project, or workspace matches: {' '.join(args)}")
-    if isinstance(resolution, Ambiguous):
-        picked = _context_pick(ctx, resolution.candidates)
-        if picked is None:
-            raise WtmError(_ambiguous_message(args, resolution.candidates))
-        _enter_location(ctx, picked, do_install=do_install, strict=strict)
-        return
-
-    _enter_location(ctx, resolution.location, do_install=do_install, strict=strict)
-
-
-def _context_pick(ctx: typer.Context, candidates: list[Location]) -> Location | None:
-    """Collapse an ambiguous locator by the current context, or ``None`` if it can't.
-
-    The current context is the active workspace and, from the cwd, its project;
-    :func:`narrow_by_context` keeps the sole candidate they name (project first,
-    then workspace alone) so a unique in-context match enters silently instead of
-    erroring. A match never changes an already-unique resolution -- only the
-    ambiguous set is passed in -- so this can only turn a former error into a hit.
-    """
-    config = ctx.obj.config
-    workspace = config.active
-    project: str | None = None
-    if workspace is not None:
-        cwd = current_dir(resolve=False)
-        if cwd is not None:
-            project_dir = project_dir_for(config.workspaces[workspace].path, cwd)
-            if project_dir is not None:
-                project = project_dir.name
-
-    return narrow_by_context(candidates, workspace=workspace, project=project)
+    location = _locate_one(ctx, args, command="enter")
+    _enter_location(ctx, location, do_install=do_install, strict=strict)
 
 
 def _enter_location(
@@ -1325,46 +1544,63 @@ def _enter_location(
         )
 
 
-def _ambiguous_message(args: list[str], candidates: list[Location]) -> str:
-    """Render the ambiguity error: a header plus one copy-runnable command per candidate."""
-    tier = candidates[0].tier.value
-    lines = [f"'{' '.join(args)}' matches {len(candidates)} {tier}s:"]
-    lines.extend(f"  wtm enter {_qualified(candidate)}" for candidate in candidates)
-    lines.append("qualify it with a workspace and/or project to disambiguate")
-
-    return "\n".join(lines)
-
-
-def _qualified(location: Location) -> str:
-    """Return the fully-qualified positional form of a location (always portable)."""
-    if location.tier is Tier.WORKTREE:
-        return f"{location.workspace} {location.project} {location.name}"
-    if location.tier is Tier.PROJECT:
-        return f"{location.workspace} {location.project}"
-
-    return location.workspace
-
-
 def leave(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
-        help="Worktree target (default: cwd)",
-        autocompletion=_complete_target,
+        help="Locator: a name resolved across every workspace (worktree > project "
+        "> workspace), qualified by leading tokens, or a DIR",
+        autocompletion=_complete_locate,
     ),
     no_cd: bool = typer.Option(
         False, "-C", "--no-cd", help="don't cd out (just run leave hooks; stay in the worktree)"
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Run leave hooks for a worktree; cds out ($OLDPWD or project dir) unless -C.
+    """Run leave hooks for a worktree, project, or workspace; cds out unless -C.
 
-    Ends the shell session either way: the WTM_* contract is unset even with -C
-    (which only suppresses the cd-out, not the session teardown).
+    ``enter``'s inverse, and it takes the same locator, so a session entered by
+    name is left by that same name: the tier cascade picks what to tear down (a
+    worktree beats a project beats a workspace) and each tier's own leave runs,
+    cascading downward as it already does. A single DIR or no arg is the cwd
+    worktree, as before. Ends the shell session either way: the WTM_* contract is
+    unset even with -C (which only suppresses the cd-out, not the teardown).
     """
-    result = ctx.obj.worktree.leave(args or [], strict=strict)
-    emit_shell(cd=None if no_cd else result.cd_dir, env={})
+    args = args or []
+    # No args (cwd worktree) or a single DIR arg stay the classic worktree path.
+    if not args or (len(args) == 1 and looks_like_path(args[0])):
+        result = ctx.obj.worktree.leave(args, strict=strict)
+        emit_shell(cd=None if no_cd else result.cd_dir, env={})
+
+        return
+
+    _leave_location(ctx, _locate_one(ctx, args, command="leave"), no_cd=no_cd, strict=strict)
+
+
+def _leave_location(ctx: typer.Context, location: Location, *, no_cd: bool, strict: bool) -> None:
+    """Dispatch a resolved locator to its tier's leave -- the mirror of :func:`_enter_location`.
+
+    Each tier is torn down through its existing operation, so the cascades already
+    built into them (a project leave firing the worktree's leave first, a workspace
+    leave the whole chain) are inherited rather than restated. The worktree tier
+    goes through the fully-qualified triple, exactly as entering does.
+    """
+    if location.tier is Tier.WORKTREE:
+        triple = [location.workspace, location.project, location.name]
+        wt_result = ctx.obj.worktree.leave(triple, strict=strict)
+        emit_shell(cd=None if no_cd else wt_result.cd_dir, env={})
+
+        return
+
+    if location.tier is Tier.PROJECT:
+        result = ctx.obj.project.leave(location.workspace, location.project, strict=strict)
+        log(f"left project '{result.name}'")
+    else:
+        result = ctx.obj.workspaces.leave(location.workspace, strict=strict)
+        log(f"left workspace '{result.name}'")
+    cd_dir = result.cd_dir if (not no_cd and result.cd_dir is not None) else None
+    emit_shell(cd=cd_dir, env={}, fallback=False)
 
 
 def delete(
@@ -1434,13 +1670,14 @@ def list_(
     args: list[str] = typer.Argument(
         None,
         metavar="[[WORKSPACE] PROJECT]",
-        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
-        autocompletion=_complete_project,
+        help="Locator: a project name resolved across every workspace "
+        "(default: inferred from cwd)",
+        autocompletion=_complete_locate_project,
     ),
 ) -> None:
-    """List a project's worktrees (PROJECT explicit or inferred from cwd)."""
+    """List a project's worktrees (PROJECT resolved by locator, or inferred from cwd)."""
     config = ctx.obj.worktree.config
-    workspace, project = split_workspace_project(args or [])
+    workspace, project = _locate_project(ctx, args or [], command="list")
     worktrees_dir = resolve_project_dir(config, workspace, project) / "worktrees"
     rows: list[tuple[str, str]] = []
     for entry in ctx.obj.worktree.list(workspace, project, strict=True):
@@ -1461,23 +1698,27 @@ def resolve(
     args: list[str] = typer.Argument(
         None,
         metavar="[[[WORKSPACE] PROJECT] NAME]",
-        help="Target: NAME, PROJECT NAME, WORKSPACE PROJECT NAME, or none (the cwd worktree)",
-        autocompletion=_complete_target,
+        help="Target: NAME (its PROJECT qualifier resolved as a locator), or none "
+        "(the cwd worktree)",
+        autocompletion=_complete_locate_worktree,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the WTM_* contract for eval"),
 ) -> None:
     """Print a worktree's path (--env: emit WTM_* exports for eval).
 
     With an explicit target it prints the computed path without touching git, so
-    it works for not-yet-created targets; with no target it resolves the worktree
-    the cwd is in (inspecting git). With --env it always inspects git, so the
-    worktree must already exist.
+    it works for not-yet-created targets; the NAME is therefore literal and only
+    its leading PROJECT qualifier is resolved as a locator (an unknown PROJECT
+    falls back to path math against the active workspace). With no target it
+    resolves the worktree the cwd is in (inspecting git). With --env it always
+    inspects git, so the worktree must already exist.
     """
+    args = _locate_parent_args(ctx, args or [], command="resolve")
     if emit_env:
-        for key, value in ctx.obj.worktree.resolve_env(args or []).items():
+        for key, value in ctx.obj.worktree.resolve_env(args).items():
             print(emit_env_line(key, value))
     else:
-        print(ctx.obj.worktree.resolve_path(args or []))
+        print(ctx.obj.worktree.resolve_path(args))
 
 
 def set_(
@@ -1485,8 +1726,9 @@ def set_(
     args: list[str] = typer.Argument(
         None,
         metavar="[[[WORKSPACE] PROJECT] NAME]",
-        help="Target: NAME, PROJECT NAME, WORKSPACE PROJECT NAME, or none (the cwd worktree)",
-        autocompletion=_complete_target,
+        help="Target: NAME (its PROJECT qualifier resolved as a locator), a DIR, or "
+        "none (the cwd worktree)",
+        autocompletion=_complete_locate_worktree,
     ),
     description: str | None = typer.Option(
         None, "-d", "--description", help="Description (empty clears it)"
@@ -1503,9 +1745,12 @@ def set_(
 
     Writes at ``--scope`` (worktree/project/workspace/user/system); the default
     is the deepest scope whose directory exists. A field passed as ``""`` clears
-    it.
+    it. An annotation may precede the worktree, so the NAME is literal and only
+    its PROJECT qualifier is resolved as a locator.
     """
-    result = ctx.obj.worktree.set(args or [], description=description, scope=scope)
+    result = ctx.obj.worktree.set(
+        _locate_parent_args(ctx, args or [], command="set"), description=description, scope=scope
+    )
     log(f"updated worktree '{result.name}' [{result.scope.value}] ({result.address.file})")
 
 
@@ -2013,7 +2258,7 @@ def config_show(
 
     if show_origin or hooks:
         raise WtmError("--origin/--hooks apply to the default view, not a level dump")
-    tree = _config_show_tree(config, level, args)
+    tree = _config_show_tree(ctx, level, args)
     if as_json:
         print(config_tree_json(tree))
 
@@ -2041,8 +2286,15 @@ def _config_show_level(
     return chosen[0] if chosen else None
 
 
-def _config_show_tree(config: Config, level: str, args: list[str]) -> ConfigTree:
-    """Decode TARGET per *level* (via the target grammar) and resolve the subtree."""
+def _config_show_tree(ctx: typer.Context, level: str, args: list[str]) -> ConfigTree:
+    """Decode TARGET per *level* and resolve the subtree.
+
+    Each level keeps its own slice of the target grammar. The worktree level
+    additionally resolves its leading PROJECT qualifier as a locator (the dumped
+    NAME may be declared-but-absent, so the leaf stays literal), which is why this
+    takes the ``ctx`` rather than a bare :class:`Config`.
+    """
+    config = ctx.obj.config
     if level == "all":
         if args:
             raise WtmError("--all takes no TARGET")
@@ -2061,6 +2313,7 @@ def _config_show_tree(config: Config, level: str, args: list[str]) -> ConfigTree
         return config.resolve_tree("project", workspace=ws, project=proj)
 
     # worktree: [[WORKSPACE] PROJECT] NAME (cwd-inferred when no tokens)
+    args = _locate_parent_args(ctx, args, command="config show --worktree")
     ws, proj, name = split_target(args) if args else (None, None, None)
 
     return config.resolve_tree("worktree", workspace=ws, project=proj, name=name)

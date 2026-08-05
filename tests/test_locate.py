@@ -8,6 +8,7 @@ without spawning ``wtm``, touching git, or hitting the filesystem. A couple of
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,10 @@ INDEX = LocationIndex(
     workspaces=["oss", "work"],
     roots={"work": Path("/w"), "oss": Path("/o")},
 )
+
+# INDEX plus a project named after an existing worktree ('docs'), so a leaf-tier
+# pin has something to disagree with the cascade about.
+PIN_INDEX = replace(INDEX, projects=[*INDEX.projects, _pr("work", "docs")])
 
 
 # --- single token: leaf-tier cascade -----------------------------------------
@@ -138,6 +143,51 @@ def test_three_token_wrong_ancestor_not_found() -> None:
 def test_empty_tokens_rejected() -> None:
     with pytest.raises(ValueError, match="at least one token"):
         locate([], INDEX)
+
+
+# --- leaf-tier pin ------------------------------------------------------------
+
+
+def test_pinned_project_skips_a_same_named_worktree() -> None:
+    # 'docs' is a worktree (oss/wtm) and, in PIN_INDEX, also a project: unpinned
+    # the worktree tier wins, pinned to PROJECT the project does.
+    assert locate(["docs"], PIN_INDEX) == Resolved(_wt("oss", "wtm", "docs"))
+    assert locate(["docs"], PIN_INDEX, tier=Tier.PROJECT) == Resolved(_pr("work", "docs"))
+
+
+def test_pinned_worktree_skips_a_same_named_project() -> None:
+    # 'web' has no worktree of that name, so the cascade falls to the project
+    # tier; pinned to WORKTREE it is simply not found.
+    assert locate(["web"], INDEX) == Resolved(_pr("work", "web"))
+    assert locate(["web"], INDEX, tier=Tier.WORKTREE) == NotFound()
+
+
+def test_pinned_project_skips_a_same_named_workspace() -> None:
+    # 'oss' is a workspace only: the cascade reaches it, a PROJECT pin does not.
+    assert locate(["oss"], INDEX) == Resolved(Location(tier=Tier.WORKSPACE, workspace="oss"))
+    assert locate(["oss"], INDEX, tier=Tier.PROJECT) == NotFound()
+
+
+def test_pinned_tier_still_reports_its_own_ambiguity() -> None:
+    # A pin narrows which tier answers, never how a tie within it is reported.
+    result = locate(["api"], INDEX, tier=Tier.PROJECT)
+    assert isinstance(result, Ambiguous)
+    assert {c.workspace for c in result.candidates} == {"work", "oss"}
+
+
+def test_pinned_tier_honours_qualifiers() -> None:
+    assert locate(["work", "api"], INDEX, tier=Tier.PROJECT) == Resolved(_pr("work", "api"))
+    assert locate(["oss", "api"], INDEX, tier=Tier.PROJECT) == Resolved(_pr("oss", "api"))
+    assert locate(["work", "api", "hotfix"], INDEX, tier=Tier.WORKTREE) == Resolved(
+        _wt("work", "api", "hotfix")
+    )
+
+
+def test_pinned_workspace_rejects_qualifiers() -> None:
+    assert locate(["oss"], INDEX, tier=Tier.WORKSPACE) == Resolved(
+        Location(tier=Tier.WORKSPACE, workspace="oss")
+    )
+    assert locate(["work", "oss"], INDEX, tier=Tier.WORKSPACE) == NotFound()
 
 
 # --- narrow_by_context (caller-side ambiguity tiebreak) -----------------------

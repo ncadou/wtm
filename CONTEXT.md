@@ -31,7 +31,8 @@ _Avoid_: repo (ambiguous with the bare repo inside it)
 A working checkout under a project's `worktrees/`, on its own branch.
 
 **Target**:
-The worktree (or project) a command points at, named by the target grammar.
+The worktree (project, or workspace) a command points at, named by either the
+**Target grammar** or a **Locator**.
 _Avoid_: destination, path (too generic)
 
 **Target grammar**:
@@ -40,31 +41,88 @@ The decoding of a command's positionals into a target:
 leading `WORKSPACE` is optional and reachable only with the full triple; with
 fewer tokens the workspace falls back to the active one. `WORKSPACE`, `PROJECT`,
 and `NAME` share one flat namespace, so a 2-token target is always
-`PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`. Every
-target-taking command uses it *except* `enter`, which takes a **Locator**.
+`PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`. It decodes the
+tokens a **Locator** does not (see **Locator reach**): the whole target of the
+destructive verbs (`delete`, `rename`, `hook delete`), of `hook install` (which
+writes into a scope), and of the project-tier commands whose only qualifier is a
+workspace (`project new`/`clone`/`resolve`/`set`/`show`, `config show`'s
+workspace/project level dumps); and the trailing literal `NAME` of the
+**qualifier-only locator** commands, whose leading tokens a locator resolves.
 
-**Locator** (experiment):
-The sibling of the **Target grammar**, decoding `enter`'s positionals: a free,
-scope-inferring name query matched across *every* declared workspace, so the
-same token resolves from any active workspace (the shell-history-portability
-motive). Same output as a target (a worktree, project, or workspace); different
-input discipline. The last token is the leaf you land on, leading tokens are
-ancestor qualifiers in top-down order (levels may be skipped). Resolution is a
-**leaf-tier cascade**: try the deepest leaf tier first, falling back only on a
-miss -- worktree named the last token (ancestors matched as a project *or* a
-workspace), else project (a leading token its workspace), else workspace (single
-token only). One match resolves and is entered with that tier's contract,
-several are ambiguous (the qualified choices are printed, non-zero exit), none
-is not-found. Before reporting an ambiguity, `enter` applies a **current-context
-tiebreak** (`narrow_by_context`): the tied same-tier candidates are narrowed by
-the active workspace *and* its cwd-inferred project, relaxing to the workspace
-alone on a miss; a unique in-context match resolves silently, otherwise the tie
-stands and prints as before. The tiebreak only ever turns a former ambiguity
-error into a hit -- it never touches an already-unique resolution -- and the
-core cascade stays pure and global (it is a CLI-layer post-filter). Lives in
-`wtm.locate`: `locate` is the pure cascade over a `LocationIndex` snapshot,
-`build_index` the filesystem-bound (git-free) edge. Only `enter` consumes it
-today; the plumbing is command-agnostic.
+**Locator**:
+The sibling of the **Target grammar**, decoding the positionals of the
+existence-bound commands: a free, scope-inferring name query matched across
+*every* declared workspace, so the same token resolves from any active workspace
+(the shell-history-portability motive). Same output as a target (a worktree,
+project, or workspace); different input discipline. The last token is the leaf
+you land on, leading tokens are ancestor qualifiers in top-down order (levels may
+be skipped). Resolution is a **leaf-tier cascade**: try the deepest leaf tier
+first, falling back only on a miss -- worktree named the last token (ancestors
+matched as a project *or* a workspace), else project (a leading token its
+workspace), else workspace (single token only). One match resolves and is used
+with that tier's contract, several are ambiguous (the qualified choices are
+printed for the calling command, non-zero exit), none is not-found. Before
+reporting an ambiguity, a **current-context tiebreak** (`narrow_by_context`)
+applies: the tied same-tier candidates are narrowed by the active workspace *and*
+its cwd-inferred project, relaxing to the workspace alone on a miss; a unique
+in-context match resolves silently, otherwise the tie stands and prints as
+before. The tiebreak only ever turns a former ambiguity error into a hit -- it
+never touches an already-unique resolution -- and the core cascade stays pure and
+global (it is a CLI-layer post-filter). Lives in `wtm.locate`: `locate` is the
+pure cascade over a `LocationIndex` snapshot, `build_index` the filesystem-bound
+(git-free) edge. The CLI-side edge (`_locate_one` and its `_locate_project` /
+`_locate_worktree_args` / `_locate_parent_args` shapes) is command-agnostic and
+shared by every consumer.
+
+**Qualifier-only locator**:
+A **Locator** applied to a target's *leading* tokens alone, the trailing `NAME`
+staying literal (`_locate_parent_args`). The reach of the **absent-leaf**
+commands: `create`, `enter -c`, `resolve`, `worktree set`, and
+`config show --worktree` all name a worktree that need not exist, so the leaf is
+invisible to the index -- but its ancestors usually are, and locating just those
+buys the same global reach without pretending to see the leaf. The qualifiers go
+in as one PROJECT-pinned locator query, so `PROJECT` and `WORKSPACE PROJECT` both
+resolve through the ordinary cascade and the 3-token form keeps its meaning.
+Strictly additive: fewer than two tokens carry no qualifier (a `DIR`, a lone
+`NAME`, the cwd default) and pass through, and a qualifier matching *no* project
+anywhere is handed back literally -- so these commands still name a wholly absent
+target (`wtm resolve newproj newwt` stays pure path math). Only an *ambiguous*
+qualifier errors, its printed choices carrying the trailing `NAME` so each stays
+runnable as typed.
+
+**Leaf-tier pin**:
+A caller's declaration that it accepts one tier of leaf only
+(`locate(..., tier=...)`): the cascade is skipped and just that tier's matches
+count, so a project-level command never resolves a same-named worktree. The
+tier-polymorphic movers (`enter`/`leave`) run unpinned; `list` and
+`project enter`/`leave` pin PROJECT, `hook list` and `hook run` pin WORKTREE, and
+a **qualifier-only locator** always pins PROJECT (its leaf is the qualifier). A
+pin narrows *which tier answers*, never how an ambiguity within that tier is
+reported. In completion the pin drops only the tiers that can be neither the leaf
+nor an ancestor qualifier of it -- so a PROJECT pin hides worktree names but still
+offers workspaces (which qualify a project), and a WORKTREE pin hides nothing.
+
+**Locator reach**:
+Which commands may take a **Locator**, and how much of their target it decodes. A
+locator reaches *globally* and sees *only what exists on disk*, so how much of a
+target it can serve follows from what already exists. Three classes:
+
+- *Whole target*: the leaf itself exists, and reaching it is reversible --
+  `enter`, `leave`, `list`, `project enter`, `project leave`, `hook list`,
+  `hook run`.
+- *Qualifiers only*: the leaf is being named into existence but its ancestors are
+  not -- the **qualifier-only locator** commands (`create`, `enter -c`, `resolve`,
+  `worktree set`, `config show --worktree`).
+- *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays
+  *bounded by the cwd*, because reaching into another project or workspace
+  irreversibly must be spelled out positionally -- a bare `wtm delete main` can
+  never resolve into a workspace you are not standing in. The dividing line is
+  irreversibility, not mutation: `enter`, `hook run`, and `create` all mutate or
+  fire hooks and still reach globally. `hook install` also stays, writing into a
+  `--scope` rather than pointing at the worktree. And the project-tier commands
+  whose only qualifier is a workspace (`project new`/`clone`/`resolve`/`set`/
+  `show`, `config show --workspace`/`--project`) gain nothing, a workspace name
+  being an exact registry key already.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`
@@ -108,11 +166,15 @@ scopes with a workspace-only contract (`WTM_EVENT`, `WTM_WORKSPACE`,
 `WTM_WORKSPACE_DIR`) -- there is no worktree/project/branch. `leave` cascades the
 full teardown chain: standing inside a worktree of the target, it fires that
 worktree's `leave` first, then the containing project's `project-leave`, then
-`workspace-leave` (worktree->project->workspace teardown order).
+`workspace-leave` (worktree->project->workspace teardown order). Both verbs are
+also reachable through the tier-polymorphic `wtm enter`/`wtm leave`, whose
+unpinned **Locator** cascade dispatches a workspace-tier match here.
 
 **Project lifecycle**:
 `wtm project enter`/`leave` operate at project granularity, the middle tier
-between the workspace and worktree lifecycles. `enter` cds into the project dir
+between the workspace and worktree lifecycles. Both take a PROJECT-pinned
+**Locator** (see **Leaf-tier pin**), and both are also reachable through the
+unpinned `wtm enter`/`wtm leave` cascade. `enter` cds into the project dir
 (`<workspace>/<project>`, beside `.git`/`worktrees`) and fires `project-enter`;
 `leave` fires `project-leave` and cds out. These two events fire across the
 `system`/`user`/`workspace`/`project` scopes (never worktree -- there is no live

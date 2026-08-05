@@ -1,12 +1,14 @@
-"""The locator: resolve a free, scope-inferring name query to a target (experiment).
+"""The locator: resolve a free, scope-inferring name query to a target.
 
 A **locator** is the sibling of the count-based target grammar in :mod:`wtm.target`:
 same output (a worktree, a project, or a workspace), a different input discipline.
 Where the target grammar is positional and active-workspace-relative, a locator is
 name-based, scope-free, and global -- its tokens are matched against the name
 universe of *every* declared workspace, so the same token works from anywhere
-(the shell-history-portability motive). Only ``enter`` consumes it today; the
-plumbing is deliberately command-agnostic so the experiment can spread.
+(the shell-history-portability motive). It is consumed by the commands that point
+at an entity which must already *exist* and whose reach may safely be global;
+naming a not-yet-created entity, and every destructive verb, stays on the target
+grammar.
 
 The tree has three levels -- workspace -> project -> worktree (a worktree name is
 its ``worktrees/``-relative path, so nesting stays one name). A locator's tokens
@@ -18,6 +20,11 @@ try the deepest leaf tier first, fall back only when it yields nothing:
 1. leaf = worktree named ``tk``, ancestors matched as a project *or* a workspace;
 2. else leaf = project named ``tk``, a leading token matched as a workspace;
 3. else leaf = workspace named ``tk`` (only for a single token).
+
+A caller that accepts just one kind of target passes a **leaf-tier pin**
+(``locate(..., tier=...)``): the cascade is skipped and only that tier's matches
+count, so a project-only command never resolves a same-named worktree. The
+unpinned cascade is for the tier-polymorphic movers (``enter``/``leave``).
 
 Within the winning tier: one match resolves, several are ambiguous (the caller
 prints the qualified choices), none across all tiers is not-found. A caller with
@@ -59,6 +66,11 @@ class Tier(Enum):
     WORKTREE = "worktree"
     PROJECT = "project"
     WORKSPACE = "workspace"
+
+
+# The leaf-tier cascade order: deepest tier first, so a worktree named like a
+# project wins outright. A leaf-tier pin (locate's `tier=`) short-circuits this.
+_CASCADE = (Tier.WORKTREE, Tier.PROJECT, Tier.WORKSPACE)
 
 
 @dataclass(frozen=True)
@@ -116,11 +128,14 @@ class LocationIndex:
     roots: dict[str, Path] = field(default_factory=dict)
 
 
-def locate(tokens: list[str], index: LocationIndex) -> Resolution:
+def locate(tokens: list[str], index: LocationIndex, *, tier: Tier | None = None) -> Resolution:
     """Resolve a locator's *tokens* against *index* by leaf-tier cascade (pure).
 
     :param tokens: the free name query (at least one token; the last is the leaf).
     :param index: the enumerated tree snapshot.
+    :param tier: an optional **leaf-tier pin** -- when given, only that tier is
+        tried (a project-only command never resolves a same-named worktree);
+        ``None`` runs the full cascade.
     :returns: a :class:`Resolved`, :class:`Ambiguous`, or :class:`NotFound`.
 
     The leaf token is tried deepest-tier-first (worktree, then project, then --
@@ -134,23 +149,10 @@ def locate(tokens: list[str], index: LocationIndex) -> Resolution:
         raise ValueError("locate requires at least one token")
 
     *quals, leaf = tokens
-
-    worktree_hits = _worktree_matches(quals, leaf, index)
-    if worktree_hits:
-        return _finish(worktree_hits)
-
-    project_hits = _project_matches(quals, leaf, index)
-    if project_hits:
-        return _finish(project_hits)
-
-    if not quals:
-        workspace_hits = [
-            Location(tier=Tier.WORKSPACE, workspace=name)
-            for name in index.workspaces
-            if name == leaf
-        ]
-        if workspace_hits:
-            return _finish(workspace_hits)
+    for candidate in (tier,) if tier is not None else _CASCADE:
+        hits = _tier_matches(candidate, quals, leaf, index)
+        if hits:
+            return _finish(hits)
 
     return NotFound()
 
@@ -195,6 +197,20 @@ def narrow_by_context(
 # --- helpers -----------------------------------------------------------------
 
 
+def _tier_matches(tier: Tier, quals: list[str], leaf: str, index: LocationIndex) -> list[Location]:
+    """Matches for *leaf* at a single tier, its ancestors qualified by *quals*.
+
+    The one place a tier maps to its matcher, shared by the cascade and by a
+    pinned :func:`locate` call so both read the tree the same way.
+    """
+    if tier is Tier.WORKTREE:
+        return _worktree_matches(quals, leaf, index)
+    if tier is Tier.PROJECT:
+        return _project_matches(quals, leaf, index)
+
+    return _workspace_matches(quals, leaf, index)
+
+
 def _worktree_matches(quals: list[str], leaf: str, index: LocationIndex) -> list[Location]:
     """Worktrees named *leaf* whose ancestors match *quals* (project or workspace).
 
@@ -231,6 +247,16 @@ def _project_matches(quals: list[str], leaf: str, index: LocationIndex) -> list[
         proj
         for proj in index.projects
         if proj.project == leaf and (workspace is None or proj.workspace == workspace)
+    ]
+
+
+def _workspace_matches(quals: list[str], leaf: str, index: LocationIndex) -> list[Location]:
+    """The workspace named *leaf*; a workspace has no ancestor, so any qualifier misses."""
+    if quals:
+        return []
+
+    return [
+        Location(tier=Tier.WORKSPACE, workspace=name) for name in index.workspaces if name == leaf
     ]
 
 
