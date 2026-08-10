@@ -77,7 +77,7 @@ shared by every consumer.
 **Qualifier-only locator**:
 A **Locator** applied to a target's *leading* tokens alone, the trailing `NAME`
 staying literal (`_locate_parent_args`). The reach of the **absent-leaf**
-commands: `create`, `enter -c`, `resolve`, `worktree set`, and
+commands: `create`, `resolve`, `worktree set`, and
 `config show --worktree` all name a worktree that need not exist, so the leaf is
 invisible to the index -- but its ancestors usually are, and locating just those
 buys the same global reach without pretending to see the leaf. The qualifiers go
@@ -111,7 +111,7 @@ target it can serve follows from what already exists. Three classes:
   `enter`, `leave`, `list`, `project enter`, `project leave`, `hook list`,
   `hook run`.
 - *Qualifiers only*: the leaf is being named into existence but its ancestors are
-  not -- the **qualifier-only locator** commands (`create`, `enter -c`, `resolve`,
+  not -- the **qualifier-only locator** commands (`create`, `resolve`,
   `worktree set`, `config show --worktree`).
 - *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays
   *bounded by the cwd*, because reaching into another project or workspace

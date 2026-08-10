@@ -645,25 +645,6 @@ def test_create_workspace_qualified_still_exact(tmp_path: Path) -> None:
     assert not (beta / "shared" / "worktrees" / "feat").exists()
 
 
-def test_enter_create_cross_workspace_project(tmp_path: Path) -> None:
-    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
-    alpha, beta = roots
-    _seed_repo_at(alpha, "onlyproj")
-    shell = tmp_path / "shell"
-    res = _run_multi(
-        "enter",
-        "-c",
-        "onlyproj",
-        "feat",
-        config=config,
-        cwd=beta,
-        workspace="beta",
-        shell_file=shell,
-    )
-    assert res.returncode == 0, res.stderr
-    assert _shell_cd(shell) == str(alpha / "onlyproj" / "worktrees" / "feat")
-
-
 def test_resolve_cross_workspace_project(tmp_path: Path) -> None:
     config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
     alpha, beta = roots
@@ -1298,18 +1279,6 @@ def test_create_fetch_failure_aborts_without_residue(root: Path) -> None:
     assert not (root / "alpha" / "worktrees" / "feat").exists()
 
 
-def test_enter_create_fetch_forks_from_latest_origin(root: Path, tmp_path: Path) -> None:
-    # enter --create shares create's path, so -f fetches there too.
-    _seed_repo(root, "alpha")
-    _advance_origin(root, "alpha")
-    shell_file = tmp_path / "cd"
-    shell_file.touch()
-    res = run("enter", "-c", "-f", "alpha", "feat", root=root, shell_file=shell_file)
-    assert res.returncode == 0, res.stderr
-    assert "fetched origin" in res.stderr
-    assert (root / "alpha" / "worktrees" / "feat" / "later.txt").exists()
-
-
 def test_create_cd_emits_to_shell_file(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     shell_file = tmp_path / "cd"
@@ -1327,88 +1296,6 @@ def test_create_cd_emits_to_shell_file(root: Path, tmp_path: Path) -> None:
     assert exports["WTM_WORKSPACE_DIR"] == str(root)
     assert set(exports) == set(MANAGED_ENV_VARS)
     assert _shell_unsets(shell_file) == set()
-
-
-# --- enter --create ----------------------------------------------------------
-
-
-def test_enter_create_makes_worktree_when_absent(root: Path, tmp_path: Path) -> None:
-    _seed_repo(root, "alpha")
-    shell_file = tmp_path / "cd"
-    shell_file.touch()
-    wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", root=root, shell_file=shell_file)
-    assert res.returncode == 0, res.stderr
-    assert (wt / "file.txt").exists()
-    assert _shell_cd(shell_file) == str(wt)
-    branch = subprocess.run(
-        ["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert branch == "feat"
-
-
-def test_enter_create_enters_existing_idempotently(root: Path, tmp_path: Path) -> None:
-    _seed_repo(root, "alpha")
-    run("create", "alpha", "feat", root=root)
-    shell_file = tmp_path / "cd"
-    shell_file.touch()
-    wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", root=root, shell_file=shell_file)
-    assert res.returncode == 0, res.stderr
-    assert _shell_cd(shell_file) == str(wt)
-    # Existing path is silent: no create diagnostic.
-    assert "new branch" not in res.stderr
-    assert "existing local branch" not in res.stderr
-
-
-def test_enter_create_honors_branch_on_create(root: Path) -> None:
-    repo = _seed_repo(root, "alpha")
-    subprocess.run(["git", "-C", str(repo), "branch", "existing"], check=True)
-    res = run("enter", "alpha", "wt", "-c", "-b", "existing", root=root)
-    assert res.returncode == 0, res.stderr
-    assert "existing local branch 'existing'" in res.stderr
-
-
-def test_enter_branch_requires_create(root: Path) -> None:
-    _seed_repo(root, "alpha")
-    res = run("enter", "alpha", "feat", "-b", "foo", root=root)
-    assert res.returncode == 1
-    assert "requires --create" in res.stderr
-
-
-def test_enter_create_warns_branch_ignored_when_exists(root: Path, tmp_path: Path) -> None:
-    _seed_repo(root, "alpha")
-    run("create", "alpha", "feat", root=root)
-    shell_file = tmp_path / "cd"
-    shell_file.touch()
-    wt = root / "alpha" / "worktrees" / "feat"
-    res = run("enter", "alpha", "feat", "-c", "-b", "other", root=root, shell_file=shell_file)
-    assert res.returncode == 0, res.stderr
-    assert "ignored" in res.stderr
-    assert _shell_cd(shell_file) == str(wt)
-
-
-def test_enter_create_rejects_dir_target(root: Path) -> None:
-    res = run("enter", "./feat", "-c", root=root)
-    assert res.returncode == 1
-    assert "not a path" in res.stderr
-
-
-def test_enter_create_rejects_no_target(root: Path) -> None:
-    res = run("enter", "-c", root=root)
-    assert res.returncode == 1
-
-
-def test_enter_create_runs_install_hooks(root: Path, tmp_path: Path) -> None:
-    _seed_repo(root, "alpha")
-    hooks = tmp_path / "hooks"
-    out = tmp_path / "hook.out"
-    _write_hook(hooks / "wtm-install", f'echo "$WTM_EVENT" > "{out}"\n')
-    res = run("enter", "alpha", "feat", "-c", "-i", root=root, hooks_dir=hooks)
-    assert res.returncode == 0, res.stderr
-    assert out.read_text().strip() == "install"
 
 
 # --- enter as a locator (experiment) -----------------------------------------
@@ -3874,12 +3761,6 @@ def test_unresolvable_configured_base_errors(root: Path) -> None:
     assert res.returncode == 1
     assert "base ref does not exist" in res.stderr
 
-
-def test_base_flag_requires_create_on_enter(root: Path) -> None:
-    _seed_repo(root, "alpha")
-    res = run("enter", "alpha", "feat", "--base", "main", root=root)
-    assert res.returncode == 1
-    assert "--base/--off requires --create" in res.stderr
 
 
 def test_no_hooks_env_disables_firing(root: Path, tmp_path: Path) -> None:

@@ -101,7 +101,7 @@ qualifier is a WORKSPACE, an exact registry key, so a locator would add nothing.
 ## Worktrees (`wtm worktree …`, each also a top-level alias)
 ```
 create  [[WORKSPACE] PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
-enter   (LOCATOR | DIR) [-c] [-b BRANCH] [--base REF] [-i]                      cd into a worktree/project/workspace by name; -c creates a worktree first
+enter   (LOCATOR | DIR) [-i]                           cd into a worktree/project/workspace by name
 leave   (LOCATOR | DIR) [-C]                          run leave hooks for what the locator names; cds out unless -C (non-destructive)
 delete  (WORKSPACE PROJECT NAME | PROJECT NAME | DIR) [-f] [-D]   remove a worktree (-f force, -D delete branch too)
 rename  ([[WORKSPACE] PROJECT] [OLDNAME] | DIR) NEWNAME [-b]      rename/move a worktree; -b renames its branch too
@@ -110,7 +110,7 @@ resolve [[[WORKSPACE] PROJECT] NAME]                  print a worktree's path (n
 set     [[[WORKSPACE] PROJECT] NAME] [-d DESC]        annotate a worktree (subcommand only, no top-level alias)
 ```
 
-`create`, `enter -c`, `resolve`, and `worktree set` name a NAME that need not
+`create`, `resolve`, and `worktree set` name a NAME that need not
 exist, so they take a [qualifier-only locator](#qualifier-only-locator): the
 trailing NAME stays literal while its leading PROJECT is resolved globally.
 
@@ -192,7 +192,7 @@ answers*, never how an ambiguity within it is reported.
 
 ### Qualifier-only locator
 
-`create`, `enter -c`, `resolve`, `worktree set`, and `config show --worktree` all
+`create`, `resolve`, `worktree set`, and `config show --worktree` all
 name a worktree that need not exist, so the leaf is invisible to the index. They
 take a locator over the *leading* tokens only, keeping the trailing NAME literal —
 so `wtm create otherproj feat` creates in another workspace's project, and
@@ -246,16 +246,6 @@ configured/requested base is resolved as `origin/REF` then local `REF`; in a
 populated repo a base that resolves to nothing is a hard error. If the
 repository has no commits yet (e.g. a freshly-created project), the worktree is
 bootstrapped on a new orphan branch regardless of any configured base.
-
-### `enter -c` (idempotent enter)
-
-`enter -c` makes entering idempotent: if the target worktree is absent it is
-created first (with `create`'s branch resolution, `-b BRANCH` to override the
-branch), then entered; if it already exists `enter` just cds in. With `-c` the
-target is restricted to `[[WORKSPACE] PROJECT] NAME` (no `DIR`, no cwd default) —
-a [qualifier-only locator](#qualifier-only-locator), since the NAME may not exist
-yet — and `-b` outside `-c` (or when the worktree already exists) is
-rejected/ignored.
 
 ### `resolve` (read-only path query)
 

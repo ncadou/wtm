@@ -264,7 +264,7 @@ def _complete_project(ctx: typer.Context, incomplete: str) -> list[tuple[str, st
 
 
 def _complete_branch(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Complete -b/--branch for create/enter: the project's local + origin branches.
+    """Complete -b/--branch for create: the project's local + origin branches.
 
     The project is create's own: the ``[[WORKSPACE] PROJECT] NAME`` grammar puts
     PROJECT at ``args[1]`` when a WORKSPACE leads (three positionals) and at
@@ -616,7 +616,7 @@ def _complete_locate_hook_target(ctx: typer.Context, incomplete: str) -> list[tu
 # - Whole target (_locate_worktree_args / _locate_project): the leaf itself
 #   exists -- enter/leave, list, project enter/leave, hook list, hook run.
 # - Qualifiers only (_locate_parent_args): the leaf is being named into existence
-#   but its ancestors exist -- create, enter -c, resolve, worktree set,
+#   but its ancestors exist -- create, resolve, worktree set,
 #   config show --worktree. Global reach without pretending to see the leaf; a
 #   qualifier the index has never heard of falls back to the literal token, so
 #   these commands keep working for a wholly absent target.
@@ -687,7 +687,7 @@ def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) ->
     """Resolve a target's leading qualifiers by locator, keeping the last token literal.
 
     The **qualifier-only locator**: the absent-leaf commands (``create``,
-    ``enter -c``, ``resolve``, ``worktree set``, ``config show --worktree``) name a
+    ``resolve``, ``worktree set``, ``config show --worktree``) name a
     worktree that need not exist, so the leaf is not in the index -- but its
     ancestors usually are. Locating just the qualifiers buys those commands the
     same global reach as a full locator while leaving the leaf alone.
@@ -1406,30 +1406,7 @@ def enter(
         "> workspace), qualified by leading tokens, or a DIR",
         autocompletion=_complete_locate,
     ),
-    create: bool = typer.Option(
-        False, "-c", "--create", help="Create the worktree if it doesn't exist"
-    ),
-    branch: str | None = typer.Option(
-        None,
-        "-b",
-        "--branch",
-        help="Branch for --create (default: NAME)",
-        autocompletion=_complete_branch,
-    ),
-    base: str | None = typer.Option(
-        None,
-        "--base",
-        "--off",
-        help="Base ref a new branch forks from (with --create)",
-        autocompletion=_complete_branch,
-    ),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks first"),
-    do_fetch: bool = typer.Option(
-        False,
-        "-f",
-        "--fetch",
-        help="With --create, fetch origin first so a new branch forks from the latest",
-    ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
     """cd into a worktree, project, or workspace, resolved from a locator.
@@ -1439,45 +1416,10 @@ def enter(
     qualify it (``PROJECT NAME`` / ``WORKSPACE NAME`` / ``WORKSPACE PROJECT
     NAME``). Exactly one match is entered with that tier's WTM_* contract;
     several print the qualified choices and exit non-zero. ``leave`` undoes this
-    with the same locator. ``-c`` keeps the ``[[WORKSPACE] PROJECT] NAME`` create
-    grammar -- the NAME may not exist yet, so only its PROJECT qualifier is
-    located. A single DIR (``/``, ``./``, ``../``, ``.``/``..``) or no arg (the cwd
-    worktree) stays the worktree path, as before.
+    with the same locator. A single DIR (``/``, ``./``, ``../``, ``.``/``..``)
+    or no arg (the cwd worktree) stays the worktree path, as before.
     """
-    if not create:
-        _enter_via_locator(
-            ctx, args or [], do_install=do_install, strict=strict, opts=(branch, base)
-        )
-        return
-
-    worktree = ctx.obj.worktree
-    # --create: restrict to PROJECT NAME / NAME (the NAME may not exist, so only
-    # its qualifier is located) and branch on existence.
-    args = _locate_parent_args(ctx, args or [], command="enter -c")
-    if worktree.target_path(args).exists():
-        if branch is not None:
-            warn(f"branch '{branch}' ignored: worktree already exists")
-        dest = worktree.enter(args, do_install=do_install, strict=strict)
-        emit_shell(cd=dest, env=worktree.env_for_dir(dest))
-        return
-
-    result = worktree.create(
-        args,
-        branch=branch,
-        base=base,
-        destdir=None,
-        do_fetch=do_fetch,
-        do_install=do_install,
-        do_enter=True,
-        strict=strict,
-    )
-    if do_fetch and not result.fetched:
-        warn("no origin remote; skipped fetch")
-    elif result.fetched:
-        log("fetched origin")
-    log(_describe_create(result))
-    dest = result.context.dir
-    emit_shell(cd=dest, env=worktree.env_for_dir(dest))
+    _enter_via_locator(ctx, args or [], do_install=do_install, strict=strict)
 
 
 def _enter_via_locator(
@@ -1486,22 +1428,14 @@ def _enter_via_locator(
     *,
     do_install: bool,
     strict: bool,
-    opts: tuple[str | None, str | None],
 ) -> None:
     """Resolve a locator and cd into the matched worktree/project/workspace.
 
     A DIR single arg or the no-arg cwd default keep the worktree path (they are
     not names to resolve). Otherwise the tokens are resolved by the unpinned tier
     cascade -- ``enter`` is tier-polymorphic -- and entered with that tier's
-    WTM_* contract. ``-b/--base`` are worktree-create options and are rejected
-    here (this path never creates).
+    WTM_* contract.
     """
-    branch, base = opts
-    if branch is not None:
-        raise WtmError("-b/--branch requires --create")
-    if base is not None:
-        raise WtmError("--base/--off requires --create")
-
     worktree = ctx.obj.worktree
     # No args (cwd worktree) or a single DIR arg stay the classic worktree path.
     if not args or (len(args) == 1 and looks_like_path(args[0])):

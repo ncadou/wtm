@@ -491,7 +491,7 @@ class Worktree:
 
         The ``NAME_ONLY`` target mode: rejects ``DIR`` targets and the cwd
         default so only the create-style grammar is accepted. Shared by
-        :meth:`resolve_path` and the ``enter --create`` orchestration.
+        :meth:`resolve_path` and the ``create`` command.
         """
         return resolve_target(self.config, TargetMode.NAME_ONLY, args)
 

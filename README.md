@@ -149,11 +149,10 @@ wtm create -c api feature-login      # new branch 'feature-login', cd into it
 `origin/<name>` is tracked, otherwise a new branch is forked off the project's
 base. `-c` cds you in; add `-i` to run install hooks (dependency setup, etc.).
 
-**4. Work, then move on.** Switch tasks by entering another worktree — creating
-it on the fly if it doesn't exist yet:
+**4. Work, then move on.** Switch tasks by entering another worktree:
 
 ```sh
-wtm enter -c api hotfix              # jump to (or create) the 'hotfix' worktree
+wtm enter api hotfix               # jump to the 'hotfix' worktree
 wtm list api                        # what worktrees does 'api' have?
 ```
 
@@ -172,7 +171,7 @@ production bug lands. No stashing:
 ```sh
 wtm create -c api feature-billing    # working here...
 # ...bug report arrives...
-wtm enter -c api hotfix --off main   # fresh checkout off main, in its own dir
+wtm create -c api hotfix --off main  # fresh checkout off main, in its own dir
 # fix, commit, push
 wtm enter api feature-billing        # back to the feature, exactly as you left it
 ```
