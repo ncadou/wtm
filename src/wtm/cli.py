@@ -614,12 +614,12 @@ def _complete_locate_hook_target(ctx: typer.Context, incomplete: str) -> list[tu
 # how much of a command's target it can resolve depends on what already exists.
 #
 # - Whole target (_locate_worktree_args / _locate_project): the leaf itself
-#   exists -- enter/leave, list, project enter/leave, hook list, hook run.
+#   exists -- enter/leave, list, resolve, project enter/leave, hook list, hook run.
 # - Qualifiers only (_locate_parent_args): the leaf is being named into existence
-#   but its ancestors exist -- create, resolve, worktree set,
-#   config show --worktree. Global reach without pretending to see the leaf; a
-#   qualifier the index has never heard of falls back to the literal token, so
-#   these commands keep working for a wholly absent target.
+#   but its ancestors exist -- create, worktree set, config show --worktree.
+#   Global reach without pretending to see the leaf; a qualifier the index has
+#   never heard of falls back to the literal token, so these commands keep
+#   working for a wholly absent target.
 # - Neither: the destructive verbs (delete, rename, hook delete) stay bounded by
 #   the cwd, because irreversible reaching must be spelled out positionally; and
 #   the project-tier commands whose only qualifier is a WORKSPACE (project
@@ -687,10 +687,10 @@ def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) ->
     """Resolve a target's leading qualifiers by locator, keeping the last token literal.
 
     The **qualifier-only locator**: the absent-leaf commands (``create``,
-    ``resolve``, ``worktree set``, ``config show --worktree``) name a
-    worktree that need not exist, so the leaf is not in the index -- but its
-    ancestors usually are. Locating just the qualifiers buys those commands the
-    same global reach as a full locator while leaving the leaf alone.
+    ``worktree set``, ``config show --worktree``) name a worktree that need not
+    exist, so the leaf is not in the index -- but its ancestors usually are.
+    Locating just the qualifiers buys those commands the same global reach as a
+    full locator while leaving the leaf alone.
 
     The qualifiers go in as a whole project-pinned locator query, so a lone
     ``PROJECT`` and a ``WORKSPACE PROJECT`` pair both resolve through the ordinary
@@ -700,7 +700,7 @@ def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) ->
       against the cwd project, or the cwd default);
     - a qualifier matching *no* project anywhere is handed back untouched, because
       these commands are path math and legitimately name an absent project too
-      (``wtm resolve newproj newwt``). Only a name the index has never heard of
+      (``wtm create newproj newwt``). Only a name the index has never heard of
       falls through, so the literal reading is the sole possible one.
 
     An ambiguous qualifier still errors, its choices carrying *leaf* so each
@@ -1631,28 +1631,57 @@ def resolve(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[[WORKSPACE] PROJECT] NAME]",
-        help="Target: NAME (its PROJECT qualifier resolved as a locator), or none "
-        "(the cwd worktree)",
-        autocompletion=_complete_locate_worktree,
+        metavar="[[WORKSPACE] PROJECT] NAME",
+        help="Locator: a name resolved across every workspace (worktree > project "
+        "> workspace), or none (the cwd worktree)",
+        autocompletion=_complete_locate,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the WTM_* contract for eval"),
 ) -> None:
-    """Print a worktree's path (--env: emit WTM_* exports for eval).
+    """Print a worktree's, project's, or workspace's path (--env: emit WTM_* exports).
 
-    With an explicit target it prints the computed path without touching git, so
-    it works for not-yet-created targets; the NAME is therefore literal and only
-    its leading PROJECT qualifier is resolved as a locator (an unknown PROJECT
-    falls back to path math against the active workspace). With no target it
-    resolves the worktree the cwd is in (inspecting git). With --env it always
-    inspects git, so the worktree must already exist.
+    A read-only twin of ``enter``: the same unpinned tier cascade (worktree >
+    project > workspace) resolves the target, and the resolved tier's path is
+    printed. With no target it resolves the worktree the cwd is in (inspecting
+    git). With --env it emits that tier's WTM_* contract for eval -- the
+    worktree contract inspects git, the project and workspace contracts are
+    pure path math (no WTM_WORKTREE_DIR / WTM_BRANCH).
     """
-    args = _locate_parent_args(ctx, args or [], command="resolve")
-    if emit_env:
-        for key, value in ctx.obj.worktree.resolve_env(args).items():
+    worktree = ctx.obj.worktree
+    args = args or []
+    # No args: the cwd worktree (git inspection), as before.
+    if not args:
+        if emit_env:
+            for key, value in worktree.resolve_env([]).items():
+                print(emit_env_line(key, value))
+        else:
+            print(worktree.resolve_path([]))
+
+        return
+
+    if looks_like_path(args[0]) and len(args) == 1:
+        raise WtmError(f"takes a NAME, not a path: {args[0]}")
+
+    location = _locate_one(ctx, args, command="resolve")
+    if location.tier is Tier.WORKTREE:
+        index = build_index(ctx.obj.config)
+        dest = index.roots[location.workspace] / location.project / "worktrees" / location.name
+        env = worktree.env_for_dir(dest) if emit_env else None
+    elif location.tier is Tier.PROJECT:
+        dest = ctx.obj.project.resolve_path(location.workspace, location.project)
+        if emit_env:
+            env = ctx.obj.project.resolve_env(location.workspace, location.project)
+        else:
+            env = None
+    else:
+        ws = ctx.obj.config.workspaces[location.workspace]
+        dest = ws.path
+        env = {"WTM_WORKSPACE": ws.name, "WTM_WORKSPACE_DIR": str(ws.path)} if emit_env else None
+    if env is not None:
+        for key, value in env.items():
             print(emit_env_line(key, value))
     else:
-        print(ctx.obj.worktree.resolve_path(args))
+        print(dest)
 
 
 def set_(

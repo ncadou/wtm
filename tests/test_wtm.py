@@ -649,20 +649,21 @@ def test_resolve_cross_workspace_project(tmp_path: Path) -> None:
     config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
     alpha, beta = roots
     _seed_repo_at(alpha, "onlyproj")
+    _run_multi("create", "onlyproj", "newwt", config=config, cwd=beta, workspace="beta")
     res = _run_multi("resolve", "onlyproj", "newwt", config=config, cwd=beta, workspace="beta")
     assert res.returncode == 0, res.stderr
-    # The worktree need not exist -- only the qualifier was located.
     assert res.stdout.strip() == str(alpha / "onlyproj" / "worktrees" / "newwt")
 
 
-def test_resolve_unknown_qualifier_falls_back_to_the_literal_token(tmp_path: Path) -> None:
-    # No workspace holds a project called 'ghost', so the literal reading is the
-    # only possible one: resolve stays pure path math against the active root.
+def test_resolve_nonexistent_cross_workspace_errors(tmp_path: Path) -> None:
+    # The full locator requires the target to exist; a nonexistent project
+    # or worktree is an error, not path math.
     config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
     alpha, _ = roots
+    _seed_repo_at(alpha, "onlyproj")
     res = _run_multi("resolve", "ghost", "newwt", config=config, cwd=alpha, workspace="alpha")
-    assert res.returncode == 0, res.stderr
-    assert res.stdout.strip() == str(alpha / "ghost" / "worktrees" / "newwt")
+    assert res.returncode == 1
+    assert "no worktree, project, or workspace matches" in res.stderr
 
 
 def test_set_cross_workspace_project(tmp_path: Path) -> None:
@@ -1427,10 +1428,19 @@ def test_enter_ambiguous_still_errors_out_of_context(root: Path) -> None:
 # --- resolve -----------------------------------------------------------------
 
 
-def test_resolve_prints_path_without_git(root: Path) -> None:
+def test_resolve_prints_path(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
     res = run("resolve", "alpha", "feat", root=root)
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(root / "alpha" / "worktrees" / "feat")
+
+
+def test_resolve_nonexistent_worktree_errors(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("resolve", "alpha", "nowt", root=root)
+    assert res.returncode == 1
+    assert "no worktree, project, or workspace matches" in res.stderr
 
 
 def test_resolve_rejects_path(root: Path) -> None:
@@ -1498,6 +1508,48 @@ def test_resolve_no_arg_env_emits_full_contract(root: Path) -> None:
     assert any(line.startswith("export WTM_WORKTREE_DIR='") for line in lines)
     assert any(line.startswith("export WTM_BRANCH='feat'") for line in lines)
     assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+
+
+def test_resolve_single_name_resolves_project(root: Path) -> None:
+    # No worktree named 'alpha' -> the project tier wins (project path).
+    _seed_repo(root, "alpha")
+    res = run("resolve", "alpha", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha")
+
+
+def test_resolve_single_name_resolves_project_env(root: Path) -> None:
+    # The project tier's --env emits the project-level contract (no
+    # WTM_WORKTREE_DIR / WTM_BRANCH), by path math.
+    _seed_repo(root, "alpha")
+    res = run("resolve", "alpha", "--env", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+    assert any(line.startswith("export WTM_PROJECT_DIR='") for line in lines)
+    assert not any("WTM_WORKTREE_DIR" in line for line in lines)
+    assert not any("WTM_BRANCH" in line for line in lines)
+
+
+def test_resolve_workspace_tier_cross_workspace(tmp_path: Path) -> None:
+    # Neither a worktree nor a project named 'alpha' -> the workspace tier.
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    res = _run_multi("resolve", "alpha", config=config, cwd=beta, workspace="beta")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(alpha)
+
+
+def test_resolve_workspace_tier_env(tmp_path: Path) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    res = _run_multi("resolve", "alpha", "--env", config=config, cwd=beta, workspace="beta")
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_WORKSPACE='alpha'") for line in lines)
+    assert any(line.startswith("export WTM_WORKSPACE_DIR='") for line in lines)
+    assert not any("WTM_PROJECT" in line for line in lines)
+    assert not any("WTM_WORKTREE_DIR" in line for line in lines)
 
 
 # --- project resolve ---------------------------------------------------------
@@ -3030,6 +3082,8 @@ def test_worktree_list_matches_alias(root: Path) -> None:
 
 
 def test_worktree_resolve_prints_path(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
     res = run("worktree", "resolve", "alpha", "feat", root=root)
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(root / "alpha" / "worktrees" / "feat")
@@ -3760,7 +3814,6 @@ def test_unresolvable_configured_base_errors(root: Path) -> None:
     res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
     assert res.returncode == 1
     assert "base ref does not exist" in res.stderr
-
 
 
 def test_no_hooks_env_disables_firing(root: Path, tmp_path: Path) -> None:

@@ -106,13 +106,13 @@ leave   (LOCATOR | DIR) [-C]                          run leave hooks for what t
 delete  (WORKSPACE PROJECT NAME | PROJECT NAME | DIR) [-f] [-D]   remove a worktree (-f force, -D delete branch too)
 rename  ([[WORKSPACE] PROJECT] [OLDNAME] | DIR) NEWNAME [-b]      rename/move a worktree; -b renames its branch too
 list    [[WORKSPACE] PROJECT]                         list a project's worktrees (project-pinned locator; inferred from cwd if omitted)
-resolve [[[WORKSPACE] PROJECT] NAME]                  print a worktree's path (no arg: the cwd worktree; --env: emit WTM_* for eval)
+resolve (LOCATOR) [-e|--env]                       print a worktree's/project's/workspace's path (unpinned locator; no arg: the cwd worktree; --env: emit that tier's WTM_* for eval)
 set     [[[WORKSPACE] PROJECT] NAME] [-d DESC]        annotate a worktree (subcommand only, no top-level alias)
 ```
 
-`create`, `resolve`, and `worktree set` name a NAME that need not
-exist, so they take a [qualifier-only locator](#qualifier-only-locator): the
-trailing NAME stays literal while its leading PROJECT is resolved globally.
+`create` and `worktree set` name a NAME that need not exist, so they take a
+[qualifier-only locator](#qualifier-only-locator): the trailing NAME stays
+literal while its leading PROJECT is resolved globally.
 
 ## Config (`wtm config …`)
 
@@ -158,13 +158,13 @@ take a **locator** instead, and those that invent only the trailing NAME take a
 
 ## The locator
 
-`enter`, `leave`, `list`, `project enter`, `project leave`, `hook list`, and
-`hook run` resolve their positionals as a **locator**: a free, scope-inferring
-name query matched across *every* declared workspace, so the same token works no
-matter which workspace is active (a recalled `wtm enter mywt` finds its worktree
-from anywhere). The last token is the entity you land on; leading tokens are
-ancestor qualifiers in top-down order. Resolution is a leaf-tier cascade — try the
-deepest tier first, fall back only on a miss:
+`enter`, `leave`, `list`, `resolve`, `project enter`, `project leave`,
+`hook list`, and `hook run` resolve their positionals as a **locator**: a free,
+scope-inferring name query matched across *every* declared workspace, so the same
+token works no matter which workspace is active (a recalled `wtm enter mywt`
+finds its worktree from anywhere). The last token is the entity you land on;
+leading tokens are ancestor qualifiers in top-down order. Resolution is a
+leaf-tier cascade — try the deepest tier first, fall back only on a miss:
 
 - worktree named the last token (ancestors matched as a project *or* a
   workspace); else
@@ -183,29 +183,30 @@ with each candidate's location context.
 
 ### Leaf-tier pin
 
-`enter` and `leave` are tier-polymorphic and run the full cascade. The others
+`enter`, `leave`, and `resolve` are tier-polymorphic and run the full cascade. The others
 accept one kind of target only, so they **pin** the leaf tier: `list`,
 `project enter`, and `project leave` pin it to a project (a same-named worktree is
 never resolved, and completion offers projects rather than every name in the
-tree); `hook list` and `hook run` pin it to a worktree. A pin narrows *which tier
-answers*, never how an ambiguity within it is reported.
+tree); `hook list` and `hook run` pin it to a worktree. A pin narrows
+*which tier answers*, never how an ambiguity within it is reported.
 
 ### Qualifier-only locator
 
-`create`, `resolve`, `worktree set`, and `config show --worktree` all
+`create`, `worktree set`, and `config show --worktree` all
 name a worktree that need not exist, so the leaf is invisible to the index. They
 take a locator over the *leading* tokens only, keeping the trailing NAME literal —
 so `wtm create otherproj feat` creates in another workspace's project, and
-`wtm resolve otherproj newwt` prints its path, with no workspace spelled out. The
-qualifiers go in as one project-pinned query, so `PROJECT` and `WORKSPACE PROJECT`
-both resolve through the ordinary cascade and the 3-token form keeps its meaning.
+`wtm create otherproj newwt` creates in another workspace's project, with no
+workspace spelled out. The qualifiers go in as one project-pinned query, so
+`PROJECT` and `WORKSPACE PROJECT` both resolve through the ordinary cascade and
+the 3-token form keeps its meaning.
 
 It is strictly additive — no invocation that worked before changes meaning:
 
 - fewer than two positionals carry no qualifier at all (a `DIR`, a lone NAME
   against the cwd project, or the cwd default) and pass straight through;
 - a qualifier that names **no** project in any workspace is taken literally, so
-  these commands still name a wholly absent target (`wtm resolve newproj newwt`
+  these commands still name a wholly absent target (`wtm create newproj newwt`
   stays pure path math).
 
 Only an *ambiguous* qualifier errors; its printed choices carry the trailing NAME,
@@ -249,19 +250,18 @@ bootstrapped on a new orphan branch regardless of any configured base.
 
 ### `resolve` (read-only path query)
 
-`resolve` is a read-only path query. Given `[[WORKSPACE] PROJECT] NAME` (no
-`DIR`) it prints the computed worktree path without touching git, so it works
-for not-yet-created targets — handy for `cd "$(wtm resolve PROJECT NAME)"`. The
-NAME is literal and its leading PROJECT is a
-[qualifier-only locator](#qualifier-only-locator), so `wtm resolve otherproj wt`
-reaches another workspace while an unknown PROJECT still resolves by path math.
-Given no
-argument it resolves the worktree you are standing in (inspecting git for its
+`resolve` is the read-only twin of `enter`: the same unpinned [locator](#the-locator)
+cascade (worktree > project > workspace) resolves the target, and the resolved
+tier's path is printed. Given `[[WORKSPACE] PROJECT] NAME` (no `DIR`) it prints
+the worktree's, project's, or workspace's directory — `wtm resolve otherproj
+feat` reaches another workspace's worktree, `wtm resolve sds` a project. Given
+no argument it resolves the worktree you are standing in (inspecting git for its
 toplevel), so a bare `wtm resolve` prints the current worktree's root; run
-outside any worktree it errors, asking for a NAME. With `--env` it instead emits
-the `WTM_*` contract as `export KEY='value'` lines for
-`eval "$(wtm resolve --env …)"`; that mode always inspects git, so the worktree
-must already exist.
+outside any worktree it errors, asking for a NAME. With `--env` it emits that
+tier's `WTM_*` contract as `export KEY='value'` lines for
+`eval "$(wtm resolve --env …)"` — the worktree contract inspects git, the
+project and workspace contracts are pure path math (no
+`WTM_WORKTREE_DIR` / `WTM_BRANCH`).
 
 ### `rename` (right-to-left positionals)
 

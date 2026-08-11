@@ -77,16 +77,16 @@ shared by every consumer.
 **Qualifier-only locator**:
 A **Locator** applied to a target's *leading* tokens alone, the trailing `NAME`
 staying literal (`_locate_parent_args`). The reach of the **absent-leaf**
-commands: `create`, `resolve`, `worktree set`, and
-`config show --worktree` all name a worktree that need not exist, so the leaf is
-invisible to the index -- but its ancestors usually are, and locating just those
-buys the same global reach without pretending to see the leaf. The qualifiers go
-in as one PROJECT-pinned locator query, so `PROJECT` and `WORKSPACE PROJECT` both
-resolve through the ordinary cascade and the 3-token form keeps its meaning.
+commands: `create`, `worktree set`, and `config show --worktree` all name a
+worktree that need not exist, so the leaf is invisible to the index -- but its
+ancestors usually are, and locating just those buys the same global reach without
+pretending to see the leaf. The qualifiers go in as one PROJECT-pinned locator
+query, so `PROJECT` and `WORKSPACE PROJECT` both resolve through the ordinary
+cascade and the 3-token form keeps its meaning.
 Strictly additive: fewer than two tokens carry no qualifier (a `DIR`, a lone
 `NAME`, the cwd default) and pass through, and a qualifier matching *no* project
 anywhere is handed back literally -- so these commands still name a wholly absent
-target (`wtm resolve newproj newwt` stays pure path math). Only an *ambiguous*
+target (`wtm create newproj newwt` stays pure path math). Only an *ambiguous*
 qualifier errors, its printed choices carrying the trailing `NAME` so each stays
 runnable as typed.
 
@@ -94,9 +94,10 @@ runnable as typed.
 A caller's declaration that it accepts one tier of leaf only
 (`locate(..., tier=...)`): the cascade is skipped and just that tier's matches
 count, so a project-level command never resolves a same-named worktree. The
-tier-polymorphic movers (`enter`/`leave`) run unpinned; `list` and
-`project enter`/`leave` pin PROJECT, `hook list` and `hook run` pin WORKTREE, and
-a **qualifier-only locator** always pins PROJECT (its leaf is the qualifier). A
+tier-polymorphic movers (`enter`/`leave`/`resolve`) run unpinned; `list` and
+`project enter`/`leave` pin PROJECT, `hook list` and `hook run` pin
+WORKTREE, and a **qualifier-only locator** always pins PROJECT (its leaf is the
+qualifier). A
 pin narrows *which tier answers*, never how an ambiguity within that tier is
 reported. In completion the pin drops only the tiers that can be neither the leaf
 nor an ancestor qualifier of it -- so a PROJECT pin hides worktree names but still
@@ -108,11 +109,11 @@ locator reaches *globally* and sees *only what exists on disk*, so how much of a
 target it can serve follows from what already exists. Three classes:
 
 - *Whole target*: the leaf itself exists, and reaching it is reversible --
-  `enter`, `leave`, `list`, `project enter`, `project leave`, `hook list`,
-  `hook run`.
+  `enter`, `leave`, `list`, `resolve`, `project enter`, `project leave`,
+  `hook list`, `hook run`.
 - *Qualifiers only*: the leaf is being named into existence but its ancestors are
-  not -- the **qualifier-only locator** commands (`create`, `resolve`,
-  `worktree set`, `config show --worktree`).
+  not -- the **qualifier-only locator** commands (`create`, `worktree set`,
+  `config show --worktree`).
 - *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays
   *bounded by the cwd*, because reaching into another project or workspace
   irreversibly must be spelled out positionally -- a bare `wtm delete main` can
