@@ -38,17 +38,19 @@ def _config_key_items(
 
     The target-parameterized core of the KEY completion: every non-``(unset)``
     key (entity-local arbitrary keys unioned with inheritable keys set on an
-    ancestor), each labelled by its definition level -- the same
-    ``tier``/``scope`` ``config get --origin`` prints. With *array* (``-a``),
-    ``inheritable`` (the opt-in allowlist) is offered too, labelled
-    ``allowlist``. Lenient; sorted by key.
+    ancestor), each labelled ``config in <level>`` (its ``tier``/``scope``, the
+    same definition level ``config get --origin`` prints) -- prefixed to avoid
+    colliding with the locator kind labels (``workspace``/``project``/...
+    ``in <context>``) that share this completion's label column. With *array*
+    (``-a``), ``inheritable`` (the opt-in allowlist) is offered too, labelled
+    ``allowlist`` (a role, not a provenance tier). Lenient; sorted by key.
     """
     try:
         keys = config.effective_keys(target)
     except Exception:
         return []
     items: dict[str, str] = {
-        key: _rung_label(rung) for key, rung in keys if key.startswith(incomplete)
+        key: f"config in {_rung_label(rung)}" for key, rung in keys if key.startswith(incomplete)
     }
     if array and "inheritable".startswith(incomplete):
         items["inheritable"] = "allowlist"

@@ -1166,15 +1166,18 @@ def test_complete_config_key_effective_set(root: Path, monkeypatch: pytest.Monke
 
     items = dict(_complete_config_key(_C(), ""))
     # base_branch inherits from the workspace tier; owner + labels are project-local.
-    assert items["base_branch"] == "workspace"
-    assert items["owner"] == "project"
-    assert items["labels"] == "project"
+    # Key provenance labels are prefixed ``config in <level>`` to avoid colliding
+    # with the locator kind labels (``workspace``/``project``/...) they share a
+    # column with in the union completion.
+    assert items["base_branch"] == "config in workspace"
+    assert items["owner"] == "config in project"
+    assert items["labels"] == "config in project"
     # Reserved keys never appear (they own typed surfaces, not the generic get).
     assert "path" not in items
     assert "projects" not in items
     assert "inheritable" not in items
     # Prefix filter.
-    assert dict(_complete_config_key(_C(), "la")) == {"labels": "project"}
+    assert dict(_complete_config_key(_C(), "la")) == {"labels": "config in project"}
 
 
 def test_complete_config_subkey_table_cells(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1218,9 +1221,10 @@ def test_config_get_key_completion_labels_zsh(root: Path) -> None:
     proj_dir = _seed_config_keys(root, "alpha")
     out = _complete_zsh(root, args="wtm config get ", cwd=proj_dir)
     # zsh renders (value, help) as "value":"help"; the definition-tier label
-    # surfaces (base_branch from workspace, owner from project).
-    assert '"base_branch":"workspace"' in out
-    assert '"owner":"project"' in out
+    # surfaces (base_branch from workspace, owner from project), prefixed
+    # ``config in <level>`` to avoid colliding with locator kind labels.
+    assert '"base_branch":"config in workspace"' in out
+    assert '"owner":"config in project"' in out
 
 
 # --- config set/unset/show/scope completion ---------------------------------
@@ -1249,10 +1253,10 @@ def test_complete_config_set_key_effective(root: Path, monkeypatch: pytest.Monke
     from wtm.cli.completions.config import _complete_config_set
 
     items = dict(_complete_config_set(_ConfigCtx(), ""))
-    assert items["owner"] == "project"
-    assert items["labels"] == "project"
-    assert items["ports"] == "project"
-    assert items["base_branch"] == "workspace"
+    assert items["owner"] == "config in project"
+    assert items["labels"] == "config in project"
+    assert items["ports"] == "config in project"
+    assert items["base_branch"] == "config in workspace"
     # No -a: inheritable is reserved, not offered.
     assert "inheritable" not in items
 
@@ -1269,7 +1273,7 @@ def test_complete_config_set_key_includes_inheritable_with_a(
     items = dict(_complete_config_set(_ConfigCtx(array=True), ""))
     # With -a, the one reserved array a user may mutate is offered.
     assert items["inheritable"] == "allowlist"
-    assert items["ports"] == "project"
+    assert items["ports"] == "config in project"
 
 
 def test_complete_config_set_subkey_for_table(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1304,7 +1308,7 @@ def test_complete_config_unset_key_effective(root: Path, monkeypatch: pytest.Mon
     from wtm.cli.completions.config import _complete_config_unset
 
     items = dict(_complete_config_unset(_ConfigCtx(), ""))
-    assert items["owner"] == "project"
+    assert items["owner"] == "config in project"
     assert "inheritable" not in items
 
 
