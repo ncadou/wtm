@@ -934,6 +934,32 @@ class Config:
 
         return self._workspace_generic_target(ws)
 
+    def resolve_generic_target_for(
+        self, workspace: str, project: str | None = None, name: str | None = None
+    ) -> GenericTarget:
+        """Resolve a :class:`GenericTarget` from explicit entity names (locator-driven).
+
+        The locator-driven counterpart to :meth:`resolve_generic_target`:
+        instead of inferring the entity from a cwd, the entity is named
+        explicitly by its workspace/project/worktree names -- as resolved by
+        the locator cascade. Dispatches to the same per-tier helpers as the
+        cwd path, so the resulting :class:`GenericTarget` is interchangeable.
+
+        :param workspace: the declared workspace name (always required).
+        :param project: the project name (required for a worktree target).
+        :param name: the worktree name (set only for a worktree target).
+        """
+        ws = self.workspaces[workspace]
+        if name is not None:
+            if project is None:
+                raise WtmError("a worktree target requires a project")
+
+            return self._worktree_generic_target(ws, ws.path / project, name)
+        if project is not None:
+            return self._project_generic_target(ws, ws.path / project)
+
+        return self._workspace_generic_target(ws)
+
     def _cwd_worktree_name(self, project_dir: Path, cwd: Path) -> str | None:
         """Return the worktree name if *cwd* sits inside one under *project_dir*."""
         worktrees_dir = project_dir / "worktrees"

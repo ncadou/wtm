@@ -5426,3 +5426,480 @@ def test_workspace_leave_full_chain_worktree_project_workspace(root: Path, tmp_p
     # Full inside-out chain: worktree -> project -> workspace.
     assert order.read_text().splitlines() == ["wt:feat", "proj:alpha", "ws:ws"]
     assert _shell_cd(shell_file) == str(root.parent)
+
+
+# --- config locator: set/get/unset via locator prefix ----------------------
+
+
+def test_config_set_via_locator_cross_workspace(tmp_path: Path) -> None:
+    """config set with a locator prefix writes to the named entity, not cwd."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    # Standing in beta, set a key on alpha/proj via locator.
+    res = _run_multi(
+        "config",
+        "set",
+        "alpha",
+        "proj",
+        "editor",
+        "nvim",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert (alpha / "proj" / ".wtm" / "config.toml").exists()
+    text = (alpha / "proj" / ".wtm" / "config.toml").read_text()
+    assert 'editor = "nvim"' in text
+
+
+def test_config_get_via_locator_cross_workspace(tmp_path: Path) -> None:
+    """config get with a locator prefix reads from the named entity."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    # Set a key on alpha/proj, then read it from beta.
+    _run_multi(
+        "config",
+        "set",
+        "alpha",
+        "proj",
+        "editor",
+        "nvim",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    res = _run_multi(
+        "config",
+        "get",
+        "alpha",
+        "proj",
+        "editor",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "nvim"
+
+
+def test_config_unset_via_locator_cross_workspace(tmp_path: Path) -> None:
+    """config unset with a locator prefix removes from the named entity."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi(
+        "config",
+        "set",
+        "alpha",
+        "proj",
+        "editor",
+        "nvim",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    assert (alpha / "proj" / ".wtm" / "config.toml").exists()
+    # Unset from beta via locator.
+    res = _run_multi(
+        "config",
+        "unset",
+        "alpha",
+        "proj",
+        "editor",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    text = (alpha / "proj" / ".wtm" / "config.toml").read_text()
+    assert "editor" not in text
+
+
+def test_config_set_locator_worktree_tier(tmp_path: Path) -> None:
+    """config set via a worktree-tier locator writes to the worktree's config."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi("create", "proj", "feat", config=config, cwd=alpha, workspace="alpha")
+    # From beta, set a key on alpha/proj/feat via the worktree name.
+    res = _run_multi(
+        "config",
+        "set",
+        "feat",
+        "editor",
+        "vim",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    wt_config = alpha / "proj" / "worktrees" / "feat" / ".wtm" / "config.toml"
+    assert wt_config.exists()
+    assert 'editor = "vim"' in wt_config.read_text()
+
+
+def test_config_get_locator_worktree_tier(tmp_path: Path) -> None:
+    """config get via a worktree name resolves across workspaces."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi("create", "proj", "feat", config=config, cwd=alpha, workspace="alpha")
+    _run_multi(
+        "config",
+        "set",
+        "feat",
+        "editor",
+        "vim",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    res = _run_multi(
+        "config",
+        "get",
+        "feat",
+        "editor",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "vim"
+
+
+def test_config_get_data_type_table_wins(tmp_path: Path) -> None:
+    """config get A B where A is a table on cwd: SUBKEY reading (backward compat)."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    alpha = roots[0]
+    _seed_repo_at(alpha, "proj")
+    # Set a table key on the project.
+    proj_config = alpha / "proj" / ".wtm"
+    proj_config.mkdir(parents=True, exist_ok=True)
+    (proj_config / "config.toml").write_text('[labels]\nenv = "prod"\ntier = "web"\n')
+    # config get labels env → table cells (backward compat, no locator).
+    res = _run_multi(
+        "config",
+        "get",
+        "labels",
+        "env",
+        config=config,
+        cwd=alpha / "proj",
+        workspace="alpha",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prod"
+
+
+def test_config_get_data_type_non_table_uses_locator(tmp_path: Path) -> None:
+    """config get A B where A is a scalar on cwd but a valid locator: LOCATOR+KEY."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    alpha = roots[0]
+    _seed_repo_at(alpha, "proj")
+    _seed_repo_at(alpha, "other")
+    # Set a scalar key 'other' on proj (cwd), and a key on project 'other'.
+    proj_config = alpha / "proj" / ".wtm"
+    proj_config.mkdir(parents=True, exist_ok=True)
+    (proj_config / "config.toml").write_text('other = "scalar-value"\n')
+    other_config = alpha / "other" / ".wtm"
+    other_config.mkdir(parents=True, exist_ok=True)
+    (other_config / "config.toml").write_text('editor = "nvim"\n')
+    # config get other editor: 'other' is a scalar on cwd (not a table),
+    # and 'other' is a valid locator (project name). → LOCATOR+KEY reading.
+    res = _run_multi(
+        "config",
+        "get",
+        "other",
+        "editor",
+        config=config,
+        cwd=alpha / "proj",
+        workspace="alpha",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "nvim"
+
+
+def test_config_get_data_type_neither_falls_back(tmp_path: Path) -> None:
+    """config get A B where A is neither a table nor a locator: KEY+SUBKEY fallback."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    alpha = roots[0]
+    _seed_repo_at(alpha, "proj")
+    # 'nonexistent' is not a table on cwd and not a locator name.
+    res = _run_multi(
+        "config",
+        "get",
+        "nonexistent",
+        "sub",
+        config=config,
+        cwd=alpha / "proj",
+        workspace="alpha",
+    )
+    assert res.returncode == 0, res.stderr
+    # Falls back to KEY+SUBKEY: the table doesn't exist, so the cell is unset.
+    assert res.stdout.strip() == "(unset)"
+
+
+def test_config_get_three_args_locator_and_key(tmp_path: Path) -> None:
+    """config get LOCATOR KEY with 3+ args resolves the locator."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi(
+        "config",
+        "set",
+        "alpha",
+        "proj",
+        "editor",
+        "nvim",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    # 3 args: WORKSPACE PROJECT KEY
+    res = _run_multi(
+        "config",
+        "get",
+        "alpha",
+        "proj",
+        "editor",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "nvim"
+
+
+def test_config_get_three_args_subkey_reading(tmp_path: Path) -> None:
+    """config get LOCATOR KEY SUBKEY: 4 args, SUBKEY reading when KEY is a table."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    proj_config = alpha / "proj" / ".wtm"
+    proj_config.mkdir(parents=True, exist_ok=True)
+    (proj_config / "config.toml").write_text('[labels]\nenv = "prod"\n')
+    # 4 args: WORKSPACE PROJECT KEY SUBKEY
+    res = _run_multi(
+        "config",
+        "get",
+        "alpha",
+        "proj",
+        "labels",
+        "env",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prod"
+
+
+def test_config_get_three_args_no_locator_error(tmp_path: Path) -> None:
+    """config get with 3+ args where the prefix doesn't resolve: error."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    alpha = roots[0]
+    _seed_repo_at(alpha, "proj")
+    res = _run_multi(
+        "config",
+        "get",
+        "nonexistent",
+        "proj",
+        "editor",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    assert res.returncode == 1
+    assert "no entity matches" in res.stderr.lower()
+
+
+def test_config_set_backward_compat_no_locator(root: Path) -> None:
+    """config set KEY VALUE (no locator) is unchanged."""
+    _seed_repo(root, "proj")
+    res = run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    got = run("config", "get", "editor", root=root, cwd=root / "proj")
+    assert got.stdout.strip() == "nvim"
+
+
+def test_config_get_backward_compat_key_only(root: Path) -> None:
+    """config get KEY (1 arg, no locator) is unchanged."""
+    _seed_repo(root, "proj")
+    run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
+    got = run("config", "get", "editor", root=root, cwd=root / "proj")
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "nvim"
+
+
+def test_config_get_backward_compat_key_subkey(root: Path) -> None:
+    """config get KEY SUBKEY (2 args, table on cwd) is unchanged."""
+    _seed_repo(root, "proj")
+    (root / "proj" / ".wtm").mkdir(exist_ok=True)
+    (root / "proj" / ".wtm" / "config.toml").write_text('[labels]\nenv = "prod"\n')
+    got = run("config", "get", "labels", "env", root=root, cwd=root / "proj")
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "prod"
+
+
+def test_config_set_table_via_locator(tmp_path: Path) -> None:
+    """config set -t with a locator prefix writes a table cell on the named entity."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    res = _run_multi(
+        "config",
+        "set",
+        "-t",
+        "alpha",
+        "proj",
+        "labels",
+        "env",
+        "prod",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    text = (alpha / "proj" / ".wtm" / "config.toml").read_text()
+    assert "[labels]" in text
+    assert 'env = "prod"' in text
+
+
+def test_config_unset_table_via_locator(tmp_path: Path) -> None:
+    """config unset -t with a locator prefix removes a table cell."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi(
+        "config",
+        "set",
+        "-t",
+        "alpha",
+        "proj",
+        "labels",
+        "env",
+        "prod",
+        config=config,
+        cwd=alpha,
+        workspace="alpha",
+    )
+    res = _run_multi(
+        "config",
+        "unset",
+        "-t",
+        "alpha",
+        "proj",
+        "labels",
+        "env",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    text = (alpha / "proj" / ".wtm" / "config.toml").read_text()
+    assert "env" not in text
+
+
+# --- config locator: completion --------------------------------------------
+
+
+def test_config_set_completion_locator_union(tmp_path: Path) -> None:
+    """config set <TAB> offers both locator names and cwd entity keys."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _seed_repo_at(beta, "other")
+    # Seed a key on beta/other (cwd entity).
+    other_config = beta / "other" / ".wtm"
+    other_config.mkdir(parents=True, exist_ok=True)
+    (other_config / "config.toml").write_text('editor = "nvim"\n')
+    # Complete from inside beta/other.
+    env = {
+        **os.environ,
+        "WTM_CONFIG": str(config),
+        "WTM_SYSTEM_CONFIG": str(config.parent / "_no_system_config.toml"),
+        "WTM_WORKSPACE": "beta",
+        "_WTM_COMPLETE": "complete_bash",
+        "COMP_WORDS": "wtm config set ",
+        "COMP_CWORD": "3",
+    }
+    res = subprocess.run(
+        [str(Path(sys.executable).parent / "wtm")],
+        env=env,
+        cwd=str(beta / "other"),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    names = res.stdout.split()
+    # Locator universe: projects + workspaces.
+    assert "alpha" in names
+    assert "beta" in names
+    assert "proj" in names
+    assert "other" in names
+    # Cwd entity keys.
+    assert "editor" in names
+
+
+def test_config_get_completion_locator_union(tmp_path: Path) -> None:
+    """config get <TAB> offers both locator names and cwd entity keys."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _seed_repo_at(beta, "other")
+    other_config = beta / "other" / ".wtm"
+    other_config.mkdir(parents=True, exist_ok=True)
+    (other_config / "config.toml").write_text('editor = "nvim"\n')
+    env = {
+        **os.environ,
+        "WTM_CONFIG": str(config),
+        "WTM_SYSTEM_CONFIG": str(config.parent / "_no_system_config.toml"),
+        "WTM_WORKSPACE": "beta",
+        "_WTM_COMPLETE": "complete_bash",
+        "COMP_WORDS": "wtm config get ",
+        "COMP_CWORD": "3",
+    }
+    res = subprocess.run(
+        [str(Path(sys.executable).parent / "wtm")],
+        env=env,
+        cwd=str(beta / "other"),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    names = res.stdout.split()
+    assert "proj" in names
+    assert "other" in names
+    assert "editor" in names
+
+
+def test_config_get_completion_subkey_reading(tmp_path: Path) -> None:
+    """config get A <TAB> offers SUBKEYs when A is a table on cwd."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    alpha = roots[0]
+    _seed_repo_at(alpha, "proj")
+    proj_config = alpha / "proj" / ".wtm"
+    proj_config.mkdir(parents=True, exist_ok=True)
+    (proj_config / "config.toml").write_text('[labels]\nenv = "prod"\ntier = "web"\n')
+    env = {
+        **os.environ,
+        "WTM_CONFIG": str(config),
+        "WTM_SYSTEM_CONFIG": str(config.parent / "_no_system_config.toml"),
+        "WTM_WORKSPACE": "alpha",
+        "_WTM_COMPLETE": "complete_bash",
+        "COMP_WORDS": "wtm config get labels ",
+        "COMP_CWORD": "4",
+    }
+    res = subprocess.run(
+        [str(Path(sys.executable).parent / "wtm")],
+        env=env,
+        cwd=str(alpha / "proj"),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    names = res.stdout.split()
+    assert "env" in names
+    assert "tier" in names

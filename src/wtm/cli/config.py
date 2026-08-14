@@ -8,17 +8,17 @@ import typer
 
 from wtm.cli.common import _GENERIC_SCOPE_HELP, _config_show_level, _generic_scope, _rung_label
 from wtm.cli.completions.config import (
-    _complete_config_key,
+    _complete_config_get,
     _complete_config_set,
     _complete_config_show,
-    _complete_config_subkey,
     _complete_config_unset,
     _complete_scope,
 )
-from wtm.cli.locator import _locate_parent_args
+from wtm.cli.locator import _locate_one, _locate_optional, _locate_parent_args
 from wtm.config import (
     Config,
     ConfigTree,
+    GenericTarget,
     ResolvedConfig,
     ResolvedProject,
     ResolvedWorkspace,
@@ -351,8 +351,8 @@ def config_set(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         ...,
-        metavar="KEY [SUBKEY] VALUE",
-        help="Key (plus SUBKEY for -t) and the value to write",
+        metavar="[LOCATOR] KEY [SUBKEY] VALUE",
+        help="Optional locator prefix, then key (plus SUBKEY for -t) and value",
         autocompletion=_complete_config_set,
     ),
     scope: Scope | None = typer.Option(
@@ -365,10 +365,12 @@ def config_set(
         False, "-t", "--table", help="Set SUBKEY = VALUE in the table at KEY"
     ),
 ) -> None:
-    """Set an arbitrary config KEY on the cwd-inferred entity.
+    """Set an arbitrary config KEY on the cwd-inferred or locator-named entity.
 
     The entity is the deepest one the cwd sits inside (worktree, else project,
-    else the active workspace); ``--scope`` picks which file tier of that
+    else the active workspace), or -- when an optional **locator** prefix
+    precedes the key group -- whichever entity the locator resolves to across
+    every declared workspace. ``--scope`` picks which file tier of that
     entity's cascade to write, defaulting to the deepest scope whose directory
     exists. Reserved keys (``hooks``/``projects``/``worktrees``/``path``/
     ``default_workspace``) have their own commands and are refused here.
@@ -381,25 +383,38 @@ def config_set(
     is ``inheritable`` (the opt-in allowlist of extra inheritable keys); each
     element it takes is validated (a reserved or hardcoded-non-inheritable key
     such as ``description`` is refused).
+
+    The locator prefix is ``args[:-N]`` (N flag-decided: 3 for ``-t``, else 2);
+    it is absent when ``len(args) == N``. ``config set KEY VALUE`` (cwd-inferred)
+    is unchanged.
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
 
+    n = 3 if table else 2
+    if len(args) < n:
+        raise WtmError(
+            f"config set {'-t ' if table else '-a ' if array else ''}requires "
+            f"{'KEY SUBKEY VALUE' if table else 'KEY VALUE'}"
+        )
+    loc_args = args[:-n]
     if table:
-        if len(args) != 3:
-            raise WtmError("config set -t requires KEY SUBKEY VALUE")
-        key, subkey, value = args
+        key, subkey, value = args[-3:]
     else:
-        if len(args) != 2:
-            raise WtmError(f"config set {'-a ' if array else ''}requires KEY VALUE")
-        key, value = args
+        key, value = args[-2:]
 
     if key == "inheritable" and array:
         validate_inheritable_element(value)
     else:
         validate_arbitrary_key(key)
     config = ctx.obj.config
-    target = config.resolve_generic_target(current_dir(resolve=False))
+    if loc_args:
+        location = _locate_one(ctx, loc_args, command="config set")
+        target = config.resolve_generic_target_for(
+            location.workspace, location.project, location.name
+        )
+    else:
+        target = config.resolve_generic_target(current_dir(resolve=False))
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
     full_key = (*prefix, key) if prefix else key
@@ -420,23 +435,17 @@ def config_set(
 @config_app.command(name="get")
 def config_get(
     ctx: typer.Context,
-    key: str = typer.Argument(
+    args: list[str] = typer.Argument(
         ...,
-        metavar="KEY",
-        help="Arbitrary (non-reserved) config key",
-        autocompletion=_complete_config_key,
-    ),
-    subkey: str | None = typer.Argument(
-        None,
-        metavar="[SUBKEY]",
-        help="Read a single cell of the table at KEY",
-        autocompletion=_complete_config_subkey,
+        metavar="[LOCATOR] KEY [SUBKEY]",
+        help="Optional locator prefix, then an arbitrary key (plus SUBKEY for a table cell)",
+        autocompletion=_complete_config_get,
     ),
     show_origin: bool = typer.Option(
         False, "-o", "--origin", help="Print the full probe chain, most-local first"
     ),
 ) -> None:
-    """Resolve an arbitrary config KEY for the cwd-inferred entity.
+    """Resolve an arbitrary config KEY for the cwd-inferred or locator-named entity.
 
     Prints the winning (most-local) value, or ``(unset)`` when the key appears
     nowhere in the entity's cascade. An array prints one element per line and a
@@ -446,10 +455,21 @@ def config_get(
     the value comes from -- its definition level (``project``/``workspace``/
     ``global``) for an inherited key such as ``base_branch``, otherwise its scope
     -- and the file it lives in.
+
+    An optional **locator** prefix may name the entity to act on (resolved
+    across every declared workspace). Because SUBKEY is bare-optional and the
+    locator is variable-token, ``config get A B`` (two args) is ambiguous; the
+    parse uses **data-type inference**: if ``A`` resolves to a table on the
+    cwd entity, ``B`` is a SUBKEY (backward-compatible); otherwise ``A`` is
+    tried as a locator and ``B`` as a KEY on that entity; if neither, the
+    fallback is ``KEY=A SUBKEY=B`` (prints ``(unset)``). Three or more args
+    require a resolving locator prefix.
     """
+    if not args:
+        raise WtmError("config get requires a KEY")
+    target, key, subkey = _resolve_get_target(ctx, args)
     validate_arbitrary_key(key)
     config = ctx.obj.config
-    target = config.resolve_generic_target(current_dir(resolve=False))
     effective, chain = config.resolve_generic_value(target, key)
     if show_origin:
         if not chain:
@@ -470,6 +490,69 @@ def config_get(
 
         return
     print(_render_config_value(effective))
+
+
+def _resolve_get_target(
+    ctx: typer.Context, args: list[str]
+) -> tuple[GenericTarget, str, str | None]:
+    """Parse ``config get`` args into ``(target, key, subkey)`` by data-type inference.
+
+    The one wtm parse that depends on config content rather than count+flags
+    alone: ``config get``'s SUBKEY is bare-optional, so ``A B`` is genuinely
+    ambiguous (LOCATOR+KEY, or KEY+SUBKEY). The inference, most-local-first:
+
+    - 1 arg: ``KEY=args[0]`` on the cwd entity (unchanged).
+    - 2 args ``[A, B]``: if ``A`` is a table on the cwd entity, ``B`` is its
+      SUBKEY (table wins, backward-compatible); else try ``A`` as a locator --
+      if it resolves, ``B`` is a KEY on that entity; else fall back to
+      ``KEY=A SUBKEY=B`` (prints ``(unset)``, backward-compatible).
+    - 3+ args: try the SUBKEY reading (``args[:-2]`` as locator, ``args[-2]``
+      as KEY, ``args[-1]`` as SUBKEY) when ``args[-2]`` is a table on the
+      located entity; else try the KEY reading (``args[:-1]`` as locator,
+      ``args[-1]`` as KEY); else error.
+    """
+    config = ctx.obj.config
+    cwd_target = config.resolve_generic_target(current_dir(resolve=False))
+
+    if len(args) == 1:
+        return cwd_target, args[0], None
+
+    if len(args) == 2:
+        a, b = args
+        effective, _ = config.resolve_generic_value(cwd_target, a)
+        if isinstance(effective, dict):
+            return cwd_target, a, b
+
+        location = _locate_optional(ctx, [a])
+        if location is not None:
+            target = config.resolve_generic_target_for(
+                location.workspace, location.project, location.name
+            )
+
+            return target, b, None
+
+        return cwd_target, a, b
+
+    # 3+ args: locator required. Try SUBKEY reading first (table wins).
+    location = _locate_optional(ctx, args[:-2])
+    if location is not None:
+        target = config.resolve_generic_target_for(
+            location.workspace, location.project, location.name
+        )
+        effective, _ = config.resolve_generic_value(target, args[-2])
+        if isinstance(effective, dict):
+            return target, args[-2], args[-1]
+
+    # Try KEY reading.
+    location = _locate_optional(ctx, args[:-1])
+    if location is not None:
+        target = config.resolve_generic_target_for(
+            location.workspace, location.project, location.name
+        )
+
+        return target, args[-1], None
+
+    raise WtmError(f"no entity matches: {' '.join(args[:-1])}")
 
 
 def _render_config_value(value: object) -> str:
@@ -493,8 +576,8 @@ def config_unset(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         ...,
-        metavar="KEY [SUBKEY] [VALUE]",
-        help="Key, plus SUBKEY for -t or VALUE for -a",
+        metavar="[LOCATOR] KEY [SUBKEY] [VALUE]",
+        help="Optional locator prefix, then key, plus SUBKEY for -t or VALUE for -a",
         autocompletion=_complete_config_unset,
     ),
     scope: Scope | None = typer.Option(
@@ -505,35 +588,46 @@ def config_unset(
     ),
     table: bool = typer.Option(False, "-t", "--table", help="Remove SUBKEY from the table at KEY"),
 ) -> None:
-    """Remove an arbitrary config KEY from one tier of the cwd-inferred entity.
+    """Remove an arbitrary config KEY from one tier of the cwd-inferred or locator-named entity.
 
-    Mirrors :func:`config_set`: the entity is cwd-inferred and ``--scope`` picks
-    the file (defaulting to the deepest existing dir). The removal is scalar by
-    default (``KEY``); ``-a``/``--array`` (``KEY VALUE``) strips every occurrence
-    of VALUE from the array at KEY; ``-t``/``--table`` (``KEY SUBKEY``) removes
-    SUBKEY from the table at KEY. The two flags are mutually exclusive. A no-op
-    when the target is already absent at that tier.
+    Mirrors :func:`config_set`: the entity is cwd-inferred (or locator-named
+    when an optional locator prefix precedes the key group) and ``--scope``
+    picks the file (defaulting to the deepest existing dir). The removal is
+    scalar by default (``KEY``); ``-a``/``--array`` (``KEY VALUE``) strips every
+    occurrence of VALUE from the array at KEY; ``-t``/``--table`` (``KEY
+    SUBKEY``) removes SUBKEY from the table at KEY. The two flags are mutually
+    exclusive. A no-op when the target is already absent at that tier.
+
+    The locator prefix is ``args[:-N]`` (N flag-decided: 2 for ``-a``/``-t``,
+    else 1); it is absent when ``len(args) == N``.
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
 
+    n = 2 if (array or table) else 1
+    if len(args) < n:
+        raise WtmError(
+            f"config unset {'-a ' if array else '-t ' if table else ''}requires "
+            f"{'KEY VALUE' if array else 'KEY SUBKEY' if table else 'KEY'}"
+        )
+    loc_args = args[:-n]
     if array:
-        if len(args) != 2:
-            raise WtmError("config unset -a requires KEY VALUE")
-        key, value = args
+        key, value = args[-2:]
     elif table:
-        if len(args) != 2:
-            raise WtmError("config unset -t requires KEY SUBKEY")
-        key, subkey = args
+        key, subkey = args[-2:]
     else:
-        if len(args) != 1:
-            raise WtmError("config unset requires KEY")
-        (key,) = args
+        (key,) = args[-1:]
 
     if not (key == "inheritable" and array):
         validate_arbitrary_key(key)
     config = ctx.obj.config
-    target = config.resolve_generic_target(current_dir(resolve=False))
+    if loc_args:
+        location = _locate_one(ctx, loc_args, command="config unset")
+        target = config.resolve_generic_target_for(
+            location.workspace, location.project, location.name
+        )
+    else:
+        target = config.resolve_generic_target(current_dir(resolve=False))
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
     full_key = (*prefix, key) if prefix else key

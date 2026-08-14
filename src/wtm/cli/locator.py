@@ -67,6 +67,25 @@ def _locate_one(
     return resolution.location
 
 
+def _locate_optional(
+    ctx: typer.Context, args: list[str], *, tier: Tier | None = None
+) -> Location | None:
+    """Resolve a locator, returning ``None`` on not-found or unresolved ambiguity.
+
+    The non-raising counterpart to :func:`_locate_one`: for ``config get``'s
+    data-type inference, where an unresolved locator at N=2 falls back to the
+    KEY+SUBKEY reading rather than erroring. Applies the same context tiebreak
+    as :func:`_locate_one` before giving up.
+    """
+    resolution = locate(args, build_index(ctx.obj.config), tier=tier)
+    if isinstance(resolution, NotFound):
+        return None
+    if isinstance(resolution, Ambiguous):
+        return _context_pick(ctx, resolution.candidates)
+
+    return resolution.location
+
+
 def _locate_project(
     ctx: typer.Context, args: list[str], *, command: str
 ) -> tuple[str | None, str | None]:
