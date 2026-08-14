@@ -1127,6 +1127,32 @@ class Config:
 
         return effective, chain
 
+    def effective_keys(self, target: GenericTarget) -> list[tuple[str, SourceRung]]:
+        """The non-``(unset)`` keys ``config get`` would resolve for *target*.
+
+        Completion material for the generic ``config get``: every key whose
+        :meth:`resolve_generic_value` yields a non-empty chain, paired with its
+        most-local (winning) rung. The effective set is the entity's own present
+        arbitrary keys (walked across *target*'s probe cascade, reserved keys
+        excluded) unioned with the inheritable keys actually set on an ancestor
+        (``target.inherit``), so a ``base_branch`` defined only at the workspace
+        or global tier still appears. Sorted by key; the rung is the same head
+        :meth:`resolve_generic_value` returns, so a caller can label by its
+        ``tier`` (an inheritable key) or ``scope`` (an entity-local key) without
+        a second resolve.
+        """
+        candidates: set[str] = set(target.inherit)
+        for probe in target.probes:
+            table = _read_table(self._store, probe)
+            candidates.update(key for key in table if key not in RESERVED_KEYS)
+        keys: list[tuple[str, SourceRung]] = []
+        for key in sorted(candidates):
+            _, chain = self.resolve_generic_value(target, key)
+            if chain:
+                keys.append((key, chain[0]))
+
+        return keys
+
     # --- workspace lookup ----------------------------------------------------
 
     def workspace_of(self, project_dir: Path) -> Workspace | None:

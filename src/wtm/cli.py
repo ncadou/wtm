@@ -27,6 +27,7 @@ from wtm.config import (
     ResolvedProject,
     ResolvedWorkspace,
     ResolvedWorktree,
+    SourceRung,
     Workspace,
     resolve_project_dir,
     validate_arbitrary_key,
@@ -598,6 +599,215 @@ def _complete_locate_hook_target(ctx: typer.Context, incomplete: str) -> list[tu
     events = [(event, "event") for event in EVENTS if event not in names]
 
     return sorted(offered + events)
+
+
+# --- config/scope completion -------------------------------------------------
+
+
+def _rung_label(rung: SourceRung) -> str:
+    """Label a resolved rung by its definition level: tier for an inheritable
+    key, otherwise the scope (file tier) it was read from."""
+    return rung.tier or rung.scope.value
+
+
+def _config_key_candidates(*, array: bool, incomplete: str) -> list[tuple[str, str]]:
+    """KEY candidates for the generic key commands: effective keys, labelled.
+
+    Shared by ``config get``/``set``/``unset``: the cwd-inferred entity's
+    non-``(unset)`` keys (entity-local arbitrary keys unioned with inheritable
+    keys set on an ancestor), each labelled by its definition level -- the same
+    ``tier``/``scope`` ``config get --origin`` prints. With *array* (``-a``),
+    the one reserved array a user may mutate via ``-a`` -- ``inheritable`` (the
+    opt-in allowlist) -- is offered too, labelled ``allowlist``. Builds its own
+    config (the app callback has not fired) and is lenient, so completion never
+    errors. Sorted by key.
+    """
+    try:
+        config = Config.load()
+        target = config.resolve_generic_target(current_dir(resolve=False))
+        keys = config.effective_keys(target)
+    except Exception:
+        return []
+    items: dict[str, str] = {
+        key: _rung_label(rung) for key, rung in keys if key.startswith(incomplete)
+    }
+    if array and "inheritable".startswith(incomplete):
+        items["inheritable"] = "allowlist"
+
+    return sorted(items.items())
+
+
+def _config_subkey_candidates(key: str, incomplete: str) -> list[str]:
+    """SUBKEY candidates: the cells of the table at *key*, prefix-filtered.
+
+    Shared by ``config get`` (named ``key`` argument) and ``config set``/
+    ``unset -t`` (variadic ``args[0]``): the table's keys are offered when *key*
+    resolves to a dict and nothing otherwise. Lenient like every completer;
+    reserved keys are rejected by :func:`validate_arbitrary_key`, so a reserved
+    KEY yields nothing rather than erroring.
+    """
+    try:
+        validate_arbitrary_key(key)
+        config = Config.load()
+        target = config.resolve_generic_target(current_dir(resolve=False))
+        effective, _ = config.resolve_generic_value(target, key)
+    except Exception:
+        return []
+    if not isinstance(effective, dict):
+        return []
+
+    return [cell for cell in sorted(effective) if cell.startswith(incomplete)]
+
+
+def _config_array_element_candidates(key: str, incomplete: str) -> list[str]:
+    """VALUE candidates for ``-a``: the elements of the array at *key*.
+
+    Used by ``config set -a``/``unset -a``: the array's elements are offered
+    when *key* resolves to a list/tuple and nothing otherwise. ``inheritable``
+    (the one reserved array ``-a`` may touch) skips :func:`validate_arbitrary_key`
+    and is read directly, mirroring the commands' own guard. Lenient; the
+    most-local array is offered (arrays do not merge across scopes).
+    """
+    try:
+        if key != "inheritable":
+            validate_arbitrary_key(key)
+        config = Config.load()
+        target = config.resolve_generic_target(current_dir(resolve=False))
+        effective, _ = config.resolve_generic_value(target, key)
+    except Exception:
+        return []
+    if not isinstance(effective, (list, tuple)):
+        return []
+
+    return [str(el) for el in effective if str(el).startswith(incomplete)]
+
+
+def _complete_config_key(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete KEY for ``config get``: the cwd-inferred entity's effective keys.
+
+    Every non-``(unset)`` key (entity-local present arbitrary keys unioned with
+    inheritable keys set on an ancestor), each labelled by its definition level
+    -- the same ``tier``/``scope`` ``config get --origin`` prints. Builds its own
+    config (the app callback has not fired) and is lenient, so completion never
+    errors. ``config get`` is cwd-inferred only (no locator prefix), so the
+    entity is fixed by the working directory and the KEY slot needs no ``ctx``.
+    """
+    return _config_key_candidates(array=False, incomplete=incomplete)
+
+
+def _complete_config_subkey(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Complete SUBKEY for ``config get``: the cells of the table at typed KEY.
+
+    The fixed ``key`` argument is already in ``ctx.params`` (verified against the
+    real bash protocol), so the table's keys are offered when KEY resolves to a
+    dict and nothing otherwise. Lenient like every completer; reserved keys are
+    rejected upstream by :func:`validate_arbitrary_key`, so a reserved KEY yields
+    nothing rather than erroring.
+    """
+    key = ctx.params.get("key")
+    if not key:
+        return []
+
+    return _config_subkey_candidates(key, incomplete)
+
+
+def _complete_config_set(ctx: typer.Context, incomplete: str) -> list[tuple[str, str] | str]:
+    """Complete ``config set KEY [SUBKEY] VALUE``: KEY (and SUBKEY for ``-t``).
+
+    Slot 0 (KEY) offers the effective keys plus ``inheritable`` when ``-a`` (the
+    one reserved array ``-a`` may touch); a new key is still freely typed.
+    Slot 1 with ``-t`` offers the cells of the table at ``args[0]``; without
+    ``-t`` it is the free-form VALUE, which has no completion source. VALUE (the
+    trailing slot, scalar or ``-t`` cell) is never completed. Reads the variadic
+    ``args`` and the ``-a``/``-t`` flags from ``ctx.params`` (or ``ctx.args``
+    during option-value completion).
+    """
+    args = list(ctx.params.get("args") or ctx.args or [])
+    array = bool(ctx.params.get("array", False))
+    table = bool(ctx.params.get("table", False))
+    if not args:
+        return _config_key_candidates(array=array, incomplete=incomplete)
+    if len(args) == 1 and table:
+        return _config_subkey_candidates(args[0], incomplete)
+
+    return []
+
+
+def _complete_config_unset(ctx: typer.Context, incomplete: str) -> list[tuple[str, str] | str]:
+    """Complete ``config unset KEY [SUBKEY | VALUE]``: only what is removable.
+
+    Mirrors :func:`_complete_config_set` for KEY (effective keys plus
+    ``inheritable`` when ``-a``) and ``-t`` SUBKEY (table cells). The ``-a``
+    VALUE slot -- the element to strip from the array at KEY -- additionally
+    offers the array's current elements (you can only remove what is there);
+    the scalar VALUE slot has no completion source (only KEY is needed).
+    """
+    args = list(ctx.params.get("args") or ctx.args or [])
+    array = bool(ctx.params.get("array", False))
+    table = bool(ctx.params.get("table", False))
+    if not args:
+        return _config_key_candidates(array=array, incomplete=incomplete)
+    if len(args) == 1:
+        if table:
+            return _config_subkey_candidates(args[0], incomplete)
+        if array:
+            return _config_array_element_candidates(args[0], incomplete)
+
+    return []
+
+
+def _complete_config_show(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete TARGET for ``config show``: per-level dispatch on the level flag.
+
+    The four mutually-exclusive level flags (``--all``/``--workspace``/
+    ``--project``/``--worktree``) are read from ``ctx.params`` and routed to the
+    existing completer that matches that level's target grammar: no level or
+    ``--all`` take no TARGET (nothing completes); ``--workspace`` reuses the
+    workspace-only slot-0 completer; ``--project`` reuses the count-based
+    ``[[WORKSPACE] PROJECT]`` completer; ``--worktree`` reuses the PROJECT-pinned
+    qualifier-only locator (the dumped NAME may be absent, so the leaf stays
+    literal). Lenient via the delegated completers.
+    """
+    level = _config_show_level(
+        bool(ctx.params.get("all_workspaces", False)),
+        bool(ctx.params.get("workspace", False)),
+        bool(ctx.params.get("project", False)),
+        bool(ctx.params.get("worktree", False)),
+    )
+    if level in (None, "all"):
+        return []
+    if level == "workspace":
+        return _complete_workspace_arg(ctx, incomplete)
+    if level == "project":
+        return _complete_project(ctx, incomplete)
+
+    return _complete_locate_project(ctx, incomplete)
+
+
+def _complete_scope(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete ``-s/--scope`` for the generic-key/hook commands: allowed scopes.
+
+    The cwd-inferred entity's :attr:`GenericTarget.allowed_scopes` (what
+    :func:`_generic_scope` would accept) are offered, the auto-default scope (the
+    deepest existing dir, used when ``--scope`` is omitted) labelled ``default``.
+    On any failure (no active workspace, cwd outside one, ...) the full enum
+    degrades gracefully -- preserving typer's default behaviour -- rather than
+    the empty list every other completer returns, because ``--scope`` is an enum
+    option whose all-5 default is already visible to users outside a workspace.
+    """
+    try:
+        config = Config.load()
+        target = config.resolve_generic_target(current_dir(resolve=False))
+        allowed = target.allowed_scopes
+        default = target.default_scope
+    except Exception:
+        return [(s.value, "") for s in Scope]
+
+    return [
+        (s.value, "default" if s == default else "")
+        for s in allowed
+        if s.value.startswith(incomplete)
+    ]
 
 
 # --- locator edge ------------------------------------------------------------
@@ -1355,7 +1565,9 @@ def hook_set(
         ..., metavar="EVENT", help="Lifecycle event", autocompletion=_complete_event
     ),
     command: str = typer.Argument(..., metavar="CMD", help="Inline sh -c command to run"),
-    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+    scope: Scope | None = typer.Option(
+        None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
+    ),
 ) -> None:
     """Set an inline hook for EVENT on the cwd-inferred entity.
 
@@ -1380,7 +1592,9 @@ def hook_unset(
     event: str = typer.Argument(
         ..., metavar="EVENT", help="Lifecycle event", autocompletion=_complete_event
     ),
-    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+    scope: Scope | None = typer.Option(
+        None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
+    ),
 ) -> None:
     """Remove the inline hook for EVENT from one tier of the cwd-inferred entity.
 
@@ -2169,6 +2383,7 @@ def config_show(
         None,
         metavar="[TARGET]",
         help="Entity to root a level dump at (grammar per the level flag)",
+        autocompletion=_complete_config_show,
     ),
     all_workspaces: bool = typer.Option(
         False, "--all", help="Dump every workspace, fully descended (no TARGET)"
@@ -2491,9 +2706,14 @@ def config_base_branch(
 def config_set(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
-        ..., metavar="KEY [SUBKEY] VALUE", help="Key (plus SUBKEY for -t) and the value to write"
+        ...,
+        metavar="KEY [SUBKEY] VALUE",
+        help="Key (plus SUBKEY for -t) and the value to write",
+        autocompletion=_complete_config_set,
     ),
-    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+    scope: Scope | None = typer.Option(
+        None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
+    ),
     array: bool = typer.Option(
         False, "-a", "--array", help="Add VALUE to the array at KEY (set semantics, idempotent)"
     ),
@@ -2556,9 +2776,17 @@ def config_set(
 @config_app.command(name="get")
 def config_get(
     ctx: typer.Context,
-    key: str = typer.Argument(..., metavar="KEY", help="Arbitrary (non-reserved) config key"),
+    key: str = typer.Argument(
+        ...,
+        metavar="KEY",
+        help="Arbitrary (non-reserved) config key",
+        autocompletion=_complete_config_key,
+    ),
     subkey: str | None = typer.Argument(
-        None, metavar="[SUBKEY]", help="Read a single cell of the table at KEY"
+        None,
+        metavar="[SUBKEY]",
+        help="Read a single cell of the table at KEY",
+        autocompletion=_complete_config_subkey,
     ),
     show_origin: bool = typer.Option(
         False, "-o", "--origin", help="Print the full probe chain, most-local first"
@@ -2585,8 +2813,7 @@ def config_get(
 
             return
         for rung in chain:
-            label = rung.tier or rung.scope.value
-            print(f"{rung.value}  [{label}]  {_tilde(rung.file)}")
+            print(f"{rung.value}  [{_rung_label(rung)}]  {_tilde(rung.file)}")
 
         return
     if subkey is not None:
@@ -2621,9 +2848,14 @@ def _render_config_value(value: object) -> str:
 def config_unset(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
-        ..., metavar="KEY [SUBKEY] [VALUE]", help="Key, plus SUBKEY for -t or VALUE for -a"
+        ...,
+        metavar="KEY [SUBKEY] [VALUE]",
+        help="Key, plus SUBKEY for -t or VALUE for -a",
+        autocompletion=_complete_config_unset,
     ),
-    scope: Scope | None = typer.Option(None, "-s", "--scope", help=_GENERIC_SCOPE_HELP),
+    scope: Scope | None = typer.Option(
+        None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
+    ),
     array: bool = typer.Option(
         False, "-a", "--array", help="Remove every occurrence of VALUE from the array at KEY"
     ),

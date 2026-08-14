@@ -1131,6 +1131,422 @@ def test_complete_branch_e2e_cwd_inference(root: Path) -> None:
     assert out.split() == ["feat", "main"]
 
 
+# --- config get completion ---------------------------------------------------
+
+
+def _seed_config_keys(root: Path, project: str) -> Path:
+    """Write project-local and workspace-local arbitrary keys for completion tests.
+
+    Project *project* gets ``owner`` (scalar), ``ports`` (array), ``labels``
+    (table), and an ``inheritable`` allowlist naming ``deploy_env`` at project
+    scope; the workspace gets ``base_branch`` at workspace scope (inheritable, so
+    it resolves for the project even though the project does not set it).
+    """
+    proj_dir = root / project
+    (proj_dir / ".wtm").mkdir(parents=True, exist_ok=True)
+    (proj_dir / ".wtm" / "config.toml").write_text(
+        'owner = "team-a"\nports = ["3001", "3002"]\n'
+        'inheritable = ["deploy_env"]\n[labels]\nenv = "prod"\ntier = "web"\n'
+    )
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('base_branch = "main"\n')
+
+    return proj_dir
+
+
+def test_complete_config_key_effective_set(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_key
+
+    class _C:
+        params = {}
+
+    items = dict(_complete_config_key(_C(), ""))
+    # base_branch inherits from the workspace tier; owner + labels are project-local.
+    assert items["base_branch"] == "workspace"
+    assert items["owner"] == "project"
+    assert items["labels"] == "project"
+    # Reserved keys never appear (they own typed surfaces, not the generic get).
+    assert "path" not in items
+    assert "projects" not in items
+    assert "inheritable" not in items
+    # Prefix filter.
+    assert dict(_complete_config_key(_C(), "la")) == {"labels": "project"}
+
+
+def test_complete_config_subkey_table_cells(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_subkey
+
+    class _C:
+        def __init__(self, key: str) -> None:
+            self.params = {"key": key}
+
+    # A table KEY offers its cells; a scalar KEY offers nothing; a reserved key
+    # is rejected upstream and yields nothing rather than erroring.
+    assert _complete_config_subkey(_C("labels"), "") == ["env", "tier"]
+    assert _complete_config_subkey(_C("labels"), "t") == ["tier"]
+    assert _complete_config_subkey(_C("owner"), "") == []
+    assert _complete_config_subkey(_C("path"), "") == []
+
+
+def test_config_get_key_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config get ", cword="3", cwd=proj_dir)
+    names = out.split()
+    assert "base_branch" in names
+    assert "owner" in names
+    assert "labels" in names
+
+
+def test_config_get_subkey_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config get labels ", cword="4", cwd=proj_dir)
+    assert out.split() == ["env", "tier"]
+
+
+def test_config_get_key_completion_labels_zsh(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete_zsh(root, args="wtm config get ", cwd=proj_dir)
+    # zsh renders (value, help) as "value":"help"; the definition-tier label
+    # surfaces (base_branch from workspace, owner from project).
+    assert '"base_branch":"workspace"' in out
+    assert '"owner":"project"' in out
+
+
+# --- config set/unset/show/scope completion ---------------------------------
+
+
+class _ConfigCtx:
+    """Minimal typer.Context stand-in for the config set/unset/show completers."""
+
+    def __init__(
+        self,
+        args: tuple[str, ...] = (),
+        array: bool = False,
+        table: bool = False,
+        **flags: bool,
+    ) -> None:
+        self.args = list(args)
+        self.params: dict[str, object] = {"args": args, "array": array, "table": table}
+        self.params.update(flags)
+
+
+def test_complete_config_set_key_effective(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_set
+
+    items = dict(_complete_config_set(_ConfigCtx(), ""))
+    assert items["owner"] == "project"
+    assert items["labels"] == "project"
+    assert items["ports"] == "project"
+    assert items["base_branch"] == "workspace"
+    # No -a: inheritable is reserved, not offered.
+    assert "inheritable" not in items
+
+
+def test_complete_config_set_key_includes_inheritable_with_a(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_set
+
+    items = dict(_complete_config_set(_ConfigCtx(array=True), ""))
+    # With -a, the one reserved array a user may mutate is offered.
+    assert items["inheritable"] == "allowlist"
+    assert items["ports"] == "project"
+
+
+def test_complete_config_set_subkey_for_table(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_set
+
+    assert _complete_config_set(_ConfigCtx(("labels",), table=True), "") == ["env", "tier"]
+    assert _complete_config_set(_ConfigCtx(("labels",), table=True), "t") == ["tier"]
+
+
+def test_complete_config_set_skips_value_slot(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_set
+
+    # Slot 1 without -t is the free-form VALUE: no completion.
+    assert _complete_config_set(_ConfigCtx(("owner",)), "") == []
+    # Slot 2 (VALUE for -t) is also free-form.
+    assert _complete_config_set(_ConfigCtx(("labels", "env"), table=True), "") == []
+
+
+def test_complete_config_unset_key_effective(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    items = dict(_complete_config_unset(_ConfigCtx(), ""))
+    assert items["owner"] == "project"
+    assert "inheritable" not in items
+
+
+def test_complete_config_unset_key_includes_inheritable_with_a(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    items = dict(_complete_config_unset(_ConfigCtx(array=True), ""))
+    assert items["inheritable"] == "allowlist"
+
+
+def test_complete_config_unset_subkey_for_table(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    assert _complete_config_unset(_ConfigCtx(("labels",), table=True), "") == ["env", "tier"]
+
+
+def test_complete_config_unset_array_elements(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    # -a offers the array's current elements (you can only remove what is there).
+    assert _complete_config_unset(_ConfigCtx(("ports",), array=True), "") == ["3001", "3002"]
+    assert _complete_config_unset(_ConfigCtx(("ports",), array=True), "3") == ["3001", "3002"]
+    assert _complete_config_unset(_ConfigCtx(("ports",), array=True), "4") == []
+
+
+def test_complete_config_unset_inheritable_array_elements(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    # unset -a inheritable VALUE: the reserved key is read directly.
+    assert _complete_config_unset(_ConfigCtx(("inheritable",), array=True), "") == ["deploy_env"]
+
+
+def test_complete_config_unset_scalar_key_only(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_config_unset
+
+    # Scalar unset takes only KEY; slot 1 without flags has no completion.
+    assert _complete_config_unset(_ConfigCtx(("owner",)), "") == []
+
+
+def test_complete_config_show_no_level_no_completion(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_config_show
+
+    assert _complete_config_show(_ConfigCtx(), "") == []
+
+
+def test_complete_config_show_all_no_completion(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_config_show
+
+    assert _complete_config_show(_ConfigCtx(all_workspaces=True), "") == []
+
+
+def test_complete_config_show_workspace_level(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_config_show
+
+    items = dict(_complete_config_show(_ConfigCtx(workspace=True), ""))
+    assert set(items) == {"ws"}
+
+
+def test_complete_config_show_project_level(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_config_show
+
+    items = dict(_complete_config_show(_ConfigCtx(project=True), ""))
+    # Slot 0 offers workspaces + active workspace's projects.
+    assert "alpha" in items
+    assert "beta" in items
+    assert "ws" in items
+
+
+def test_complete_config_show_worktree_level(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(root)
+    from wtm.cli import _complete_config_show
+
+    items = dict(_complete_config_show(_ConfigCtx(worktree=True), ""))
+    # PROJECT-pinned locator: slot 0 offers projects (+ workspaces as qualifiers).
+    assert "alpha" in items
+    assert "ws" in items
+
+
+def test_complete_config_show_project_level_slot1(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_config_show
+
+    items = dict(_complete_config_show(_ConfigCtx(("ws",), project=True), ""))
+    # Slot 1 offers projects of workspace args[0]='ws'.
+    assert "alpha" in items
+    assert "beta" in items
+
+
+def test_complete_scope_from_project_cwd(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(proj_dir)
+    from wtm.cli import _complete_scope
+
+    items = dict(_complete_scope(_ConfigCtx(), ""))
+    # A project entity allows project/workspace/user/system (not worktree).
+    assert set(items) == {"project", "workspace", "user", "system"}
+    assert items["project"] == "default"
+    assert items["workspace"] == ""
+
+
+def test_complete_scope_from_worktree_cwd(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(root / "alpha" / "worktrees" / "feat")
+    from wtm.cli import _complete_scope
+
+    items = dict(_complete_scope(_ConfigCtx(), ""))
+    # A worktree entity allows all 5 scopes; worktree is the default.
+    assert set(items) == {"worktree", "project", "workspace", "user", "system"}
+    assert items["worktree"] == "default"
+
+
+def test_complete_scope_fallback_all_scopes(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    # No workspace declared and none selectable -> resolve_generic_target raises
+    # -> fallback to all 5 scopes (preserving typer's default enum behaviour).
+    monkeypatch.setenv("WTM_CONFIG", str(root / "_empty.toml"))
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(root / "_no_system.toml"))
+    monkeypatch.delenv("WTM_WORKSPACE", raising=False)
+    from wtm.cli import _complete_scope
+
+    items = dict(_complete_scope(_ConfigCtx(), ""))
+    assert set(items) == {"system", "user", "workspace", "project", "worktree"}
+    # No "default" label on fallback.
+    assert all(label == "" for label in items.values())
+
+
+def test_config_set_key_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config set ", cword="3", cwd=proj_dir)
+    names = out.split()
+    assert "owner" in names
+    assert "ports" in names
+    assert "labels" in names
+    assert "base_branch" in names
+
+
+def test_config_set_inheritable_key_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config set -a ", cword="4", cwd=proj_dir)
+    names = out.split()
+    assert "inheritable" in names
+    assert "ports" in names
+
+
+def test_config_unset_array_element_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config unset -a ports ", cword="5", cwd=proj_dir)
+    assert out.split() == ["3001", "3002"]
+
+
+def test_config_show_project_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    out = _complete(root, words="wtm config show --project ", cword="4")
+    names = out.split()
+    assert "alpha" in names
+    assert "beta" in names
+
+
+def test_config_show_no_level_no_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    out = _complete(root, words="wtm config show ", cword="3")
+    assert out.strip() == ""
+
+
+def test_scope_completion_e2e(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config set owner nvim -s ", cword="6", cwd=proj_dir)
+    names = out.split()
+    # From a project cwd: project/workspace/user/system (not worktree).
+    assert "project" in names
+    assert "workspace" in names
+    assert "worktree" not in names
+
+
+def test_scope_completion_default_label_zsh(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete_zsh(root, args="wtm config set owner nvim -s ", cwd=proj_dir)
+    # The auto-default scope (project) is labelled "default"; empty labels render
+    # as bare "value" in zsh (no :"" suffix).
+    assert '"project":"default"' in out
+    assert '"workspace"' in out
+
+
 # --- create ------------------------------------------------------------------
 
 
