@@ -706,6 +706,107 @@ def test_config_show_worktree_cross_workspace_project(tmp_path: Path) -> None:
     assert "feat" in res.stdout
 
 
+# --- config show --project locator (dual-mode) ------------------------------
+
+
+def test_config_show_project_cross_workspace(tmp_path: Path) -> None:
+    # --project resolves PROJECT across every workspace: a bare project name
+    # reaches another workspace's project from any active workspace.
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "onlyproj")
+    res = _run_multi(
+        "config",
+        "show",
+        "--project",
+        "onlyproj",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "project onlyproj:" in res.stdout
+
+
+def test_config_show_project_inert_falls_back_to_literal(tmp_path: Path) -> None:
+    # A declared-but-absent (inert) project is invisible to the locator index,
+    # so --project falls back to the literal target-grammar path and dumps the
+    # inert subtree (mirrors the --all inert behaviour at the project level).
+    config, roots = _multi_workspace_config(tmp_path, ["alpha"])
+    (roots[0],)
+    # Declare an inert project (no .git on disk) in the alpha workspace config.
+    config.write_text(
+        f'[workspaces.alpha]\npath = "{roots[0]}"\n'
+        '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
+    )
+    res = _run_multi(
+        "config", "show", "--project", "ghost", config=config, cwd=tmp_path, workspace="alpha"
+    )
+    assert res.returncode == 0, res.stderr
+    assert "project ghost:" in res.stdout
+    assert "(no .git on disk)" in res.stdout
+
+
+def test_config_show_project_ambiguous_errors(tmp_path: Path) -> None:
+    # A project name on disk in two workspaces, with no active workspace to break
+    # the tie (cwd outside both workspaces, no WTM_WORKSPACE), is an unresolved
+    # ambiguity -> non-zero exit and copy-runnable choices.
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    _seed_repo_at(roots[0], "shared")
+    _seed_repo_at(roots[1], "shared")
+    # Run from tmp_path (not inside either workspace) with no WTM_WORKSPACE so
+    # the cwd context tiebreak cannot single one out.
+    res = _run_multi("config", "show", "--project", "shared", config=config, cwd=tmp_path)
+    assert res.returncode != 0
+    assert "matches 2 projects" in res.stderr
+    # Each choice is a fully-qualified, runnable command.
+    assert "wtm config show --project alpha shared" in res.stderr
+    assert "wtm config show --project beta shared" in res.stderr
+
+
+def test_config_show_project_ambiguous_resolved_by_context(tmp_path: Path) -> None:
+    # Same name clash across workspaces, but cwd is inside one workspace's
+    # project -> the context tiebreak resolves it silently to the in-context one.
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    _seed_repo_at(roots[0], "shared")
+    _seed_repo_at(roots[1], "shared")
+    # cwd inside alpha/shared (a bare repo dir, but project_dir_for matches it).
+    res = _run_multi(
+        "config",
+        "show",
+        "--project",
+        "shared",
+        config=config,
+        cwd=roots[0] / "shared",
+        workspace="alpha",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "project shared:" in res.stdout
+
+
+def test_config_show_project_completion_spans_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --project completion offers projects across *every* workspace (the
+    # completion-side expression of cross-workspace reach), plus workspaces as
+    # qualifiers.
+    config, roots = _multi_workspace_config(tmp_path, ["dev", "prod"])
+    _seed_index_worktree(roots[0], "datactl", "feat")  # dev/datactl
+    _seed_index_worktree(roots[1], "api", "feat")  # prod/api
+    monkeypatch.setenv("WTM_CONFIG", str(config))
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(tmp_path / "_no_system_config.toml"))
+    monkeypatch.delenv("WTM_WORKSPACE", raising=False)
+    from wtm.cli.completions.config import _complete_config_show
+
+    items = dict(_complete_config_show(_ConfigCtx(project=True), ""))
+    # Projects from both workspaces appear (locator reach), plus both workspaces
+    # as qualifiers.
+    assert "datactl" in items
+    assert "api" in items
+    assert "dev" in items
+    assert "prod" in items
+
+
 # --- list completion ---------------------------------------------------------
 
 

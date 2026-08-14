@@ -212,6 +212,18 @@ It is strictly additive — no invocation that worked before changes meaning:
 Only an *ambiguous* qualifier errors; its printed choices carry the trailing NAME,
 so each line stays runnable exactly as typed.
 
+### Dual-mode locator
+
+`config show --project` wants both cross-workspace reach and inert-project
+dumping (a project declared in config but with no `.git` on disk is invisible to
+the locator index). It runs a full project-pinned locator first; on a hit,
+PROJECT is resolved across every workspace, and on a not-found it falls back to
+the literal target-grammar path (`[[WORKSPACE] PROJECT]` against the active or
+named workspace) so the inert subtree is still dumped. Only the not-found case
+falls back; an unresolved ambiguity still errors. Distinct from the
+qualifier-only locator: here the project *is* the leaf, so there is no separate
+trailing token to keep literal.
+
 ### What does *not* take a locator, and why
 
 A locator reaches globally, which fences it off from two classes of command:
@@ -224,7 +236,7 @@ A locator reaches globally, which fences it off from two classes of command:
   globally. `hook install` likewise keeps the grammar: it writes into a `--scope`
   rather than pointing at the worktree.
 - **Nothing to gain.** `project new`, `project clone`, `project resolve`,
-  `project set`, `project show`, and `config show --workspace`/`--project` have
+  `project set`, `project show`, and `config show --workspace` have
   only a WORKSPACE as a qualifier, which is an exact registry key already.
 
 ### Current-context tiebreak

@@ -22,7 +22,7 @@ from wtm.cli.completions.locator import (
     _labelled_locations,
     _locate_candidates,
 )
-from wtm.cli.completions.target import _complete_project, _complete_workspace_arg
+from wtm.cli.completions.target import _complete_workspace_arg
 from wtm.config import Config, GenericTarget, validate_arbitrary_key
 from wtm.core import current_dir
 from wtm.hooks import Scope
@@ -342,7 +342,13 @@ def _complete_config_get(ctx: typer.Context, incomplete: str) -> list[tuple[str,
 
 
 def _complete_config_show(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete TARGET for ``config show``: per-level dispatch on the level flag."""
+    """Complete TARGET for ``config show``: per-level dispatch on the level flag.
+
+    ``--workspace`` takes an exact registry key (no locator gain); ``--project``
+    and ``--worktree`` resolve PROJECT across every workspace, so both dispatch
+    to the PROJECT-pinned locator completion (the worktree's trailing NAME being
+    invented offers nothing beyond its qualifier).
+    """
     level = _config_show_level(
         bool(ctx.params.get("all_workspaces", False)),
         bool(ctx.params.get("workspace", False)),
@@ -353,8 +359,6 @@ def _complete_config_show(ctx: typer.Context, incomplete: str) -> list[tuple[str
         return []
     if level == "workspace":
         return _complete_workspace_arg(ctx, incomplete)
-    if level == "project":
-        return _complete_project(ctx, incomplete)
 
     return _complete_locate_project(ctx, incomplete)
 

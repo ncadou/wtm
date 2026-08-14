@@ -14,7 +14,12 @@ from wtm.cli.completions.config import (
     _complete_config_unset,
     _complete_scope,
 )
-from wtm.cli.locator import _locate_one, _locate_optional, _locate_parent_args
+from wtm.cli.locator import (
+    _locate_one,
+    _locate_optional,
+    _locate_parent_args,
+    _locate_project_or_fallback,
+)
 from wtm.config import (
     Config,
     ConfigTree,
@@ -56,7 +61,10 @@ def config_show(
         False, "--workspace", help="Dump a whole workspace: [WORKSPACE], else active"
     ),
     project: bool = typer.Option(
-        False, "--project", help="Dump a whole project + its worktrees: [[WORKSPACE] PROJECT]"
+        False,
+        "--project",
+        help="Dump a whole project + its worktrees: PROJECT (locator across "
+        "workspaces; falls back to literal when not on disk) or [[WORKSPACE] PROJECT]",
     ),
     worktree: bool = typer.Option(
         False, "--worktree", help="Dump one worktree: [[WORKSPACE] PROJECT] NAME"
@@ -81,9 +89,14 @@ def config_show(
     descending every project and worktree below it (on-disk unioned with
     declared): ``--all`` every workspace, ``--workspace`` one workspace,
     ``--project`` one project, ``--worktree`` one worktree. The entity is named
-    by TARGET (grammar per the level; cwd-inferred when omitted). A subtree dump
-    is effective-values-only: ``--origin``/``--hooks`` are rejected with it, and
-    ``--json`` (orthogonal, valid on the default view too) emits the nested tree.
+    by TARGET (grammar per the level; cwd-inferred when omitted). For
+    ``--project`` and ``--worktree``, PROJECT is resolved across every workspace
+    (a locator); ``--project`` falls back to the literal name when the project
+    is not on disk, and ``--worktree`` keeps the trailing NAME literal so a
+    declared-but-absent worktree stays dumpable. ``--workspace`` takes an exact
+    registry key. A subtree dump is effective-values-only:
+    ``--origin``/``--hooks`` are rejected with it, and ``--json`` (orthogonal,
+    valid on the default view too) emits the nested tree.
     """
     config = ctx.obj.config
     args = args or []
@@ -113,8 +126,11 @@ def _config_show_tree(ctx: typer.Context, level: str, args: list[str]) -> Config
 
     Each level keeps its own slice of the target grammar. The worktree level
     additionally resolves its leading PROJECT qualifier as a locator (the dumped
-    NAME may be declared-but-absent, so the leaf stays literal), which is why this
-    takes the ``ctx`` rather than a bare :class:`Config`.
+    NAME may be declared-but-absent, so the leaf stays literal), and the project
+    level is dual-mode (a full project-pinned locator reaches across workspaces,
+    falling back to the literal path when the project is not on disk so
+    inert-project dumping is preserved) -- which is why this takes the ``ctx``
+    rather than a bare :class:`Config`.
     """
     config = ctx.obj.config
     if level == "all":
@@ -130,7 +146,19 @@ def _config_show_tree(ctx: typer.Context, level: str, args: list[str]) -> Config
         return config.resolve_tree("workspace", workspace=args[0] if args else None)
 
     if level == "project":
-        ws, proj = split_workspace_project(args)
+        # Dual-mode: a full project-pinned locator reaches across workspaces
+        # when the project is on disk; a not-found falls back to the literal
+        # target-grammar path, which preserves inert-project dumping (a
+        # declared-but-absent project is invisible to the locator index).
+        located = (
+            _locate_project_or_fallback(ctx, args, command="config show --project")
+            if args
+            else None
+        )
+        if located is not None:
+            ws, proj = located
+        else:
+            ws, proj = split_workspace_project(args)
 
         return config.resolve_tree("project", workspace=ws, project=proj)
 

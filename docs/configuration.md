@@ -185,8 +185,12 @@ wtm config show --worktree [[WORKSPACE] PROJECT] NAME
 
 The `TARGET` positional follows the target grammar for the chosen level and
 falls back to cwd inference when omitted; `--all` takes no target, and the four
-level flags are mutually exclusive. A subtree dump is effective-values-only:
-`--origin`/`--hooks` do not apply to it (they are rejected).
+level flags are mutually exclusive. `--project` and `--worktree` resolve PROJECT
+as a locator across every workspace (`--project` falls back to the literal name
+when the project is not on disk, so an inert, declared-but-absent project is
+still dumped; `--worktree` keeps the trailing NAME literal for the same reason).
+A subtree dump is effective-values-only: `--origin`/`--hooks` do not apply to it
+(they are rejected).
 
 `-j`/`--json` emits the result as a nested JSON object instead of text —
 `{workspaces: {…}}` for `--all`, else the single rooted node. Each node carries

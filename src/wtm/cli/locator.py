@@ -18,10 +18,16 @@ how much of a command's target it can resolve depends on what already exists.
   Global reach without pretending to see the leaf; a qualifier the index has
   never heard of falls back to the literal token, so these commands keep
   working for a wholly absent target.
+- Dual-mode (_locate_project_or_fallback): config show --project wants both
+  cross-workspace reach *and* inert-project dumping, so a full project-pinned
+  locator is tried first and a not-found falls back to the literal
+  target-grammar path. Only the not-found case falls back; an unresolved
+  ambiguity still errors.
 - Neither: the destructive verbs (delete, rename, hook delete) stay bounded by
   the cwd, because irreversible reaching must be spelled out positionally; and
   the project-tier commands whose only qualifier is a WORKSPACE (project
-  new/clone/resolve/set/show) gain nothing, a workspace name being exact.
+  new/clone/resolve/set/show, config show --workspace) gain nothing, a
+  workspace name being exact.
 """
 
 from __future__ import annotations
@@ -99,6 +105,37 @@ def _locate_project(
     location = _locate_one(ctx, args, command=command, tier=Tier.PROJECT)
 
     return location.workspace, location.project
+
+
+def _locate_project_or_fallback(
+    ctx: typer.Context, args: list[str], *, command: str
+) -> tuple[str, str | None] | None:
+    """Project-pinned locator; ``None`` on not-found so the caller falls back.
+
+    The **dual-mode** shape for ``config show --project``: cross-workspace reach
+    when the project is on disk, ``None`` to let the caller fall back to the
+    literal target-grammar path (preserving inert-project dumping -- a
+    declared-but-absent project is invisible to the index, so the locator returns
+    :class:`NotFound`, never :class:`Ambiguous`). Distinct from
+    :func:`_locate_project` (which raises on not-found) and from
+    :func:`_locate_optional` (which returns ``None`` on *unresolved ambiguity*
+    rather than raising): an unresolved ambiguity here still errors, matching
+    every other locator consumer, because a cross-workspace name clash should be
+    explicit. Requires non-empty *args*; the caller handles the cwd default.
+
+    :returns: ``(workspace, project)`` on a hit, or ``None`` on not-found.
+    """
+    resolution = locate(args, build_index(ctx.obj.config), tier=Tier.PROJECT)
+    if isinstance(resolution, NotFound):
+        return None
+    if isinstance(resolution, Ambiguous):
+        picked = _context_pick(ctx, resolution.candidates)
+        if picked is None:
+            raise WtmError(_ambiguous_message(args, resolution.candidates, command))
+
+        return picked.workspace, picked.project
+
+    return resolution.location.workspace, resolution.location.project
 
 
 def _locate_worktree_args(ctx: typer.Context, args: list[str], *, command: str) -> list[str]:

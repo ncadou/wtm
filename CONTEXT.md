@@ -114,6 +114,13 @@ target it can serve follows from what already exists. Three classes:
 - *Qualifiers only*: the leaf is being named into existence but its ancestors are
   not -- the **qualifier-only locator** commands (`create`, `worktree set`,
   `config show --worktree`).
+- *Dual-mode* (`config show --project`): wants both cross-workspace reach *and*
+  inert-project dumping (a declared-but-absent project is invisible to the
+  index), so a full project-pinned locator is tried first and a not-found falls
+  back to the literal target-grammar path. Only the not-found case falls back;
+  an unresolved ambiguity still errors. Distinct from the qualifier-only
+  locator: here the project *is* the leaf, so there is no separate trailing
+  token to keep literal.
 - *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays
   *bounded by the cwd*, because reaching into another project or workspace
   irreversibly must be spelled out positionally -- a bare `wtm delete main` can
@@ -122,8 +129,8 @@ target it can serve follows from what already exists. Three classes:
   fire hooks and still reach globally. `hook install` also stays, writing into a
   `--scope` rather than pointing at the worktree. And the project-tier commands
   whose only qualifier is a workspace (`project new`/`clone`/`resolve`/`set`/
-  `show`, `config show --workspace`/`--project`) gain nothing, a workspace name
-  being an exact registry key already.
+  `show`, `config show --workspace`) gain nothing, a workspace name being an
+  exact registry key already.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`
