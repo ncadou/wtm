@@ -117,23 +117,21 @@ literal while its leading PROJECT is resolved globally.
 ## Config (`wtm config …`)
 
 ```
-show [--origin] [--hooks]     the effective merged config for the current context: all workspaces, plus the
-                              cwd-bound project (and its worktree, if cwd is in one) with their resolved
-                              values (--origin: the tier each value resolves from + inert-annotation flags;
-                              --hooks: accumulated inline hooks per scope)
-show --all | --workspace |    dump a full subtree rooted at the chosen entity (TARGET per the level's grammar,
-     --project | --worktree   cwd-inferred when omitted), descending every project and worktree below it
-     [TARGET] [-j/--json]     (on-disk unioned with declared); effective-values-only (no --origin/--hooks);
-                              -j/--json emits a nested JSON tree (also valid on the default view)
+show [LOCATOR...] [-g] [-r]    the effective merged config as one global-rooted pruned tree: a branch from
+      [-d TIER] [-o/--origin]  global to the target (or cwd) is always shown; -r extends downward into the
+      [--hooks] [-j/--json]    target's subtree; -d TIER caps the deepest tier rendered (global/workspace/
+                               project/worktree). The optional locator is unpinned (worktree > project >
+                               workspace) and config-aware, so a declared-but-absent project or worktree
+                               still resolves. -g targets the global tier (mutually exclusive with a
+                               locator); -o/--origin annotates where each value comes from; --hooks renders
+                               accumulated inline hooks per scope (both work in all modes); -j/--json emits a
+                               nested JSON tree (effective values only; --json --origin/--hooks error)
 base-branch [VALUE] [--clear] get/set/clear the global default base_branch (user config); the getter
-                              shows the effective value and the scope it comes from
+                               shows the effective value and the scope it comes from
 ```
 
-`--worktree`'s TARGET takes a [qualifier-only locator](#qualifier-only-locator)
-(the dumped NAME may be declared-but-absent, so only its PROJECT is resolved);
-the other levels are named positionally.
-
-See [configuration.md](configuration.md).
+See [configuration.md](configuration.md) for the target-resolution, depth-cap, and
+recurse rules plus worked examples.
 
 ## Targeting a worktree
 
@@ -192,7 +190,7 @@ tree); `hook list` and `hook run` pin it to a worktree. A pin narrows
 
 ### Qualifier-only locator
 
-`create`, `worktree set`, and `config show --worktree` all
+`create` and `worktree set` both
 name a worktree that need not exist, so the leaf is invisible to the index. They
 take a locator over the *leading* tokens only, keeping the trailing NAME literal —
 so `wtm create otherproj feat` creates in another workspace's project, and
@@ -212,18 +210,6 @@ It is strictly additive — no invocation that worked before changes meaning:
 Only an *ambiguous* qualifier errors; its printed choices carry the trailing NAME,
 so each line stays runnable exactly as typed.
 
-### Dual-mode locator
-
-`config show --project` wants both cross-workspace reach and inert-project
-dumping (a project declared in config but with no `.git` on disk is invisible to
-the locator index). It runs a full project-pinned locator first; on a hit,
-PROJECT is resolved across every workspace, and on a not-found it falls back to
-the literal target-grammar path (`[[WORKSPACE] PROJECT]` against the active or
-named workspace) so the inert subtree is still dumped. Only the not-found case
-falls back; an unresolved ambiguity still errors. Distinct from the
-qualifier-only locator: here the project *is* the leaf, so there is no separate
-trailing token to keep literal.
-
 ### What does *not* take a locator, and why
 
 A locator reaches globally, which fences it off from two classes of command:
@@ -236,7 +222,7 @@ A locator reaches globally, which fences it off from two classes of command:
   globally. `hook install` likewise keeps the grammar: it writes into a `--scope`
   rather than pointing at the worktree.
 - **Nothing to gain.** `project new`, `project clone`, `project resolve`,
-  `project set`, `project show`, and `config show --workspace` have
+  `project set`, and `project show` have
   only a WORKSPACE as a qualifier, which is an exact registry key already.
 
 ### Current-context tiebreak

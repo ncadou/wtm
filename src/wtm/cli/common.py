@@ -2,10 +2,9 @@
 
 The shared substrate that straddles the completion/command divide: the generic
 write-scope resolver and its help text (hook + config), the worktree-name
-projection (completion + project tree view), the resolved-rung label (completion
-+ ``config get``), and the ``config show`` level-flag resolver (completion +
-handler). Kept import-free of group modules and completions so both layers may
-import it without forming a cycle.
+projection (completion + project tree view), and the resolved-rung label
+(completion + ``config get``). Kept import-free of group modules and
+completions so both layers may import it without forming a cycle.
 """
 
 from __future__ import annotations
@@ -65,23 +64,3 @@ def _rung_label(rung: SourceRung) -> str:
     """Label a resolved rung by its definition level: tier for an inheritable
     key, otherwise the scope (file tier) it was read from."""
     return rung.tier or rung.scope.value
-
-
-def _config_show_level(
-    all_workspaces: bool, workspace: bool, project: bool, worktree: bool
-) -> str | None:
-    """Resolve the mutually-exclusive level flags to a level name (or ``None``)."""
-    chosen = [
-        name
-        for name, on in (
-            ("all", all_workspaces),
-            ("workspace", workspace),
-            ("project", project),
-            ("worktree", worktree),
-        )
-        if on
-    ]
-    if len(chosen) > 1:
-        raise WtmError("--all/--workspace/--project/--worktree are mutually exclusive")
-
-    return chosen[0] if chosen else None

@@ -247,10 +247,29 @@ class _FakeWorkspace:
 
 
 class _FakeConfig:
-    """A minimal stand-in exposing just the ``workspaces`` mapping build_index reads."""
+    """A minimal stand-in exposing just the ``workspaces`` mapping build_index reads.
 
-    def __init__(self, workspaces: dict[str, Path]) -> None:
+    When *declared_projects* / *declared_worktrees* are given, the fake also
+    answers ``declared_project_names`` / ``declared_worktree_names``, keyed by
+    workspace path, so the ``include_config_only`` flag path is unit-testable.
+    """
+
+    def __init__(
+        self,
+        workspaces: dict[str, Path],
+        *,
+        declared_projects: dict[str, set[str]] | None = None,
+        declared_worktrees: dict[tuple[str, str], set[str]] | None = None,
+    ) -> None:
         self.workspaces = {name: _FakeWorkspace(path) for name, path in workspaces.items()}
+        self._declared_projects = declared_projects or {}
+        self._declared_worktrees = declared_worktrees or {}
+
+    def declared_project_names(self, workspace: _FakeWorkspace) -> set[str]:
+        return self._declared_projects.get(str(workspace.path), set())
+
+    def declared_worktree_names(self, workspace: _FakeWorkspace, project: str) -> set[str]:
+        return self._declared_worktrees.get((str(workspace.path), project), set())
 
 
 def _make_project(root: Path, name: str, worktrees: list[str]) -> None:
@@ -287,3 +306,68 @@ def test_build_index_lenient_on_unreadable_root(tmp_path: Path) -> None:
     assert index.workspaces == ["ghost"]
     assert index.projects == []
     assert index.worktrees == []
+
+
+def test_build_index_include_config_only_adds_inert_project(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    _make_project(work, "api", ["main"])
+    # 'ghost' is declared in config but has no .git on disk.
+    config = _FakeConfig(
+        {"work": work},
+        declared_projects={str(work): {"ghost"}},
+    )  # type: ignore[arg-type]
+
+    index = build_index(config, include_config_only=True)
+
+    assert {(p.workspace, p.project) for p in index.projects} == {
+        ("work", "api"),
+        ("work", "ghost"),
+    }
+
+
+def test_build_index_include_config_only_adds_absent_worktree(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    _make_project(work, "api", ["main"])
+    # 'feat' is declared as a worktree of 'api' but does not exist on disk.
+    config = _FakeConfig(
+        {"work": work},
+        declared_worktrees={(str(work), "api"): {"feat"}},
+    )  # type: ignore[arg-type]
+
+    index = build_index(config, include_config_only=True)
+
+    assert {(w.workspace, w.project, w.name) for w in index.worktrees} == {
+        ("work", "api", "main"),
+        ("work", "api", "feat"),
+    }
+
+
+def test_build_index_include_config_only_dedups(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    _make_project(work, "api", ["main"])
+    # 'api' and 'main' are already on disk -- the flag must not duplicate them.
+    config = _FakeConfig(
+        {"work": work},
+        declared_projects={str(work): {"api"}},
+        declared_worktrees={(str(work), "api"): {"main"}},
+    )  # type: ignore[arg-type]
+
+    index = build_index(config, include_config_only=True)
+
+    assert [p.project for p in index.projects] == ["api"]
+    assert [w.name for w in index.worktrees] == ["main"]
+
+
+def test_build_index_default_excludes_config_only(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    _make_project(work, "api", ["main"])
+    config = _FakeConfig(
+        {"work": work},
+        declared_projects={str(work): {"ghost"}},
+        declared_worktrees={(str(work), "api"): {"feat"}},
+    )  # type: ignore[arg-type]
+
+    index = build_index(config)  # default: include_config_only=False
+
+    assert {(p.workspace, p.project) for p in index.projects} == {("work", "api")}
+    assert {(w.workspace, w.project, w.name) for w in index.worktrees} == {("work", "api", "main")}

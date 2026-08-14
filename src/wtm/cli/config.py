@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from wtm.cli.common import _GENERIC_SCOPE_HELP, _config_show_level, _generic_scope, _rung_label
+from wtm.cli.common import _GENERIC_SCOPE_HELP, _generic_scope, _rung_label
 from wtm.cli.completions.config import (
     _complete_config_get,
     _complete_config_set,
@@ -14,28 +14,21 @@ from wtm.cli.completions.config import (
     _complete_config_unset,
     _complete_scope,
 )
-from wtm.cli.locator import (
-    _locate_one,
-    _locate_optional,
-    _locate_parent_args,
-    _locate_project_or_fallback,
-)
+from wtm.cli.locator import _locate_one, _locate_optional
 from wtm.config import (
-    Config,
-    ConfigTree,
+    ConfigSlice,
+    DepthTier,
     GenericTarget,
-    ResolvedConfig,
     ResolvedProject,
     ResolvedWorkspace,
     ResolvedWorktree,
-    Workspace,
+    SliceTarget,
     validate_arbitrary_key,
     validate_inheritable_element,
 )
 from wtm.core import WtmError, current_dir
 from wtm.hooks import HookSpec, Scope
-from wtm.output import config_tree_json, log
-from wtm.target import split_target, split_workspace_project
+from wtm.output import config_slice_json, log
 
 config_app = typer.Typer(
     help="Inspect config (show), manage the global default (base-branch), "
@@ -50,211 +43,67 @@ def config_show(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[TARGET]",
-        help="Entity to root a level dump at (grammar per the level flag)",
+        metavar="[LOCATOR]",
+        help="Optional locator naming the target entity (worktree/project/workspace)",
         autocompletion=_complete_config_show,
     ),
-    all_workspaces: bool = typer.Option(
-        False, "--all", help="Dump every workspace, fully descended (no TARGET)"
+    global_scope: bool = typer.Option(
+        False, "-g", "--global", help="Target the global tier (mutually exclusive with a locator)"
     ),
-    workspace: bool = typer.Option(
-        False, "--workspace", help="Dump a whole workspace: [WORKSPACE], else active"
+    recurse: bool = typer.Option(
+        False, "-r", "--recurse", help="Extend downward into the target's subtree"
     ),
-    project: bool = typer.Option(
-        False,
-        "--project",
-        help="Dump a whole project + its worktrees: PROJECT (locator across "
-        "workspaces; falls back to literal when not on disk) or [[WORKSPACE] PROJECT]",
-    ),
-    worktree: bool = typer.Option(
-        False, "--worktree", help="Dump one worktree: [[WORKSPACE] PROJECT] NAME"
+    depth: DepthTier | None = typer.Option(
+        None,
+        "-d",
+        "--depth",
+        help="Cap the deepest tier rendered (global/workspace/project/worktree)",
     ),
     show_origin: bool = typer.Option(
-        False, "-o", "--origin", help="Annotate where each value comes from (default view only)"
+        False, "-o", "--origin", help="Annotate where each value comes from"
     ),
-    hooks: bool = typer.Option(
-        False, "--hooks", help="Also show accumulated inline hooks (default view only)"
-    ),
+    hooks: bool = typer.Option(False, "--hooks", help="Also show accumulated inline hooks"),
     as_json: bool = typer.Option(False, "-j", "--json", help="Emit as JSON instead of text"),
 ) -> None:
-    """Show the effective merged config for the current context.
+    """Show the effective merged config as a global-rooted pruned tree.
 
-    With no level flag, a read-only cwd-oriented view: all declared workspaces
-    are listed; the active one descends only as far as the cwd sits -- the
-    cwd-bound project's effective annotation and its worktree tier when the cwd
-    is inside one. ``--origin`` annotates the tier each value resolves from and
-    flags inert annotations; ``--hooks`` renders accumulated inline hooks.
-
-    A level flag instead dumps a full subtree, rooted at the chosen entity and
-    descending every project and worktree below it (on-disk unioned with
-    declared): ``--all`` every workspace, ``--workspace`` one workspace,
-    ``--project`` one project, ``--worktree`` one worktree. The entity is named
-    by TARGET (grammar per the level; cwd-inferred when omitted). For
-    ``--project`` and ``--worktree``, PROJECT is resolved across every workspace
-    (a locator); ``--project`` falls back to the literal name when the project
-    is not on disk, and ``--worktree`` keeps the trailing NAME literal so a
-    declared-but-absent worktree stays dumpable. ``--workspace`` takes an exact
-    registry key. A subtree dump is effective-values-only:
-    ``--origin``/``--hooks`` are rejected with it, and ``--json`` (orthogonal,
-    valid on the default view too) emits the nested tree.
+    One optional unpinned locator (or cwd) resolves a target entity. One pruned
+    tree rooted at global is rendered. ``-r`` extends downward (additive);
+    ``-d TIER`` caps the deepest tier rendered. ``--origin`` annotates where
+    each value comes from; ``--hooks`` renders accumulated inline hooks. Both
+    work in all modes.
     """
     config = ctx.obj.config
     args = args or []
-    level = _config_show_level(all_workspaces, workspace, project, worktree)
 
-    if level is None:
-        if args:
-            raise WtmError(
-                "a TARGET requires a level flag (--all/--workspace/--project/--worktree)"
-            )
-        _config_show_default(config, show_origin, hooks, as_json)
+    if as_json and (show_origin or hooks):
+        raise WtmError("--json cannot be combined with --origin or --hooks")
 
-        return
+    if global_scope and args:
+        raise WtmError("-g/--global cannot be combined with a locator")
 
-    if show_origin or hooks:
-        raise WtmError("--origin/--hooks apply to the default view, not a level dump")
-    tree = _config_show_tree(ctx, level, args)
-    if as_json:
-        print(config_tree_json(tree))
-
-        return
-    _print_config_tree(tree)
-
-
-def _config_show_tree(ctx: typer.Context, level: str, args: list[str]) -> ConfigTree:
-    """Decode TARGET per *level* and resolve the subtree.
-
-    Each level keeps its own slice of the target grammar. The worktree level
-    additionally resolves its leading PROJECT qualifier as a locator (the dumped
-    NAME may be declared-but-absent, so the leaf stays literal), and the project
-    level is dual-mode (a full project-pinned locator reaches across workspaces,
-    falling back to the literal path when the project is not on disk so
-    inert-project dumping is preserved) -- which is why this takes the ``ctx``
-    rather than a bare :class:`Config`.
-    """
-    config = ctx.obj.config
-    if level == "all":
-        if args:
-            raise WtmError("--all takes no TARGET")
-
-        return config.resolve_tree("all")
-
-    if level == "workspace":
-        if len(args) > 1:
-            raise WtmError("--workspace takes at most a WORKSPACE")
-
-        return config.resolve_tree("workspace", workspace=args[0] if args else None)
-
-    if level == "project":
-        # Dual-mode: a full project-pinned locator reaches across workspaces
-        # when the project is on disk; a not-found falls back to the literal
-        # target-grammar path, which preserves inert-project dumping (a
-        # declared-but-absent project is invisible to the locator index).
-        located = (
-            _locate_project_or_fallback(ctx, args, command="config show --project")
-            if args
-            else None
+    if global_scope:
+        target: SliceTarget | None = None
+    elif args:
+        location = _locate_one(ctx, args, command="config show", include_config_only=True)
+        target = SliceTarget(
+            tier=location.tier.value,
+            workspace=location.workspace,
+            project=location.project,
+            name=location.name,
         )
-        if located is not None:
-            ws, proj = located
-        else:
-            ws, proj = split_workspace_project(args)
+    else:
+        target = config.cwd_location()
 
-        return config.resolve_tree("project", workspace=ws, project=proj)
+    slice_ = config.resolve_slice(
+        target=target, recurse=recurse, depth_limit=depth.depth if depth is not None else None
+    )
 
-    # worktree: [[WORKSPACE] PROJECT] NAME (cwd-inferred when no tokens)
-    args = _locate_parent_args(ctx, args, command="config show --worktree")
-    ws, proj, name = split_target(args) if args else (None, None, None)
-
-    return config.resolve_tree("worktree", workspace=ws, project=proj, name=name)
-
-
-def _config_show_default(config: Config, show_origin: bool, hooks: bool, as_json: bool) -> None:
-    """The cwd-oriented default view (unchanged behavior; JSON variant orthogonal)."""
-    view = config.resolve_view()
     if as_json:
-        print(config_tree_json(_default_view_as_tree(config, view)))
+        print(config_slice_json(slice_))
 
         return
-
-    print(f"active workspace: {config.active or '(none)'}")
-    if config.default_base_branch:
-        origin = f"  [{config.base_branch_source().value}]" if show_origin else ""
-        print(f"default base_branch: {config.default_base_branch}{origin}")
-
-    print("workspaces:")
-    for name, ws in sorted(config.workspaces.items()):
-        origin = f"  [{ws.scope.value}]" if show_origin else ""
-        print(f"  {name}: {ws.path}{origin}")
-        if ws.base_branch:
-            print(f"    base_branch: {ws.base_branch}")
-        if name == config.active:
-            _print_extra("    ", ws.extra)
-        for pname in sorted(_workspace_project_names(config, ws)):
-            _print_workspace_project(config, ws, pname, show_origin)
-        if hooks:
-            _print_scope_hooks("    ", ws.hooks, show_origin, "workspace")
-
-    _print_effective_project(view, show_origin, hooks)
-
-
-def _default_view_as_tree(config: Config, view: ResolvedConfig) -> ConfigTree:
-    """Wrap the cwd-capped view as a single-project ``ConfigTree`` for ``--json``.
-
-    Only the cwd-bound project (and its worktree) are resolved in the default
-    view, so JSON of it is that project node, or the empty ``all`` root when the
-    cwd is not inside a project.
-    """
-    if view.project is None:
-        return ConfigTree(level="all", default_base_branch=config.default_base_branch)
-
-    return ConfigTree(level="project", project=view.project)
-
-
-def _workspace_project_names(config: Config, ws: Workspace) -> set[str]:
-    """Projects to list under *ws*: on-disk dirs unioned with declared names."""
-    return config.project_names(ws)
-
-
-def _print_workspace_project(config: Config, ws: Workspace, pname: str, show_origin: bool) -> None:
-    """Render one project line under a workspace, resolved via the probe engine."""
-    annotation = config.project_annotation(ws, pname)
-    effective, source = config.base_branch_provenance(ws, pname)
-    branch = f"{effective}  [{source}]" if (effective and show_origin) else effective
-    bits = [b for b in (annotation.description, branch) if b]
-    detail = f" ({', '.join(bits)})" if bits else ""
-    inert = ""
-    if show_origin and not (ws.path / pname / ".git").is_dir():
-        inert = "  (no such project on disk)"
-    print(f"    project {pname}{detail}{inert}")
-
-
-def _print_effective_project(view: ResolvedConfig, show_origin: bool, hooks: bool) -> None:
-    """Render the cwd-bound project (and its worktree) from the resolved view."""
-    project = view.project
-    if project is None:
-        return
-
-    print(f"project {project.name}: {project.dir}")
-    if project.description:
-        print(f"  description: {project.description}")
-    if project.effective_base_branch:
-        origin = f"  [{project.base_branch_source}]" if show_origin else ""
-        print(f"  base_branch: {project.effective_base_branch}{origin}")
-    _print_extra("  ", project.extra)
-    if hooks:
-        _print_scope_hooks("  ", project.hooks, show_origin, "project")
-
-    worktree = project.worktree
-    if worktree is None:
-        return
-
-    print(f"  worktree {worktree.name}: {worktree.dir}")
-    if worktree.description:
-        print(f"    description: {worktree.description}")
-    _print_extra("    ", worktree.extra)
-    if hooks:
-        _print_scope_hooks("    ", worktree.hooks, show_origin, "worktree")
+    _print_config_slice(slice_, show_origin, hooks)
 
 
 def _print_extra(indent: str, extra: dict[str, object]) -> None:
@@ -271,60 +120,74 @@ def _print_scope_hooks(indent: str, spec: HookSpec, show_origin: bool, scope: st
             print(f"{indent}hook {event} = {command}{origin}")
 
 
-def _print_config_tree(tree: ConfigTree) -> None:
-    """Render a scoped subtree dump as text, rooted at the requested level.
+# --- unified slice renderer (global-rooted, ungated origin/hooks) -------------
 
-    Effective-values-only (no ``--origin``/``--hooks``): each entity prints its
-    scalars plus arbitrary keys, then descends every child. The workspace/project
-    headers only appear when they are part of the dumped subtree.
+
+def _print_config_slice(slice: ConfigSlice, show_origin: bool, hooks: bool) -> None:
+    """Render a global-rooted pruned config slice as text.
+
+    One tree from global down to *depth_limit*, with ``--origin`` annotating
+    each value's source and ``--hooks`` rendering accumulated inline hooks at
+    every tier. Both flags are ungated (work in all modes, per Q6).
     """
-    if tree.level == "all":
-        if tree.default_base_branch:
-            print(f"default base_branch: {tree.default_base_branch}")
-        for ws in tree.workspaces:
-            _print_workspace_tree(ws, "")
-
-        return
-
-    if tree.workspace is not None:
-        _print_workspace_tree(tree.workspace, "")
-    elif tree.project is not None:
-        _print_project_tree(tree.project, "")
-    elif tree.worktree is not None:
-        _print_worktree_tree(tree.worktree, "")
+    if slice.default_base_branch:
+        origin = (
+            f"  [{slice.base_branch_source}]" if show_origin and slice.base_branch_source else ""
+        )
+        print(f"default base_branch: {slice.default_base_branch}{origin}")
+    _print_extra("", slice.global_extra)
+    if hooks:
+        _print_scope_hooks("", slice.global_hooks, show_origin, "global")
+    for ws in slice.workspaces:
+        _print_slice_workspace(ws, "", show_origin, hooks)
 
 
-def _print_workspace_tree(ws: ResolvedWorkspace, indent: str) -> None:
-    """Render one workspace node and descend its projects."""
-    print(f"{indent}workspace {ws.entry.name}: {ws.entry.path}")
+def _print_slice_workspace(
+    ws: ResolvedWorkspace, indent: str, show_origin: bool, hooks: bool
+) -> None:
+    """Render one workspace node with origin/hooks, descending its pruned projects."""
+    origin = f"  [{ws.entry.scope.value}]" if show_origin else ""
+    print(f"{indent}workspace {ws.entry.name}: {ws.entry.path}{origin}")
     if ws.entry.description:
         print(f"{indent}  description: {ws.entry.description}")
     if ws.entry.base_branch:
-        print(f"{indent}  base_branch: {ws.entry.base_branch}")
+        bb_origin = f"  [{ws.base_branch_source}]" if show_origin and ws.base_branch_source else ""
+        print(f"{indent}  base_branch: {ws.entry.base_branch}{bb_origin}")
     _print_extra(f"{indent}  ", ws.entry.extra)
+    if hooks:
+        _print_scope_hooks(f"{indent}  ", ws.entry.hooks, show_origin, "workspace")
     for project in ws.projects:
-        _print_project_tree(project, f"{indent}  ")
+        _print_slice_project(project, f"{indent}  ", show_origin, hooks)
 
 
-def _print_project_tree(project: ResolvedProject, indent: str) -> None:
-    """Render one project node and descend its worktrees."""
+def _print_slice_project(
+    project: ResolvedProject, indent: str, show_origin: bool, hooks: bool
+) -> None:
+    """Render one project node with origin/hooks, descending its pruned worktrees."""
     inert = "" if project.exists else "  (no .git on disk)"
     print(f"{indent}project {project.name}: {project.dir}{inert}")
     if project.description:
         print(f"{indent}  description: {project.description}")
     if project.effective_base_branch:
-        print(f"{indent}  base_branch: {project.effective_base_branch}")
+        origin = f"  [{project.base_branch_source}]" if show_origin else ""
+        print(f"{indent}  base_branch: {project.effective_base_branch}{origin}")
     _print_extra(f"{indent}  ", project.extra)
+    if hooks:
+        _print_scope_hooks(f"{indent}  ", project.hooks, show_origin, "project")
     for worktree in project.worktrees:
-        _print_worktree_tree(worktree, f"{indent}  ")
+        _print_slice_worktree(worktree, f"{indent}  ", show_origin, hooks)
 
 
-def _print_worktree_tree(worktree: ResolvedWorktree, indent: str) -> None:
-    """Render one worktree leaf (no base_branch tier)."""
+def _print_slice_worktree(
+    worktree: ResolvedWorktree, indent: str, show_origin: bool, hooks: bool
+) -> None:
+    """Render one worktree leaf with origin/hooks (no base_branch tier)."""
     print(f"{indent}worktree {worktree.name}: {worktree.dir}")
     if worktree.description:
         print(f"{indent}  description: {worktree.description}")
     _print_extra(f"{indent}  ", worktree.extra)
+    if hooks:
+        _print_scope_hooks(f"{indent}  ", worktree.hooks, show_origin, "worktree")
 
 
 def _tilde(path: Path) -> str:

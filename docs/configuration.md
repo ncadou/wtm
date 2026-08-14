@@ -162,41 +162,67 @@ that one file; commands still accumulate across scopes at read time.
 
 ## Showing the effective config
 
-`wtm config show [--origin] [--hooks]` prints the effective merge for the
-current context: it lists all workspaces, then descends only in the active one
-as far as the cwd sits — the cwd-bound project's resolved annotation and, when
-the cwd is inside a worktree, that worktree's tier. Arbitrary (non-reserved)
-keys resolved along the descent are always shown. `--origin` tags each value
-with its **winning** scope (the full chain lives in `config get KEY --origin`);
-`--hooks` also renders accumulated inline hooks per scope.
-
-### Dumping a whole subtree
-
-A level flag turns the cwd-capped view into a full subtree dump, rooted at a
-chosen entity and descending **every** project and worktree below it (on-disk
-names unioned with declared ones, so annotated-but-inert entities still show):
+`wtm config show` renders the effective merge as one **global-rooted pruned
+tree**. A single optional locator (or the cwd) resolves a target entity; the
+branch from global down to that target is always shown, and `-r` extends
+downward into the target's subtree.
 
 ```
-wtm config show --all                          # every workspace, fully
-wtm config show --workspace [WORKSPACE]        # one workspace (default: active)
-wtm config show --project [[WORKSPACE] PROJECT]# one project + its worktrees
-wtm config show --worktree [[WORKSPACE] PROJECT] NAME
+wtm config show [LOCATOR...] [-g] [-r] [-d TIER] [-o/--origin] [--hooks] [-j/--json]
 ```
 
-The `TARGET` positional follows the target grammar for the chosen level and
-falls back to cwd inference when omitted; `--all` takes no target, and the four
-level flags are mutually exclusive. `--project` and `--worktree` resolve PROJECT
-as a locator across every workspace (`--project` falls back to the literal name
-when the project is not on disk, so an inert, declared-but-absent project is
-still dumped; `--worktree` keeps the trailing NAME literal for the same reason).
-A subtree dump is effective-values-only: `--origin`/`--hooks` do not apply to it
-(they are rejected).
+**Target resolution** (first match wins):
 
-`-j`/`--json` emits the result as a nested JSON object instead of text —
-`{workspaces: {…}}` for `--all`, else the single rooted node. Each node carries
-its scalars plus an `extra` object of arbitrary keys; worktree nodes never carry
-a `base_branch` (there is no worktree `base_branch` tier). `--json` is
-orthogonal: it also works on the default (no-level) cwd view.
+1. `-g` with any locator token → error (mutually exclusive);
+2. `-g` → target is the global tier;
+3. one or more locator tokens → an unpinned locator resolves the target across
+   every declared workspace, auto-detecting its tier (worktree > project >
+   workspace). The locator is config-aware, so a project declared in config but
+   absent on disk (inert), or a worktree declared but not yet created, still
+   resolves;
+4. no tokens → inferred from the cwd (worktree > project > workspace), falling
+   back to global when the cwd is outside every declared workspace.
+
+**Depth cap (`-d TIER`):** `global`=0, `workspace`=1, `project`=2,
+`worktree`=3. Without `-d` the deepest tier rendered defaults to the target's
+own tier (the branch down to it, nothing below); with `-r` it defaults to
+`worktree` (the fullest descent). An explicit `-d TIER` caps the deepest tier
+rendered *anywhere* in the output — it prunes the target itself when shallower
+(e.g. from a worktree, `-d project` drops the worktree tier, leaving
+project + workspace + global), and is a silent no-op when deeper than the target
+without `-r`. `global` is a valid value.
+
+**Recurse (`-r`):** additive. The branch from global to the target is always
+shown; `-r` additionally expands the target's subtree (its siblings under each
+ancestor and its own descendants) up to the depth cap.
+
+| Command | Output |
+|---------|--------|
+| `config show` (in a worktree) | global → workspace → project → worktree |
+| `config show -d project` (in a worktree) | global → workspace → project (worktree pruned) |
+| `config show myproj` | global → workspace → project |
+| `config show myproj -r` | global → workspace → project + every worktree |
+| `config show myproj -r -d project` | global → workspace → project (no worktrees) |
+| `config show -g` | global tier only |
+| `config show -g -r` | everything (every workspace, project, worktree) |
+| `config show -g -r -d project` | every workspace and project, no worktrees |
+| `config show myws -r -d project` | global → workspace + all its projects, no worktrees |
+
+On-disk entities are unioned with declared ones, so annotated-but-inert
+projects and declared-but-absent worktrees still surface (an inert project is
+marked `(no .git on disk)`). Arbitrary (non-reserved) keys resolved along the
+shown branch are always printed.
+
+`--origin` tags each value with its **winning** scope (the full chain lives in
+`config get KEY --origin`); `--hooks` also renders accumulated inline hooks per
+scope. Both are **ungated** — they apply in every mode, with or without `-r` or
+`-g` (the former subtree-only restriction is gone).
+
+`-j`/`--json` emits the result as a nested JSON object instead of text, always
+rooted at global (`default_base_branch`, `base_branch_source`, `extra`, then
+`workspaces` → `projects` → `worktrees`, pruned exactly as the text form).
+Effective values only — `--json` combined with `--origin` or `--hooks` is an
+error (use `config get KEY --origin` for structured provenance).
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 __all__ = [
     "MANAGED_ENV_VARS",
-    "config_tree_json",
+    "config_slice_json",
     "emit_env_line",
     "emit_shell",
     "log",
@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wtm.config import (
-        ConfigTree,
+        ConfigSlice,
         ResolvedProject,
         ResolvedWorkspace,
         ResolvedWorktree,
@@ -190,34 +190,23 @@ def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:
     return [f"{name.ljust(width)}  {annotation}".rstrip() for name, annotation in rows]
 
 
-def config_tree_json(tree: ConfigTree) -> str:
-    """Serialise a scoped ``config show`` subtree dump as a nested JSON object.
+def config_slice_json(slice: ConfigSlice) -> str:
+    """Serialise a global-rooted pruned config slice as a nested JSON object.
 
-    The machine-readable counterpart of the text tree renderer: rooted at the
-    requested level (worktree / project / workspace / all), effective values
-    only -- no provenance (``--origin``) and no hooks, per the dump contract.
-    Arbitrary keys nest under ``"extra"`` (collision-safe with reserved fields);
-    paths render as strings. Children are objects keyed by name.
+    The machine-readable counterpart of the text slice renderer: always rooted
+    at global (``default_base_branch`` / ``extra``), with workspaces, projects,
+    and worktrees nested as pruned by the slice. Effective values only -- no
+    provenance (``--origin``) and no hooks, per the JSON contract (``--json
+    --origin``/``--json --hooks`` error).
     """
-    if tree.level == "all":
-        root: dict[str, object] = {}
-        if tree.default_base_branch:
-            root["default_base_branch"] = tree.default_base_branch
-        root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in tree.workspaces}
+    root: dict[str, object] = {}
+    if slice.default_base_branch:
+        root["default_base_branch"] = slice.default_base_branch
+    if slice.global_extra:
+        root["extra"] = dict(sorted(slice.global_extra.items()))
+    root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in slice.workspaces}
 
-        return json.dumps(root, default=str)
-
-    if tree.level == "workspace":
-        assert tree.workspace is not None
-        node: dict[str, object] = _workspace_node(tree.workspace)
-    elif tree.level == "project":
-        assert tree.project is not None
-        node = _project_node(tree.project)
-    else:  # worktree
-        assert tree.worktree is not None
-        node = _worktree_node(tree.worktree)
-
-    return json.dumps(node, default=str)
+    return json.dumps(root, default=str)
 
 
 def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:

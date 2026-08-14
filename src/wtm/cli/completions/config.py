@@ -16,13 +16,8 @@ from __future__ import annotations
 
 import typer
 
-from wtm.cli.common import _config_show_level, _rung_label
-from wtm.cli.completions.locator import (
-    _complete_locate_project,
-    _labelled_locations,
-    _locate_candidates,
-)
-from wtm.cli.completions.target import _complete_workspace_arg
+from wtm.cli.common import _rung_label
+from wtm.cli.completions.locator import _labelled_locations, _locate_candidates
 from wtm.config import Config, GenericTarget, validate_arbitrary_key
 from wtm.core import current_dir
 from wtm.hooks import Scope
@@ -338,29 +333,27 @@ def _complete_config_get(ctx: typer.Context, incomplete: str) -> list[tuple[str,
     return _merge_union(continuation, completion)
 
 
-# --- unchanged: config show completion -------------------------------------
+# --- config show completion (union, no level dispatch) -----------------------
 
 
 def _complete_config_show(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete TARGET for ``config show``: per-level dispatch on the level flag.
+    """Complete the positional for ``config show``: union locator candidates.
 
-    ``--workspace`` takes an exact registry key (no locator gain); ``--project``
-    and ``--worktree`` resolve PROJECT across every workspace, so both dispatch
-    to the PROJECT-pinned locator completion (the worktree's trailing NAME being
-    invented offers nothing beyond its qualifier).
+    The positional is an unpinned locator (all tiers: worktree, project,
+    workspace), enriched with config-only entities (``include_config_only=True``)
+    so declared-but-absent projects and worktrees resolve too. No level flags
+    -- the old per-level dispatch is gone.
     """
-    level = _config_show_level(
-        bool(ctx.params.get("all_workspaces", False)),
-        bool(ctx.params.get("workspace", False)),
-        bool(ctx.params.get("project", False)),
-        bool(ctx.params.get("worktree", False)),
-    )
-    if level in (None, "all"):
-        return []
-    if level == "workspace":
-        return _complete_workspace_arg(ctx, incomplete)
+    args = list(ctx.params.get("args") or ctx.args or [])
 
-    return _complete_locate_project(ctx, incomplete)
+    try:
+        config = Config.load()
+        index = build_index(config, include_config_only=True)
+    except Exception:
+        return []
+    multi_ws = len(index.workspaces) > 1
+
+    return _labelled_locations(_locate_candidates(args, index, None), multi_ws)
 
 
 # --- locator-aware scope completion ----------------------------------------

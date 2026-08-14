@@ -208,7 +208,13 @@ def create(
     workspace's project.
     """
     result = ctx.obj.worktree.create(
-        _locate_parent_args(ctx, args or [], command="create"),
+        _locate_parent_args(
+            ctx,
+            args or [],
+            command="create",
+            include_config_only=True,
+            require_project_on_disk=True,
+        ),
         branch=branch,
         base=base,
         destdir=destdir,

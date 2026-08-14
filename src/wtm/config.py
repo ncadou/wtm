@@ -22,7 +22,7 @@ offers three tiers, all on :class:`Config`:
   scope through a :class:`ConfigAddress` and a key (a bare key, or a tuple for a
   nested table). This is the substrate every other tier is built on;
 * a **typed read view** (the :class:`Workspace` / :class:`ProjectAnnotation` /
-  :class:`HookSpec` dataclasses and :meth:`Config.resolve_view`), resolving
+  :class:`HookSpec` dataclasses and :meth:`Config.resolve_slice`), resolving
   scalars most-specific-first via declarative cascades over the value facility
   and reporting provenance;
 * a **structural write tier** -- the named registry mutations
@@ -58,15 +58,16 @@ from __future__ import annotations
 __all__ = [
     "Config",
     "ConfigAddress",
-    "ConfigTree",
+    "ConfigSlice",
+    "DepthTier",
     "GenericTarget",
     "HookSpec",
     "ProjectAnnotation",
-    "ResolvedConfig",
     "ResolvedProject",
     "ResolvedWorkspace",
     "ResolvedWorktree",
     "Scope",
+    "SliceTarget",
     "SourceRung",
     "Workspace",
     "resolve_project_dir",
@@ -106,6 +107,35 @@ class Scope(StrEnum):
     WORKSPACE = "workspace"
     PROJECT = "project"
     WORKTREE = "worktree"
+
+
+class DepthTier(StrEnum):
+    """The deepest tier rendered in a config slice (``-d`` flag).
+
+    Maps to a depth integer: ``global``=0, ``workspace``=1, ``project``=2,
+    ``worktree``=3. Caps the deepest tier rendered *anywhere* in the output.
+    """
+
+    GLOBAL = "global"
+    WORKSPACE = "workspace"
+    PROJECT = "project"
+    WORKTREE = "worktree"
+
+    @property
+    def depth(self) -> int:
+        """The integer depth this tier maps to (0-3)."""
+        return _DEPTH_TIER_DEPTH[self]
+
+
+_DEPTH_TIER_DEPTH = {
+    DepthTier.GLOBAL: 0,
+    DepthTier.WORKSPACE: 1,
+    DepthTier.PROJECT: 2,
+    DepthTier.WORKTREE: 3,
+}
+
+# String tier name -> depth for SliceTarget (no "global" key: global is None).
+_SLICE_TIER_DEPTH = {"workspace": 1, "project": 2, "worktree": 3}
 
 
 # --- scope addressing --------------------------------------------------------
@@ -256,51 +286,57 @@ class ResolvedProject:
 
 
 @dataclass(frozen=True)
-class ResolvedConfig:
-    """The effective config for the active cwd chain (workspace -> project -> worktree).
-
-    A depth-capped, cwd-oriented view: the active workspace's effective scalars
-    plus, only when the cwd sits inside them, the cwd-bound project and its
-    worktree. Non-active workspaces are left as their declared :class:`Workspace`
-    entries (rendered without descent).
-    """
-
-    workspaces: dict[str, Workspace]
-    active: str | None
-    default_base_branch: str | None
-    active_workspace: Workspace | None  # the active workspace's effective entry
-    project: ResolvedProject | None  # the cwd-bound project, when cwd is inside one
-
-
-@dataclass(frozen=True)
 class ResolvedWorkspace:
     """A workspace with every project (and their worktrees) fully descended.
 
     The tree-dump analog of the shallow :class:`Workspace` entry: *entry* is the
     declared workspace itself and *projects* its fully-resolved projects (on-disk
     unioned with declared), each carrying its own ``worktrees`` tuple.
+    *base_branch_source* is the scope value (``"workspace"``/``"user"``/
+    ``"system"``) carrying the workspace's own ``base_branch``, or ``None`` --
+    used by ``config show --origin`` (text-only, never JSON).
     """
 
     entry: Workspace
     projects: tuple[ResolvedProject, ...] = ()
+    base_branch_source: str | None = None
 
 
 @dataclass(frozen=True)
-class ConfigTree:
-    """A scoped subtree dump rooted at one entity level (see :meth:`Config.resolve_tree`).
+class SliceTarget:
+    """The target entity a config slice roots at (``None`` = global).
 
-    Exactly one of *worktree* / *project* / *workspace* / *workspaces* is set,
-    per the requested root level (worktree / project / workspace / all). Every
-    node below the root is fully descended (on-disk unioned with declared);
-    *default_base_branch* is carried for the ``all`` root's header.
+    A lightweight, locator-independent representation of the resolved target:
+    *tier* is ``"workspace"`` / ``"project"`` / ``"worktree"``; *workspace* is
+    always set; *project* and *name* are set for the project and worktree tiers.
+    The CLI layer converts a locator :class:`wtm.locator.Location` (or the
+    cwd-inferred target) to this before calling :meth:`Config.resolve_slice`.
     """
 
-    level: str  # worktree | project | workspace | all
-    default_base_branch: str | None = None
-    worktree: ResolvedWorktree | None = None
-    project: ResolvedProject | None = None
-    workspace: ResolvedWorkspace | None = None
-    workspaces: tuple[ResolvedWorkspace, ...] = ()
+    tier: str
+    workspace: str
+    project: str | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfigSlice:
+    """A pruned config tree: one branch from global to the target, optional subtree.
+
+    Rooted at global, rendered to *depth_limit* (0=global, 1=workspace,
+    2=project, 3=worktree). The branch from global to the target is always
+    present; with ``-r`` the target's subtree expands. *workspaces* carries the
+    pruned workspace nodes (empty when depth-limited below the workspace tier).
+    *base_branch_source* is the scope value (``"user"``/``"system"``) declaring
+    the global default base_branch, or ``None``.
+    """
+
+    default_base_branch: str | None
+    base_branch_source: str | None
+    global_extra: dict[str, object]
+    global_hooks: HookSpec
+    workspaces: tuple[ResolvedWorkspace, ...]
+    depth_limit: int
 
 
 @dataclass(frozen=True)
@@ -351,7 +387,7 @@ class SourceRung:
 Key = str | tuple[str, ...]
 
 RESERVED_KEYS = frozenset(
-    {"hooks", "projects", "worktrees", "path", "default_workspace", "inheritable"}
+    {"hooks", "projects", "worktrees", "workspaces", "path", "default_workspace", "inheritable"}
 )
 _CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
 # Keys whose tables are pure containers of named children (rendered as
@@ -380,9 +416,9 @@ def validate_arbitrary_key(key: str) -> None:
     """Reject a reserved name as an arbitrary ``config`` key (raises on clash).
 
     The container tables (``hooks`` / ``projects`` / ``worktrees``), the
-    user-file declarations (``path`` / ``default_workspace``), and the
-    ``inheritable`` allowlist own their own typed surfaces; the generic key
-    facility must not shadow them.
+    user-file declarations (``path`` / ``default_workspace``), the global
+    registry table (``workspaces``), and the ``inheritable`` allowlist own their
+    own typed surfaces; the generic key facility must not shadow them.
     """
     if key in RESERVED_KEYS:
         raise WtmError(
@@ -1387,6 +1423,20 @@ class Config:
 
         return None
 
+    def workspace_base_branch_source(self, workspace: Workspace) -> Scope | None:
+        """Return the scope carrying the workspace's own ``base_branch``, or ``None``.
+
+        Walks the workspace locality cascade (workspace-local file, then the
+        user/system registry entries) most-local-first, mirroring
+        :meth:`base_branch_source` for the global default. Used by ``config show
+        --origin`` to annotate a workspace-tier base_branch.
+        """
+        for probe in self._workspace_probes(workspace):
+            if _read_table(self._store, probe).get("base_branch"):
+                return probe.scope
+
+        return None
+
     # --- structural write tier (user file only) ------------------------------
 
     def add_workspace(
@@ -1534,66 +1584,7 @@ class Config:
             default_workspace=default_workspace,
         )
 
-    # --- resolved view -------------------------------------------------------
-
-    def resolve_view(self, *, cwd: Path | None = None) -> ResolvedConfig:
-        """Materialise the effective config for the active cwd chain.
-
-        Descent happens only in the active workspace, and only as deep as the
-        cwd sits: the cwd-bound project (if cwd is under one) carries its merged
-        effective annotation, and its worktree tier is attached only when cwd is
-        inside an actual worktree. ``None`` *cwd* (the shell dir was removed)
-        simply skips the descent.
-        """
-        cwd = cwd if cwd is not None else current_dir(resolve=False)
-        active_ws = self.workspaces.get(self.active) if self.active is not None else None
-
-        project = self._resolve_cwd_project(active_ws, cwd) if active_ws is not None else None
-
-        return ResolvedConfig(
-            workspaces=self.workspaces,
-            active=self.active,
-            default_base_branch=self.default_base_branch,
-            active_workspace=active_ws,
-            project=project,
-        )
-
-    def _resolve_cwd_project(self, ws: Workspace, cwd: Path | None) -> ResolvedProject | None:
-        """Resolve the cwd-bound project under *ws*, or ``None`` when cwd is elsewhere."""
-        if cwd is None:
-            return None
-
-        project_dir = project_dir_for(ws.path, abspath(str(cwd)))
-        if project_dir is None:
-            return None
-
-        annotation = self.project_annotation(ws, project_dir.name)
-        effective, source = self.base_branch_provenance(ws, project_dir.name)
-
-        return ResolvedProject(
-            name=project_dir.name,
-            dir=project_dir,
-            exists=(project_dir / ".git").is_dir(),
-            description=annotation.description,
-            base_branch=annotation.base_branch,
-            effective_base_branch=effective,
-            base_branch_source=source,
-            hooks=annotation.hooks,
-            extra=annotation.extra,
-            worktree=self._resolve_cwd_worktree(project_dir, abspath(str(cwd))),
-        )
-
-    def _resolve_cwd_worktree(self, project_dir: Path, cwd: Path) -> ResolvedWorktree | None:
-        """Resolve the cwd-bound worktree under *project_dir* via the locality cascade."""
-        worktrees_dir = project_dir / "worktrees"
-        if not within(cwd, worktrees_dir) or cwd == worktrees_dir:
-            return None
-
-        rel = cwd.relative_to(worktrees_dir)
-        wt_dir = worktrees_dir / rel.parts[0]
-        name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
-
-        return self.resolve_worktree(project_dir, name)
+    # --- worktree resolution -------------------------------------------------
 
     def resolve_worktree(self, project_dir: Path, name: str) -> ResolvedWorktree:
         """Resolve a worktree's effective config by name via the locality cascade.
@@ -1617,79 +1608,143 @@ class Config:
             extra=extra,
         )
 
-    # --- full subtree dump ---------------------------------------------------
+    # --- config slice (global-rooted pruned tree) ----------------------------
 
-    def resolve_tree(
+    def cwd_location(self, *, cwd: Path | None = None) -> SliceTarget | None:
+        """Infer the target entity from the cwd (worktree > project > workspace).
+
+        Returns ``None`` when the cwd is outside every declared workspace (the
+        global target). Otherwise the deepest entity the cwd sits inside: a
+        worktree when inside one, else the cwd-bound project, else the active
+        workspace. Returns a :class:`SliceTarget` for :meth:`resolve_slice`.
+        """
+        cwd = cwd if cwd is not None else current_dir(resolve=False)
+        active_ws = self.workspaces.get(self.active) if self.active is not None else None
+        if active_ws is None or cwd is None:
+            return None
+
+        acwd = abspath(str(cwd))
+        if not within(acwd, active_ws.path):
+            return None
+
+        project_dir = project_dir_for(active_ws.path, acwd)
+        if project_dir is None:
+            return SliceTarget(tier="workspace", workspace=active_ws.name)
+
+        worktrees_dir = project_dir / "worktrees"
+        if within(acwd, worktrees_dir) and acwd != worktrees_dir:
+            rel = acwd.relative_to(worktrees_dir)
+            wt_dir = worktrees_dir / rel.parts[0]
+            name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
+
+            return SliceTarget(
+                tier="worktree", workspace=active_ws.name, project=project_dir.name, name=name
+            )
+
+        return SliceTarget(tier="project", workspace=active_ws.name, project=project_dir.name)
+
+    def resolve_slice(
         self,
-        level: str,
         *,
-        workspace: str | None = None,
-        project: str | None = None,
-        name: str | None = None,
-        cwd: Path | None = None,
-    ) -> ConfigTree:
-        """Materialise a full subtree dump rooted at one entity *level*.
+        target: SliceTarget | None,
+        recurse: bool = False,
+        depth_limit: int | None = None,
+    ) -> ConfigSlice:
+        """Materialise a global-rooted pruned config tree (the ``config show`` model).
 
-        *level* is ``worktree`` / ``project`` / ``workspace`` / ``all``. Unlike
-        :meth:`resolve_view` (cwd-capped), every entity below the root is fully
-        descended -- projects are on-disk dirs unioned with declared names, and
-        each project's worktrees likewise. The root entity is named by the
-        (already grammar-split) *workspace* / *project* / *name* tokens, falling
-        back to cwd inference when omitted; ``all`` takes no tokens.
+        One branch from global to *target* is always rendered; with *recurse*
+        the target's subtree expands downward. *depth_limit* (0=global,
+        1=workspace, 2=project, 3=worktree) caps the deepest tier rendered
+        anywhere; when ``None`` it defaults to the target's tier (branch only)
+        or 3 (fullest descent with *recurse*). ``None`` *target* means global.
         """
-        if level == "all":
-            workspaces = tuple(
-                self._resolve_workspace_tree(ws) for _, ws in sorted(self.workspaces.items())
-            )
+        target_depth = 0 if target is None else _SLICE_TIER_DEPTH[target.tier]
+        if depth_limit is None:
+            depth_limit = 3 if recurse else target_depth
 
-            return ConfigTree(
-                level="all",
-                default_base_branch=self.default_base_branch,
-                workspaces=workspaces,
-            )
+        global_payload, global_hooks = _merge_locality(self._store, _global_probes())
+        global_extra = {k: v for k, v in global_payload.items() if k != "base_branch"}
+        bb_source = self.base_branch_source()
 
-        ws_entry = self._tree_workspace(workspace)
-        if level == "workspace":
-            return ConfigTree(level="workspace", workspace=self._resolve_workspace_tree(ws_entry))
+        if depth_limit < 1:
+            ws_entries: list[Workspace] = []
+        elif target is None:
+            ws_entries = [ws for _, ws in sorted(self.workspaces.items())]
+        else:
+            ws = self.workspaces.get(target.workspace)
+            ws_entries = [ws] if ws is not None else []
 
-        project_name = self._tree_project_name(ws_entry, project, name, level, cwd)
-        if level == "project":
-            return ConfigTree(
-                level="project", project=self._resolve_project_tree(ws_entry, project_name)
-            )
-
-        # level == "worktree"
-        wt_name = self._tree_worktree_name(ws_entry, project_name, name, cwd)
-
-        return ConfigTree(
-            level="worktree",
-            worktree=self.resolve_worktree(ws_entry.path / project_name, wt_name),
+        workspaces = tuple(
+            self._slice_workspace(ws_entry, target, recurse, depth_limit)
+            for ws_entry in ws_entries
         )
 
-    def _resolve_workspace_tree(self, ws: Workspace) -> ResolvedWorkspace:
-        """Fully descend *ws*: every project (on-disk unioned with declared)."""
+        return ConfigSlice(
+            default_base_branch=self.default_base_branch,
+            base_branch_source=bb_source.value if bb_source is not None else None,
+            global_extra=global_extra,
+            global_hooks=global_hooks,
+            workspaces=workspaces,
+            depth_limit=depth_limit,
+        )
+
+    def _slice_workspace(
+        self, ws: Workspace, target: SliceTarget | None, recurse: bool, depth_limit: int
+    ) -> ResolvedWorkspace:
+        """Fill one workspace node with the pruned set of projects for the slice."""
+        bb_source = self.workspace_base_branch_source(ws)
+        if depth_limit < 2:
+            return ResolvedWorkspace(entry=ws, projects=(), base_branch_source=bb_source)
+
+        if (
+            target is not None
+            and target.tier in ("project", "worktree")
+            and target.workspace == ws.name
+        ):
+            project_names = [target.project]
+        elif recurse and (target is None or target.tier == "workspace"):
+            project_names = sorted(self.project_names(ws))
+        elif recurse and target is not None and target.tier in ("project", "worktree"):
+            project_names = [target.project] if target.workspace == ws.name else []
+        else:
+            project_names = []
+
         projects = tuple(
-            self._resolve_project_tree(ws, pname) for pname in sorted(self.project_names(ws))
+            self._slice_project(ws, pname, target, recurse, depth_limit) for pname in project_names
         )
 
-        return ResolvedWorkspace(entry=ws, projects=projects)
+        return ResolvedWorkspace(entry=ws, projects=projects, base_branch_source=bb_source)
 
-    def _resolve_project_tree(self, ws: Workspace, name: str) -> ResolvedProject:
-        """Resolve a project's effective annotation plus all its worktrees.
+    def _slice_project(
+        self,
+        ws: Workspace,
+        pname: str,
+        target: SliceTarget | None,
+        recurse: bool,
+        depth_limit: int,
+    ) -> ResolvedProject:
+        """Fill one project node with the pruned set of worktrees for the slice."""
+        project_dir = ws.path / pname
+        annotation = self.project_annotation(ws, pname)
+        effective, source = self.base_branch_provenance(ws, pname)
 
-        Like :meth:`_resolve_cwd_project` but cwd-independent: the ``worktrees``
-        tuple carries every worktree (on-disk unioned with declared), sorted.
-        """
-        project_dir = ws.path / name
-        annotation = self.project_annotation(ws, name)
-        effective, source = self.base_branch_provenance(ws, name)
-        worktrees = tuple(
-            self.resolve_worktree(project_dir, wt_name)
-            for wt_name in sorted(self._worktree_names(project_dir, name, ws))
-        )
+        if depth_limit < 3:
+            worktrees: tuple[ResolvedWorktree, ...] = ()
+        elif (
+            target is not None
+            and target.tier == "worktree"
+            and target.workspace == ws.name
+            and target.project == pname
+        ):
+            worktrees = (self.resolve_worktree(project_dir, target.name),)
+        elif recurse and (target is None or target.tier in ("workspace", "project")):
+            wt_names = sorted(self._worktree_names(project_dir, pname, ws))
+            worktrees = tuple(self.resolve_worktree(project_dir, n) for n in wt_names)
+        else:
+            worktrees = ()
 
         return ResolvedProject(
-            name=name,
+            name=pname,
             dir=project_dir,
             exists=(project_dir / ".git").is_dir(),
             description=annotation.description,
@@ -1726,57 +1781,6 @@ class Config:
         }
 
         return on_disk | self.declared_worktree_names(ws, name)
-
-    def _tree_workspace(self, workspace: str | None) -> Workspace:
-        """The workspace a tree dump roots in: the named one, else the active one."""
-        target = workspace if workspace is not None else self.active
-        if target is None:
-            raise WtmError("no WORKSPACE given and none is active")
-        ws = self.workspaces.get(target)
-        if ws is None:
-            raise WtmError(f"unknown workspace: {target}")
-
-        return ws
-
-    def _tree_project_name(
-        self,
-        ws: Workspace,
-        project: str | None,
-        name: str | None,
-        level: str,
-        cwd: Path | None,
-    ) -> str:
-        """The project a ``project``/``worktree`` dump roots in (token, else cwd)."""
-        if project is not None:
-            valid_project_name(project)
-
-            return project
-
-        # A worktree-level ``PROJECT NAME`` puts the project in *name*'s sibling
-        # slot; a bare worktree token (name only) still needs cwd inference.
-        cwd = cwd if cwd is not None else current_dir(resolve=False)
-        project_dir = project_dir_for(ws.path, abspath(str(cwd))) if cwd is not None else None
-        if project_dir is None:
-            raise WtmError("no PROJECT given and cwd is not under a project")
-
-        return project_dir.name
-
-    def _tree_worktree_name(
-        self, ws: Workspace, project: str, name: str | None, cwd: Path | None
-    ) -> str:
-        """The worktree a ``worktree`` dump roots in (token, else cwd inference)."""
-        if name is not None:
-            return name
-
-        cwd = cwd if cwd is not None else current_dir(resolve=False)
-        worktrees_dir = ws.path / project / "worktrees"
-        acwd = abspath(str(cwd)) if cwd is not None else None
-        if acwd is None or not within(acwd, worktrees_dir) or acwd == worktrees_dir:
-            raise WtmError("no NAME given and cwd is not inside a worktree")
-
-        wt_dir = worktrees_dir / acwd.relative_to(worktrees_dir).parts[0]
-
-        return worktree_name(wt_dir, worktrees_dir) or wt_dir.name
 
 
 def resolve_project_dir(config: Config, workspace: str | None, project: str | None) -> Path:

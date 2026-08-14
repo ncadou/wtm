@@ -44,10 +44,10 @@ and `NAME` share one flat namespace, so a 2-token target is always
 `PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`. It decodes the
 tokens a **Locator** does not (see **Locator reach**): the whole target of the
 destructive verbs (`delete`, `rename`, `hook delete`), of `hook install` (which
-writes into a scope), and of the project-tier commands whose only qualifier is a
-workspace (`project new`/`clone`/`resolve`/`set`/`show`, `config show`'s
-workspace/project level dumps); and the trailing literal `NAME` of the
-**qualifier-only locator** commands, whose leading tokens a locator resolves.
+writes into a scope), and the project-tier commands whose only qualifier is a
+workspace (`project new`/`clone`/`resolve`/`set`/`show`); and the trailing
+literal `NAME` of the **qualifier-only locator** commands, whose leading tokens
+a locator resolves.
 
 **Locator**:
 The sibling of the **Target grammar**, decoding the positionals of the
@@ -77,12 +77,12 @@ shared by every consumer.
 **Qualifier-only locator**:
 A **Locator** applied to a target's *leading* tokens alone, the trailing `NAME`
 staying literal (`_locate_parent_args`). The reach of the **absent-leaf**
-commands: `create`, `worktree set`, and `config show --worktree` all name a
-worktree that need not exist, so the leaf is invisible to the index -- but its
-ancestors usually are, and locating just those buys the same global reach without
-pretending to see the leaf. The qualifiers go in as one PROJECT-pinned locator
-query, so `PROJECT` and `WORKSPACE PROJECT` both resolve through the ordinary
-cascade and the 3-token form keeps its meaning.
+commands: `create` and `worktree set` both name a worktree that need not exist,
+so the leaf is invisible to the index -- but its ancestors usually are, and
+locating just those buys the same global reach without pretending to see the
+leaf. The qualifiers go in as one PROJECT-pinned locator query, so `PROJECT`
+and `WORKSPACE PROJECT` both resolve through the ordinary cascade and the
+3-token form keeps its meaning.
 Strictly additive: fewer than two tokens carry no qualifier (a `DIR`, a lone
 `NAME`, the cwd default) and pass through, and a qualifier matching *no* project
 anywhere is handed back literally -- so these commands still name a wholly absent
@@ -105,22 +105,18 @@ offers workspaces (which qualify a project), and a WORKTREE pin hides nothing.
 
 **Locator reach**:
 Which commands may take a **Locator**, and how much of their target it decodes. A
-locator reaches *globally* and sees *only what exists on disk*, so how much of a
+locator reaches *globally* and sees *only what exists on disk* (plus
+config-declared inert entities when `include_config_only=True`), so how much of a
 target it can serve follows from what already exists. Three classes:
 
 - *Whole target*: the leaf itself exists, and reaching it is reversible --
   `enter`, `leave`, `list`, `resolve`, `project enter`, `project leave`,
-  `hook list`, `hook run`.
+  `hook list`, `hook run`, `config show`. `config show` runs an unpinned locator
+  (tier-polymorphic cascade, like `enter`/`leave`) with
+  `include_config_only=True`, so it resolves config-only entities (inert
+  projects, absent worktrees) too.
 - *Qualifiers only*: the leaf is being named into existence but its ancestors are
-  not -- the **qualifier-only locator** commands (`create`, `worktree set`,
-  `config show --worktree`).
-- *Dual-mode* (`config show --project`): wants both cross-workspace reach *and*
-  inert-project dumping (a declared-but-absent project is invisible to the
-  index), so a full project-pinned locator is tried first and a not-found falls
-  back to the literal target-grammar path. Only the not-found case falls back;
-  an unresolved ambiguity still errors. Distinct from the qualifier-only
-  locator: here the project *is* the leaf, so there is no separate trailing
-  token to keep literal.
+  not -- the **qualifier-only locator** commands (`create`, `worktree set`).
 - *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays
   *bounded by the cwd*, because reaching into another project or workspace
   irreversibly must be spelled out positionally -- a bare `wtm delete main` can
@@ -129,8 +125,7 @@ target it can serve follows from what already exists. Three classes:
   fire hooks and still reach globally. `hook install` also stays, writing into a
   `--scope` rather than pointing at the worktree. And the project-tier commands
   whose only qualifier is a workspace (`project new`/`clone`/`resolve`/`set`/
-  `show`, `config show --workspace`) gain nothing, a workspace name being an
-  exact registry key already.
+  `show`) gain nothing, a workspace name being an exact registry key already.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`
@@ -237,10 +232,12 @@ the generic `config set/get/unset` and inline `hook set/unset` surfaces over the
 cwd-inferred entity (for an *inheritable* key -- the builtin `base_branch` per
 `INHERITABLE_KEYS`, or any key named in the user's accumulating `inheritable`
 array -- the generic read folds the entity's own cascade plus its ancestors' so
-`config get` reports the same effective value a real command uses, and
-`--origin` labels each rung by its definition tier; inheritance reaches
-`config show`/the resolved view too, via a shared tier-fold that fills a
-descendant's `extra` with inherited values). Workspace *declarations* (`add`/`set --path`/`rename`/
+  `config get` reports the same effective value a real command uses, and
+  `--origin` labels each rung by its definition tier; inheritance reaches
+  `config show` too, via a shared tier-fold that fills a descendant's `extra`
+  with inherited values). `config show` itself renders a `ConfigSlice` -- a
+  global-rooted pruned tree (`resolve_slice`), replacing the old per-level
+  `ConfigTree`/`resolve_tree`/`resolve_view` model. Workspace *declarations* (`add`/`set --path`/`rename`/
 `default`) stay user-file-only and refuse system-only names. `WTM_NO_CONFIG`
 suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
 `WTM_SYSTEM_CONFIG` at an absent path to skip system scope).

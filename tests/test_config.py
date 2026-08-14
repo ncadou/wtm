@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from wtm.config import Config, ConfigAddress, Scope
+from wtm.config import Config, ConfigAddress, Scope, SliceTarget
 from wtm.core import WtmError
 from wtm.project import Project
 from wtm.workspace import Workspaces
@@ -574,6 +574,23 @@ def test_inheritable_declaration_key_is_reserved(
     assert "inheritable" not in annotation.extra
 
 
+def test_workspaces_registry_key_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``workspaces`` is the global registry table: a reserved key (never an
+    # arbitrary one) and never leaked into the global extra payload.
+    from wtm.config import validate_arbitrary_key
+
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key("workspaces")
+    ws = tmp_path / "w"
+    ws.mkdir()
+    body = f'[workspaces.a]\npath="{ws}"\nbase_branch = "main"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    s = cfg.resolve_slice(target=None, recurse=True)
+    assert "workspaces" not in s.global_extra
+
+
 def test_validate_inheritable_element_rules() -> None:
     # Anything hand-writable into `inheritable` is CLI-writable too, except keys
     # whose (non-)inheritance is hardcoded: reserved keys and NON_INHERITABLE_KEYS.
@@ -610,9 +627,10 @@ def test_worktree_extra_reflects_inherited_key(
     wt.mkdir(parents=True)
     body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
-    resolved = cfg.resolve_view(cwd=wt)
-    worktree = resolved.project.worktree
-    assert worktree is not None
+    target = cfg.cwd_location(cwd=wt)
+    assert target is not None and target.tier == "worktree"
+    slice_ = cfg.resolve_slice(target=target)
+    worktree = slice_.workspaces[0].projects[0].worktrees[0]
     assert worktree.extra["deploy_env"] == "staging"
 
 
@@ -673,9 +691,10 @@ def test_worktree_description_deep_cascade(
     (wt / ".wtm" / "config.toml").write_text('description = "from-worktree"\n')
     body = f'[workspaces.a]\npath="{ws}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
-    resolved = cfg.resolve_view(cwd=wt)
-    worktree = resolved.project.worktree
-    assert worktree is not None
+    target = cfg.cwd_location(cwd=wt)
+    assert target is not None and target.tier == "worktree"
+    slice_ = cfg.resolve_slice(target=target)
+    worktree = slice_.workspaces[0].projects[0].worktrees[0]
     assert worktree.description == "from-worktree"  # worktree-local wins
     assert worktree.extra["owner"] == "team"  # inherited from the project tier
 
@@ -1528,12 +1547,15 @@ def test_worktree_set_roundtrips_through_read_cascade(user_cfg: Path, tmp_path: 
     wt.mkdir(parents=True)
     _seed_user(user_cfg, "w", ws)
     _wt_ops().set(["api", "feat"], description="round", scope=None)
-    resolved = Config.load(cwd=wt).resolve_view(cwd=wt)
-    assert resolved.project.worktree is not None
-    assert resolved.project.worktree.description == "round"
+    cfg = Config.load(cwd=wt)
+    target = cfg.cwd_location(cwd=wt)
+    assert target is not None and target.tier == "worktree"
+    slice_ = cfg.resolve_slice(target=target)
+    worktree = slice_.workspaces[0].projects[0].worktrees[0]
+    assert worktree.description == "round"
 
 
-# --- full subtree dump (resolve_tree) ----------------------------------------
+# --- config slice (resolve_slice) ---------------------------------------------
 
 
 def test_declared_worktree_names_unions_probe_tables(
@@ -1549,66 +1571,201 @@ def test_declared_worktree_names_unions_probe_tables(
     assert cfg.declared_worktree_names(cfg.workspaces["w"], "api") == {"feat"}
 
 
-def test_resolve_tree_all_descends_and_unions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # On-disk unioned with declared, across projects and worktrees; an inert
-    # (no .git) declared project still appears.
+def _slice_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cwd: Path | None = None
+) -> Config:
+    """Build a two-workspace, two-project, two-worktree config for slice tests."""
     ws = tmp_path / "w"
     (ws / "api" / ".git").mkdir(parents=True)
     (ws / "api" / "worktrees" / "main").mkdir(parents=True)
+    (ws / "api" / "worktrees" / "feat").mkdir(parents=True)
+    (ws / "web" / ".git").mkdir(parents=True)
+    (ws / "web" / "worktrees" / "draft").mkdir(parents=True)
     body = (
+        f'base_branch = "main"\n'
         f'[workspaces.w]\npath = "{ws}"\n'
         '[workspaces.w.projects.api]\nbase_branch = "develop"\n'
         '[workspaces.w.projects.api.worktrees.planned]\ndescription = "later"\n'
         '[workspaces.w.projects.ghost]\ndescription = "gone"\n'
     )
-    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    tree = cfg.resolve_tree("all")
-    assert tree.level == "all"
-    (ws_node,) = tree.workspaces
+    return _load(monkeypatch, tmp_path, body, cwd=cwd or tmp_path)
+
+
+def test_resolve_slice_global_branch_only(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    s = cfg.resolve_slice(target=None)
+    assert s.depth_limit == 0
+    assert s.default_base_branch == "main"
+    assert s.workspaces == ()
+
+
+def test_resolve_slice_global_recurse_descends_all(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    s = cfg.resolve_slice(target=None, recurse=True)
+    assert s.depth_limit == 3
+    (ws_node,) = s.workspaces
     names = {p.name for p in ws_node.projects}
-    assert names == {"api", "ghost"}
+    assert names == {"api", "ghost", "web"}
     api = next(p for p in ws_node.projects if p.name == "api")
     assert api.effective_base_branch == "develop"
-    assert {w.name for w in api.worktrees} == {"main", "planned"}
+    assert {w.name for w in api.worktrees} == {"main", "feat", "planned"}
     ghost = next(p for p in ws_node.projects if p.name == "ghost")
     assert ghost.exists is False
 
 
-def test_resolve_tree_project_and_worktree_levels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_slice_workspace_branch_only(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="workspace", workspace="w")
+    s = cfg.resolve_slice(target=target)
+    assert s.depth_limit == 1
+    (ws_node,) = s.workspaces
+    assert ws_node.entry.name == "w"
+    assert ws_node.projects == ()
+
+
+def test_resolve_slice_workspace_recurse_all_projects(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="workspace", workspace="w")
+    s = cfg.resolve_slice(target=target, recurse=True)
+    assert s.depth_limit == 3
+    (ws_node,) = s.workspaces
+    names = {p.name for p in ws_node.projects}
+    assert names == {"api", "ghost", "web"}
+    api = next(p for p in ws_node.projects if p.name == "api")
+    assert {w.name for w in api.worktrees} == {"main", "feat", "planned"}
+
+
+def test_resolve_slice_project_branch_only(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="project", workspace="w", project="api")
+    s = cfg.resolve_slice(target=target)
+    assert s.depth_limit == 2
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    assert proj.name == "api"
+    assert proj.worktrees == ()
+
+
+def test_resolve_slice_project_recurse_all_worktrees(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="project", workspace="w", project="api")
+    s = cfg.resolve_slice(target=target, recurse=True)
+    assert s.depth_limit == 3
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    assert {w.name for w in proj.worktrees} == {"main", "feat", "planned"}
+
+
+def test_resolve_slice_worktree_branch_only(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="worktree", workspace="w", project="api", name="feat")
+    s = cfg.resolve_slice(target=target)
+    assert s.depth_limit == 3
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    (wt,) = proj.worktrees
+    assert wt.name == "feat"
+
+
+def test_resolve_slice_worktree_recurse_no_op(tmp_path, monkeypatch) -> None:
+    """-r from a worktree (leaf) adds nothing: no sibling worktrees."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="worktree", workspace="w", project="api", name="feat")
+    s = cfg.resolve_slice(target=target, recurse=True)
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    (wt,) = proj.worktrees
+    assert wt.name == "feat"
+
+
+def test_resolve_slice_depth_prunes_worktree_from_worktree_cwd(tmp_path, monkeypatch) -> None:
+    """-d project from a worktree target prunes the worktree, leaving project+ws+global."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="worktree", workspace="w", project="api", name="feat")
+    s = cfg.resolve_slice(target=target, depth_limit=2)
+    assert s.depth_limit == 2
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    assert proj.name == "api"
+    assert proj.worktrees == ()
+
+
+def test_resolve_slice_depth_global_cap(tmp_path, monkeypatch) -> None:
+    """-d global renders only the global tier."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    s = cfg.resolve_slice(target=None, recurse=True, depth_limit=0)
+    assert s.workspaces == ()
+
+
+def test_resolve_slice_depth_project_with_recurse(tmp_path, monkeypatch) -> None:
+    """-d project with -r from a workspace: all projects, no worktrees."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="workspace", workspace="w")
+    s = cfg.resolve_slice(target=target, recurse=True, depth_limit=2)
+    (ws_node,) = s.workspaces
+    names = {p.name for p in ws_node.projects}
+    assert names == {"api", "ghost", "web"}
+    for p in ws_node.projects:
+        assert p.worktrees == ()
+
+
+def test_resolve_slice_depth_below_target_no_op(tmp_path, monkeypatch) -> None:
+    """-d worktree (deeper than target=project) without -r is a silent no-op."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = SliceTarget(tier="project", workspace="w", project="api")
+    s = cfg.resolve_slice(target=target, depth_limit=3)
+    (ws_node,) = s.workspaces
+    (proj,) = ws_node.projects
+    assert proj.name == "api"
+    assert proj.worktrees == ()
+
+
+def test_resolve_slice_cwd_inference_worktree(tmp_path, monkeypatch) -> None:
+    wt_dir = tmp_path / "w" / "api" / "worktrees" / "feat"
+    cfg = _slice_setup(tmp_path, monkeypatch, cwd=wt_dir)
+    target = cfg.cwd_location(cwd=wt_dir)
+    assert target is not None
+    assert target.tier == "worktree"
+    assert target.workspace == "w"
+    assert target.project == "api"
+    assert target.name == "feat"
+
+
+def test_resolve_slice_cwd_inference_project(tmp_path, monkeypatch) -> None:
+    proj_dir = tmp_path / "w" / "api"
+    cfg = _slice_setup(tmp_path, monkeypatch, cwd=proj_dir)
+    target = cfg.cwd_location(cwd=proj_dir)
+    assert target is not None
+    assert target.tier == "project"
+    assert target.workspace == "w"
+    assert target.project == "api"
+
+
+def test_resolve_slice_cwd_inference_workspace(tmp_path, monkeypatch) -> None:
+    ws_dir = tmp_path / "w"
+    cfg = _slice_setup(tmp_path, monkeypatch, cwd=ws_dir)
+    target = cfg.cwd_location(cwd=ws_dir)
+    assert target is not None
+    assert target.tier == "workspace"
+    assert target.workspace == "w"
+
+
+def test_resolve_slice_cwd_outside_workspace_is_global(tmp_path, monkeypatch) -> None:
+    cfg = _slice_setup(tmp_path, monkeypatch, cwd=tmp_path)
+    target = cfg.cwd_location(cwd=tmp_path)
+    assert target is None
+
+
+def test_resolve_slice_global_extra_and_hooks(tmp_path, monkeypatch) -> None:
     ws = tmp_path / "w"
-    (ws / "api" / ".git").mkdir(parents=True)
-    (ws / "api" / "worktrees" / "feat").mkdir(parents=True)
-    body = f'[workspaces.w]\npath = "{ws}"\n'
+    ws.mkdir()
+    body = (
+        f'base_branch = "main"\nteam = "alpha"\n'
+        f'[hooks.on.enter]\ncommand = "echo hi"\n'
+        f'[workspaces.w]\npath = "{ws}"\n'
+    )
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-
-    proj = cfg.resolve_tree("project", project="api")
-    assert proj.level == "project" and proj.project is not None
-    assert {w.name for w in proj.project.worktrees} == {"feat"}
-
-    wt = cfg.resolve_tree("worktree", project="api", name="feat")
-    assert wt.level == "worktree" and wt.worktree is not None
-    assert wt.worktree.name == "feat"
-
-
-def test_resolve_tree_unknown_workspace_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws = tmp_path / "w"
-    ws.mkdir()
-    cfg = _load(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n', cwd=tmp_path)
-    with pytest.raises(WtmError, match="unknown workspace"):
-        cfg.resolve_tree("workspace", workspace="nope")
-
-
-def test_resolve_tree_project_needs_token_or_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws = tmp_path / "w"
-    ws.mkdir()
-    cfg = _load(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n', cwd=tmp_path)
-    with pytest.raises(WtmError, match="no PROJECT given"):
-        cfg.resolve_tree("project", cwd=tmp_path)
+    s = cfg.resolve_slice(target=None, recurse=True)
+    assert s.global_extra.get("team") == "alpha"
+    assert "enter" in s.global_hooks.on
+    assert s.base_branch_source == "user"

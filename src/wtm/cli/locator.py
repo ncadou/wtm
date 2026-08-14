@@ -14,20 +14,14 @@ how much of a command's target it can resolve depends on what already exists.
 - Whole target (_locate_worktree_args / _locate_project): the leaf itself
   exists -- enter/leave, list, resolve, project enter/leave, hook list, hook run.
 - Qualifiers only (_locate_parent_args): the leaf is being named into existence
-  but its ancestors exist -- create, worktree set, config show --worktree.
-  Global reach without pretending to see the leaf; a qualifier the index has
-  never heard of falls back to the literal token, so these commands keep
-  working for a wholly absent target.
-- Dual-mode (_locate_project_or_fallback): config show --project wants both
-  cross-workspace reach *and* inert-project dumping, so a full project-pinned
-  locator is tried first and a not-found falls back to the literal
-  target-grammar path. Only the not-found case falls back; an unresolved
-  ambiguity still errors.
+  but its ancestors exist -- create, worktree set. Global reach without
+  pretending to see the leaf; a qualifier the index has never heard of falls
+  back to the literal token, so these commands keep working for a wholly absent
+  target.
 - Neither: the destructive verbs (delete, rename, hook delete) stay bounded by
   the cwd, because irreversible reaching must be spelled out positionally; and
   the project-tier commands whose only qualifier is a WORKSPACE (project
-  new/clone/resolve/set/show, config show --workspace) gain nothing, a
-  workspace name being exact.
+  new/clone/resolve/set/show) gain nothing, a workspace name being exact.
 """
 
 from __future__ import annotations
@@ -48,7 +42,12 @@ from wtm.target import looks_like_path
 
 
 def _locate_one(
-    ctx: typer.Context, args: list[str], *, command: str, tier: Tier | None = None
+    ctx: typer.Context,
+    args: list[str],
+    *,
+    command: str,
+    tier: Tier | None = None,
+    include_config_only: bool = False,
 ) -> Location:
     """Resolve a locator's tokens to exactly one :class:`Location`, or raise.
 
@@ -56,11 +55,15 @@ def _locate_one(
     :param command: the ``wtm`` sub-command name, so an ambiguity prints choices
         that can be pasted straight back.
     :param tier: an optional leaf-tier pin (see :func:`wtm.locator.locate`).
+    :param include_config_only: enrich the index with config-declared inert
+        projects and absent worktrees (see :func:`wtm.locator.build_index`).
     :returns: the sole matching location.
     :raises WtmError: nothing matched, or several did and the current context
         could not single one out.
     """
-    resolution = locate(args, build_index(ctx.obj.config), tier=tier)
+    resolution = locate(
+        args, build_index(ctx.obj.config, include_config_only=include_config_only), tier=tier
+    )
     if isinstance(resolution, NotFound):
         raise WtmError(f"no {_tier_noun(tier)} matches: {' '.join(args)}")
     if isinstance(resolution, Ambiguous):
@@ -74,7 +77,11 @@ def _locate_one(
 
 
 def _locate_optional(
-    ctx: typer.Context, args: list[str], *, tier: Tier | None = None
+    ctx: typer.Context,
+    args: list[str],
+    *,
+    tier: Tier | None = None,
+    include_config_only: bool = False,
 ) -> Location | None:
     """Resolve a locator, returning ``None`` on not-found or unresolved ambiguity.
 
@@ -83,7 +90,9 @@ def _locate_optional(
     KEY+SUBKEY reading rather than erroring. Applies the same context tiebreak
     as :func:`_locate_one` before giving up.
     """
-    resolution = locate(args, build_index(ctx.obj.config), tier=tier)
+    resolution = locate(
+        args, build_index(ctx.obj.config, include_config_only=include_config_only), tier=tier
+    )
     if isinstance(resolution, NotFound):
         return None
     if isinstance(resolution, Ambiguous):
@@ -107,37 +116,6 @@ def _locate_project(
     return location.workspace, location.project
 
 
-def _locate_project_or_fallback(
-    ctx: typer.Context, args: list[str], *, command: str
-) -> tuple[str, str | None] | None:
-    """Project-pinned locator; ``None`` on not-found so the caller falls back.
-
-    The **dual-mode** shape for ``config show --project``: cross-workspace reach
-    when the project is on disk, ``None`` to let the caller fall back to the
-    literal target-grammar path (preserving inert-project dumping -- a
-    declared-but-absent project is invisible to the index, so the locator returns
-    :class:`NotFound`, never :class:`Ambiguous`). Distinct from
-    :func:`_locate_project` (which raises on not-found) and from
-    :func:`_locate_optional` (which returns ``None`` on *unresolved ambiguity*
-    rather than raising): an unresolved ambiguity here still errors, matching
-    every other locator consumer, because a cross-workspace name clash should be
-    explicit. Requires non-empty *args*; the caller handles the cwd default.
-
-    :returns: ``(workspace, project)`` on a hit, or ``None`` on not-found.
-    """
-    resolution = locate(args, build_index(ctx.obj.config), tier=Tier.PROJECT)
-    if isinstance(resolution, NotFound):
-        return None
-    if isinstance(resolution, Ambiguous):
-        picked = _context_pick(ctx, resolution.candidates)
-        if picked is None:
-            raise WtmError(_ambiguous_message(args, resolution.candidates, command))
-
-        return picked.workspace, picked.project
-
-    return resolution.location.workspace, resolution.location.project
-
-
 def _locate_worktree_args(ctx: typer.Context, args: list[str], *, command: str) -> list[str]:
     """Resolve a worktree-pinned locator to a fully-qualified ``WORKSPACE PROJECT NAME``.
 
@@ -154,14 +132,21 @@ def _locate_worktree_args(ctx: typer.Context, args: list[str], *, command: str) 
     return [location.workspace, location.project, location.name]
 
 
-def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) -> list[str]:
+def _locate_parent_args(
+    ctx: typer.Context,
+    args: list[str],
+    *,
+    command: str,
+    include_config_only: bool = False,
+    require_project_on_disk: bool = False,
+) -> list[str]:
     """Resolve a target's leading qualifiers by locator, keeping the last token literal.
 
     The **qualifier-only locator**: the absent-leaf commands (``create``,
-    ``worktree set``, ``config show --worktree``) name a worktree that need not
-    exist, so the leaf is not in the index -- but its ancestors usually are.
-    Locating just the qualifiers buys those commands the same global reach as a
-    full locator while leaving the leaf alone.
+    ``worktree set``) name a worktree that need not exist, so the leaf is not
+    in the index -- but its ancestors usually are. Locating just the qualifiers
+    buys those commands the same global reach as a full locator while leaving
+    the leaf alone.
 
     The qualifiers go in as a whole project-pinned locator query, so a lone
     ``PROJECT`` and a ``WORKSPACE PROJECT`` pair both resolve through the ordinary
@@ -176,12 +161,25 @@ def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) ->
 
     An ambiguous qualifier still errors, its choices carrying *leaf* so each
     printed line stays runnable as typed.
+
+    :param include_config_only: enrich the index with config-declared inert
+        projects (see :func:`wtm.locator.build_index`), so a declared-but-absent
+        project resolves instead of falling back to the literal.
+    :param require_project_on_disk: after a successful resolution, raise a
+        reminder if the resolved project has no ``.git`` on disk. Without
+        ``include_config_only`` the guard is a no-op (an on-disk project always
+        has ``.git``). Used by ``create`` to catch an inert-declared project
+        before the core's generic ``project git dir not found`` error.
     """
     if len(args) < 2:
         return args
 
     *quals, leaf = args
-    resolution = locate(quals, build_index(ctx.obj.config), tier=Tier.PROJECT)
+    resolution = locate(
+        quals,
+        build_index(ctx.obj.config, include_config_only=include_config_only),
+        tier=Tier.PROJECT,
+    )
     if isinstance(resolution, NotFound):
         return args
     if isinstance(resolution, Ambiguous):
@@ -192,6 +190,14 @@ def _locate_parent_args(ctx: typer.Context, args: list[str], *, command: str) ->
             )
     else:
         location = resolution.location
+
+    if require_project_on_disk:
+        ws = ctx.obj.config.workspaces[location.workspace]
+        if not (ws.path / location.project / ".git").is_dir():
+            raise WtmError(
+                f"project '{location.project}' is declared in config but not on disk; "
+                f"create it first with 'wtm project new {location.workspace} {location.project}'"
+            )
 
     return [location.workspace, location.project, leaf]
 

@@ -645,7 +645,52 @@ def test_create_workspace_qualified_still_exact(tmp_path: Path) -> None:
     assert not (beta / "shared" / "worktrees" / "feat").exists()
 
 
-def test_resolve_cross_workspace_project(tmp_path: Path) -> None:
+def test_create_inert_declared_project_errors_with_reminder(tmp_path: Path) -> None:
+    # 'ghost' is declared in config but has no .git on disk -> create errors with
+    # a reminder to materialise the project first, not the generic git-dir error.
+    ws = tmp_path / "alpha"
+    ws.mkdir()
+    config = tmp_path / "c.toml"
+    config.write_text(
+        f'[workspaces.alpha]\npath = "{ws}"\n'
+        '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
+    )
+    res = _run_multi("create", "ghost", "feat", config=config, cwd=ws, workspace="alpha")
+    assert res.returncode == 1
+    assert "declared in config but not on disk" in res.stderr
+    assert "wtm project new alpha ghost" in res.stderr
+    assert not (ws / "ghost" / "worktrees" / "feat").exists()
+
+
+def test_create_inert_declared_project_cross_workspace_reminder(tmp_path: Path) -> None:
+    # Declared in beta, run from alpha -> the reminder names the real workspace.
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    config = tmp_path / "c.toml"
+    config.write_text(
+        f'[workspaces.alpha]\npath = "{alpha}"\n'
+        f'[workspaces.beta]\npath = "{beta}"\n'
+        '[workspaces.beta.projects.ghost]\ndescription = "gone"\n'
+    )
+    res = _run_multi("create", "ghost", "feat", config=config, cwd=alpha, workspace="alpha")
+    assert res.returncode == 1
+    assert "declared in config but not on disk" in res.stderr
+    assert "wtm project new beta ghost" in res.stderr
+
+
+def test_create_wholly_absent_project_keeps_generic_error(tmp_path: Path) -> None:
+    # Not declared anywhere -> the locator falls back to the literal, and the
+    # core's generic 'project git dir not found' fires, not the reminder.
+    ws = tmp_path / "alpha"
+    ws.mkdir()
+    config = tmp_path / "c.toml"
+    config.write_text(f'[workspaces.alpha]\npath = "{ws}"\n')
+    res = _run_multi("create", "newproj", "newwt", config=config, cwd=ws, workspace="alpha")
+    assert res.returncode == 1
+    assert "project git dir not found" in res.stderr
+    assert "declared in config" not in res.stderr
     config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
     alpha, beta = roots
     _seed_repo_at(alpha, "onlyproj")
@@ -695,7 +740,6 @@ def test_config_show_worktree_cross_workspace_project(tmp_path: Path) -> None:
     res = _run_multi(
         "config",
         "show",
-        "--worktree",
         "onlyproj",
         "feat",
         config=config,
@@ -718,7 +762,6 @@ def test_config_show_project_cross_workspace(tmp_path: Path) -> None:
     res = _run_multi(
         "config",
         "show",
-        "--project",
         "onlyproj",
         config=config,
         cwd=beta,
@@ -739,9 +782,7 @@ def test_config_show_project_inert_falls_back_to_literal(tmp_path: Path) -> None
         f'[workspaces.alpha]\npath = "{roots[0]}"\n'
         '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
     )
-    res = _run_multi(
-        "config", "show", "--project", "ghost", config=config, cwd=tmp_path, workspace="alpha"
-    )
+    res = _run_multi("config", "show", "ghost", config=config, cwd=tmp_path, workspace="alpha")
     assert res.returncode == 0, res.stderr
     assert "project ghost:" in res.stdout
     assert "(no .git on disk)" in res.stdout
@@ -756,12 +797,12 @@ def test_config_show_project_ambiguous_errors(tmp_path: Path) -> None:
     _seed_repo_at(roots[1], "shared")
     # Run from tmp_path (not inside either workspace) with no WTM_WORKSPACE so
     # the cwd context tiebreak cannot single one out.
-    res = _run_multi("config", "show", "--project", "shared", config=config, cwd=tmp_path)
+    res = _run_multi("config", "show", "shared", config=config, cwd=tmp_path)
     assert res.returncode != 0
     assert "matches 2 projects" in res.stderr
     # Each choice is a fully-qualified, runnable command.
-    assert "wtm config show --project alpha shared" in res.stderr
-    assert "wtm config show --project beta shared" in res.stderr
+    assert "wtm config show alpha shared" in res.stderr
+    assert "wtm config show beta shared" in res.stderr
 
 
 def test_config_show_project_ambiguous_resolved_by_context(tmp_path: Path) -> None:
@@ -774,7 +815,6 @@ def test_config_show_project_ambiguous_resolved_by_context(tmp_path: Path) -> No
     res = _run_multi(
         "config",
         "show",
-        "--project",
         "shared",
         config=config,
         cwd=roots[0] / "shared",
@@ -798,7 +838,7 @@ def test_config_show_project_completion_spans_workspaces(
     monkeypatch.delenv("WTM_WORKSPACE", raising=False)
     from wtm.cli.completions.config import _complete_config_show
 
-    items = dict(_complete_config_show(_ConfigCtx(project=True), ""))
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
     # Projects from both workspaces appear (locator reach), plus both workspaces
     # as qualifiers.
     assert "datactl" in items
@@ -1485,7 +1525,9 @@ def test_complete_config_show_no_level_no_completion(
     _use_config(monkeypatch, root)
     from wtm.cli.completions.config import _complete_config_show
 
-    assert _complete_config_show(_ConfigCtx(), "") == []
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
+    assert "alpha" in items
+    assert "beta" in items
 
 
 def test_complete_config_show_all_no_completion(
@@ -1495,7 +1537,8 @@ def test_complete_config_show_all_no_completion(
     _use_config(monkeypatch, root)
     from wtm.cli.completions.config import _complete_config_show
 
-    assert _complete_config_show(_ConfigCtx(all_workspaces=True), "") == []
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
+    assert "alpha" in items
 
 
 def test_complete_config_show_workspace_level(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1503,8 +1546,8 @@ def test_complete_config_show_workspace_level(root: Path, monkeypatch: pytest.Mo
     _use_config(monkeypatch, root)
     from wtm.cli.completions.config import _complete_config_show
 
-    items = dict(_complete_config_show(_ConfigCtx(workspace=True), ""))
-    assert set(items) == {"ws"}
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
+    assert "ws" in items
 
 
 def test_complete_config_show_project_level(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1513,7 +1556,7 @@ def test_complete_config_show_project_level(root: Path, monkeypatch: pytest.Monk
     _use_config(monkeypatch, root)
     from wtm.cli.completions.config import _complete_config_show
 
-    items = dict(_complete_config_show(_ConfigCtx(project=True), ""))
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
     # Slot 0 offers workspaces + active workspace's projects.
     assert "alpha" in items
     assert "beta" in items
@@ -1527,7 +1570,7 @@ def test_complete_config_show_worktree_level(root: Path, monkeypatch: pytest.Mon
     monkeypatch.chdir(root)
     from wtm.cli.completions.config import _complete_config_show
 
-    items = dict(_complete_config_show(_ConfigCtx(worktree=True), ""))
+    items = dict(_complete_config_show(_ConfigCtx(), ""))
     # PROJECT-pinned locator: slot 0 offers projects (+ workspaces as qualifiers).
     assert "alpha" in items
     assert "ws" in items
@@ -1541,7 +1584,7 @@ def test_complete_config_show_project_level_slot1(
     _use_config(monkeypatch, root)
     from wtm.cli.completions.config import _complete_config_show
 
-    items = dict(_complete_config_show(_ConfigCtx(("ws",), project=True), ""))
+    items = dict(_complete_config_show(_ConfigCtx(("ws",)), ""))
     # Slot 1 offers projects of workspace args[0]='ws'.
     assert "alpha" in items
     assert "beta" in items
@@ -1619,7 +1662,7 @@ def test_config_unset_array_element_completion_e2e(root: Path) -> None:
 def test_config_show_project_completion_e2e(root: Path) -> None:
     _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
-    out = _complete(root, words="wtm config show --project ", cword="4")
+    out = _complete(root, words="wtm config show ", cword="3")
     names = out.split()
     assert "alpha" in names
     assert "beta" in names
@@ -1628,7 +1671,7 @@ def test_config_show_project_completion_e2e(root: Path) -> None:
 def test_config_show_no_level_no_completion_e2e(root: Path) -> None:
     _seed_repo(root, "alpha")
     out = _complete(root, words="wtm config show ", cword="3")
-    assert out.strip() == ""
+    assert "alpha" in out.split()
 
 
 def test_scope_completion_e2e(root: Path) -> None:
@@ -4161,7 +4204,7 @@ def test_workspace_selection_by_cwd(tmp_path: Path) -> None:
     config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
     # cwd inside beta's root -> beta is active without a flag/env.
     res = _run_multi("config", "show", config=config, cwd=roots[1])
-    assert "active workspace: beta" in res.stdout
+    assert "workspace beta:" in res.stdout
 
 
 def test_no_active_workspace_errors(tmp_path: Path) -> None:
@@ -4179,10 +4222,12 @@ def test_config_show_sources_flags_inert_annotation(tmp_path: Path) -> None:
         f'[workspaces.alpha]\npath = "{ws}"\n'
         '[workspaces.alpha.projects.ghost]\ndescription = "gone"\n'
     )
-    res = _run_multi("config", "show", "--origin", config=config, cwd=tmp_path, workspace="alpha")
+    res = _run_multi(
+        "config", "show", "-g", "-r", "--origin", config=config, cwd=tmp_path, workspace="alpha"
+    )
     assert res.returncode == 0, res.stderr
     assert "[user]" in res.stdout
-    assert "no such project on disk" in res.stdout
+    assert "no .git on disk" in res.stdout
 
 
 def test_config_show_lists_project_local_only_annotation(tmp_path: Path) -> None:
@@ -4196,7 +4241,7 @@ def test_config_show_lists_project_local_only_annotation(tmp_path: Path) -> None
     (proj / ".wtm" / "config.toml").write_text('base_branch = "develop"\n')
     config = tmp_path / "c.toml"
     config.write_text(f'[workspaces.alpha]\npath = "{ws}"\n')
-    res = _run_multi("config", "show", config=config, cwd=tmp_path, workspace="alpha")
+    res = _run_multi("config", "show", "-g", "-r", config=config, cwd=tmp_path, workspace="alpha")
     assert res.returncode == 0, res.stderr
     assert "project api" in res.stdout
     assert "develop" in res.stdout
@@ -4444,6 +4489,20 @@ def test_config_show_reports_base_branch_source(root: Path) -> None:
     assert "default base_branch: main  [user]" in res.stdout
 
 
+def test_config_show_workspace_base_branch_origin(root: Path) -> None:
+    # A workspace-tier base_branch is annotated with its declaring scope under
+    # --origin, mirroring the global and project tiers (Q6: ungated). The
+    # workspace-local file is a different scope from the workspace's declaration
+    # scope (user), so this also guards against regressing to ws.entry.scope.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert run("workspace", "set", "ws", "-b", "develop", root=root, extra_env=env).returncode == 0
+    res = run("config", "show", "--origin", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "base_branch: develop  [workspace]" in res.stdout
+
+
 def test_config_show_surfaces_cwd_project_local_base_branch(root: Path) -> None:
     # A project-local base_branch is invisible in the workspace listing but must
     # surface (with a [project] source) when the cwd is inside that project.
@@ -4513,12 +4572,12 @@ def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
 
 
 def test_config_show_all_descends_every_project_and_worktree(root: Path) -> None:
-    # Unlike the default cwd view, --all fully descends every project and every
+    # Unlike the default cwd view, -g -r fully descends every project and every
     # worktree from the workspace root, regardless of cwd.
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
     run("project", "set", "proj", "-b", "develop", root=root)
-    res = run("config", "show", "--all", root=root, cwd=root)
+    res = run("config", "show", "-g", "-r", root=root, cwd=root)
     assert res.returncode == 0, res.stderr
     assert "workspace" in res.stdout
     assert "project proj:" in res.stdout
@@ -4528,7 +4587,7 @@ def test_config_show_all_descends_every_project_and_worktree(root: Path) -> None
 
 
 def test_config_show_all_surfaces_inert_and_declared_worktree(root: Path) -> None:
-    # --all unions on-disk with declared: an inert (no .git) project and a
+    # -g -r unions on-disk with declared: an inert (no .git) project and a
     # declared-only worktree both appear.
     _seed_repo(root, "proj")
     (root / ".wtm").mkdir(parents=True, exist_ok=True)
@@ -4536,7 +4595,7 @@ def test_config_show_all_surfaces_inert_and_declared_worktree(root: Path) -> Non
         '[projects.ghost]\ndescription = "gone"\n'
         '[projects.proj.worktrees.planned]\ndescription = "not yet"\n'
     )
-    res = run("config", "show", "--all", root=root, cwd=root)
+    res = run("config", "show", "-g", "-r", root=root, cwd=root)
     assert res.returncode == 0, res.stderr
     assert "project ghost:" in res.stdout
     assert "(no .git on disk)" in res.stdout
@@ -4544,12 +4603,13 @@ def test_config_show_all_surfaces_inert_and_declared_worktree(root: Path) -> Non
 
 
 def test_config_show_project_from_cwd_and_worktree_base_branch_carveout(root: Path) -> None:
-    # --project roots at the cwd's project and descends its worktrees; the
-    # base_branch carve-out means no base_branch line ever prints on a worktree.
+    # Bare config show roots at the cwd's project and (with -r) descends its
+    # worktrees; the base_branch carve-out means no base_branch line ever prints
+    # on a worktree.
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
     run("project", "set", "proj", "-b", "develop", root=root)
-    res = run("config", "show", "--project", root=root, cwd=root / "proj")
+    res = run("config", "show", "-r", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
     assert "project proj:" in res.stdout
     assert "base_branch: develop" in res.stdout
@@ -4561,17 +4621,16 @@ def test_config_show_project_from_cwd_and_worktree_base_branch_carveout(root: Pa
 def test_config_show_worktree_by_name(root: Path) -> None:
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
-    res = run("config", "show", "--worktree", "proj", "feat", root=root, cwd=root)
+    res = run("config", "show", "proj", "feat", root=root, cwd=root)
     assert res.returncode == 0, res.stderr
     assert "worktree feat:" in res.stdout
-    assert "project proj:" not in res.stdout  # rooted at the worktree
 
 
 def test_config_show_all_json_is_nested_tree(root: Path) -> None:
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
     run("project", "set", "proj", "-b", "develop", root=root)
-    res = run("config", "show", "--all", "--json", root=root, cwd=root)
+    res = run("config", "show", "-g", "-r", "--json", root=root, cwd=root)
     assert res.returncode == 0, res.stderr
     payload = json.loads(res.stdout)
     # The single seeded workspace holds proj -> feat.
@@ -4586,11 +4645,11 @@ def test_config_show_all_json_is_nested_tree(root: Path) -> None:
 def test_config_show_project_json_extra_nested(root: Path) -> None:
     _seed_repo(root, "proj")
     run("config", "set", "editor", "nvim", root=root, cwd=root / "proj")
-    res = run("config", "show", "--project", "--json", root=root, cwd=root / "proj")
+    res = run("config", "show", "--json", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
-    node = json.loads(res.stdout)
-    assert node["name"] == "proj"
-    assert node["extra"] == {"editor": "nvim"}
+    payload = json.loads(res.stdout)
+    proj_node = payload["workspaces"]["ws"]["projects"]["proj"]
+    assert proj_node["extra"] == {"editor": "nvim"}
 
 
 def test_config_show_json_orthogonal_on_default_view(root: Path) -> None:
@@ -4598,37 +4657,183 @@ def test_config_show_json_orthogonal_on_default_view(root: Path) -> None:
     _seed_repo(root, "proj")
     res = run("config", "show", "--json", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
-    node = json.loads(res.stdout)
-    assert node["name"] == "proj"
+    payload = json.loads(res.stdout)
+    assert "ws" in payload["workspaces"]
+    assert "proj" in payload["workspaces"]["ws"]["projects"]
 
 
-def test_config_show_level_flags_mutually_exclusive(root: Path) -> None:
-    res = run("config", "show", "--all", "--project", root=root, cwd=root)
+def test_config_show_global_with_locator_errors(root: Path) -> None:
+    res = run("config", "show", "-g", "foo", root=root, cwd=root)
     assert res.returncode == 1
-    assert "mutually exclusive" in res.stderr
+    assert "cannot be combined with a locator" in res.stderr
 
 
-def test_config_show_target_without_level_errors(root: Path) -> None:
-    res = run("config", "show", "foo", root=root, cwd=root)
+def test_config_show_json_with_origin_errors(root: Path) -> None:
+    res = run("config", "show", "--json", "--origin", root=root, cwd=root)
     assert res.returncode == 1
-    assert "requires a level flag" in res.stderr
+    assert "cannot be combined" in res.stderr
 
 
-def test_config_show_sources_rejected_with_level(root: Path) -> None:
-    res = run("config", "show", "--all", "--origin", root=root, cwd=root)
+def test_config_show_json_with_hooks_errors(root: Path) -> None:
+    res = run("config", "show", "--json", "--hooks", root=root, cwd=root)
     assert res.returncode == 1
-    assert "default view" in res.stderr
+    assert "cannot be combined" in res.stderr
+
+
+def test_config_show_no_workspaces_registry_leak(root: Path) -> None:
+    # The global [workspaces] registry table is reserved: it must not leak into
+    # global_extra as a raw ``workspaces: {...}`` dict line. Only the pruned
+    # workspace node for the target renders.
+    other = root.parent / "other_ws"
+    other.mkdir()
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n[workspaces.other]\npath = "{other}"\n')
+    _seed_repo(root, "proj")
+    res = run("config", "show", root=root, cwd=root / "proj", extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    assert not any(line.startswith("workspaces:") for line in res.stdout.splitlines())
+    assert "workspace ws:" in res.stdout
+
+
+def test_config_show_json_no_workspaces_in_extra(root: Path) -> None:
+    # JSON mirrors text: the registry table is structured under ``workspaces``,
+    # never dumped into the global ``extra`` payload.
+    other = root.parent / "other_ws"
+    other.mkdir()
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n[workspaces.other]\npath = "{other}"\n')
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "show",
+        "-g",
+        "-r",
+        "--json",
+        root=root,
+        cwd=root,
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert "workspaces" in payload  # the structured node
+    assert "workspaces" not in payload.get("extra", {})
+
+
+def test_config_show_json_no_base_branch_source(root: Path) -> None:
+    # --json is effective-values-only (per Q13): the global default base_branch
+    # ships as ``default_base_branch``, but its provenance (``base_branch_source``)
+    # is text-only (``--origin``) and never appears in JSON.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    res = run("config", "show", "--json", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["default_base_branch"] == "main"
+    assert "base_branch_source" not in payload
+
+
+def test_config_set_workspaces_refused(root: Path) -> None:
+    # ``workspaces`` is the global registry table (reserved): the generic key
+    # surface refuses it, pointing at the dedicated ``wtm workspace`` verbs.
+    _seed_repo(root, "proj")
+    res = run("config", "set", "workspaces", "bar", root=root, cwd=root / "proj")
+    assert res.returncode == 1
+    assert "reserved key" in res.stderr
+
+
+def test_config_show_global_alone_is_global_tier_only(root: Path) -> None:
+    # -g with no locator targets the global tier; depth caps at 0, so no
+    # workspace block is rendered even when a project exists on disk.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    res = run("config", "show", "-g", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    assert "default base_branch: main" in res.stdout
+    assert "workspace ws:" not in res.stdout
+    assert "project proj:" not in res.stdout
+
+
+def test_config_show_depth_project_prunes_worktree_from_worktree_cwd(root: Path) -> None:
+    # -d project from a worktree cwd caps the deepest tier at project (2), so the
+    # worktree tier is pruned while project + workspace + global remain. This
+    # exercises the DepthTier enum -> depth wiring through the CLI.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    wt = root / "proj" / "worktrees" / "feat"
+    res = run("config", "show", "-d", "project", root=root, cwd=wt)
+    assert res.returncode == 0, res.stderr
+    assert "workspace ws:" in res.stdout
+    assert "project proj:" in res.stdout
+    assert "worktree feat:" not in res.stdout
+
+
+def test_config_show_depth_global_caps_at_global(root: Path) -> None:
+    # -d global (0) from a project cwd prunes the workspace and project tiers,
+    # leaving only the global tier (the target itself is capped when shallower).
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "show",
+        "-d",
+        "global",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "default base_branch: main" in res.stdout
+    assert "workspace ws:" not in res.stdout
+    assert "project proj:" not in res.stdout
+
+
+def test_config_show_recurse_with_depth_caps_subtree(root: Path) -> None:
+    # myproj -r -d project: the project's subtree would expand with -r, but the
+    # -d project cap prunes every worktree, leaving global -> workspace -> project.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    res = run("config", "show", "proj", "-r", "-d", "project", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "workspace ws:" in res.stdout
+    assert "project proj:" in res.stdout
+    assert "worktree feat:" not in res.stdout
+
+
+def test_config_show_depth_below_target_is_silent_no_op(root: Path) -> None:
+    # -d worktree (3) on a project target (2) without -r changes nothing: the
+    # default depth is already the target tier, and without -r no worktrees
+    # expand anyway. The output is identical to omitting -d.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    res_capped = run("config", "show", "proj", "-d", "worktree", root=root, cwd=root)
+    res_plain = run("config", "show", "proj", root=root, cwd=root)
+    assert res_capped.returncode == 0, res_capped.stderr
+    assert res_capped.stdout == res_plain.stdout
+
+
+def test_config_show_worktree_target_recurse_is_no_op(root: Path) -> None:
+    # A worktree is the leaf tier, so -r has nothing below to expand into: the
+    # output matches the plain (no -r) worktree-target view.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    res_recurse = run("config", "show", "proj", "feat", "-r", root=root, cwd=root)
+    res_plain = run("config", "show", "proj", "feat", root=root, cwd=root)
+    assert res_recurse.returncode == 0, res_recurse.stderr
+    assert "worktree feat:" in res_recurse.stdout
+    assert res_recurse.stdout == res_plain.stdout
 
 
 def test_config_show_default_view_unchanged(root: Path) -> None:
-    # No level flag: the shallow cwd view still lists workspaces and only the
-    # cwd project name (no full descent).
+    # From the workspace root, the pruned tree lists workspaces without descending
+    # into the cwd project's worktrees.
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
     res = run("config", "show", root=root, cwd=root)
     assert res.returncode == 0, res.stderr
-    assert "active workspace:" in res.stdout
-    assert "workspaces:" in res.stdout
+    assert "workspace" in res.stdout
     assert "worktree feat:" not in res.stdout  # no descent from the ws root
 
 

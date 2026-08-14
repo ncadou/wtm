@@ -268,7 +268,7 @@ def _finish(hits: list[Location]) -> Resolution:
     return Ambiguous(candidates=hits)
 
 
-def build_index(config: Config) -> LocationIndex:
+def build_index(config: Config, *, include_config_only: bool = False) -> LocationIndex:
     """Enumerate the tree across every declared workspace, from the filesystem.
 
     The one config-bound edge of the locator. Deliberately git-free: projects are
@@ -277,6 +277,13 @@ def build_index(config: Config) -> LocationIndex:
     nesting is preserved). Lenient throughout -- an unreadable dir is skipped, not
     raised -- so shell completion never errors. An out-of-tree ``-d`` worktree is
     not indexed (it is reached by ``DIR``, unchanged).
+
+    When *include_config_only* is set, the index also carries config-declared
+    entities that are absent on disk: inert projects (declared in config but with
+    no ``.git`` dir) and absent worktrees (declared in config but with no
+    worktree dir). Dedup is structural (set subtraction), so an on-disk entity is
+    never duplicated. The default (``False``) keeps the index disk-only -- the
+    existence-bound commands resolve only what is actually there.
     """
     worktrees: list[Location] = []
     projects: list[Location] = []
@@ -286,22 +293,43 @@ def build_index(config: Config) -> LocationIndex:
     for ws_name, ws in sorted(config.workspaces.items()):
         workspace_names.append(ws_name)
         roots[ws_name] = ws.path
+        on_disk_projects: set[str] = set()
+        on_disk_worktrees: dict[str, set[str]] = {}
         for project_dir in _child_dirs(ws.path):
             if not (project_dir / ".git").is_dir():
                 continue
-            projects.append(
-                Location(tier=Tier.PROJECT, workspace=ws_name, project=project_dir.name)
-            )
+            pname = project_dir.name
+            on_disk_projects.add(pname)
+            projects.append(Location(tier=Tier.PROJECT, workspace=ws_name, project=pname))
             worktrees_dir = project_dir / "worktrees"
-            for name in _worktree_names(worktrees_dir):
+            wt_names = _worktree_names(worktrees_dir)
+            on_disk_worktrees[pname] = set(wt_names)
+            for name in wt_names:
                 worktrees.append(
                     Location(
                         tier=Tier.WORKTREE,
                         workspace=ws_name,
-                        project=project_dir.name,
+                        project=pname,
                         name=name,
                     )
                 )
+
+        if include_config_only:
+            declared_projects = config.declared_project_names(ws)
+            for pname in sorted(declared_projects - on_disk_projects):
+                projects.append(Location(tier=Tier.PROJECT, workspace=ws_name, project=pname))
+            for pname in sorted(on_disk_projects | declared_projects):
+                for wt_name in sorted(
+                    config.declared_worktree_names(ws, pname) - on_disk_worktrees.get(pname, set())
+                ):
+                    worktrees.append(
+                        Location(
+                            tier=Tier.WORKTREE,
+                            workspace=ws_name,
+                            project=pname,
+                            name=wt_name,
+                        )
+                    )
 
     return LocationIndex(
         worktrees=worktrees, projects=projects, workspaces=workspace_names, roots=roots
