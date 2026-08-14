@@ -1,6 +1,6 @@
-"""The cli side of :mod:`wtm.locate`, shared by every locator-taking command.
+"""The cli side of :mod:`wtm.locator`, shared by every locator-taking command.
 
-Resolve the positionals to a single :class:`wtm.locate.Location` (or die with a
+Resolve the positionals to a single :class:`wtm.locator.Location` (or die with a
 copy-runnable ambiguity), then hand it over in whichever shape the caller's
 operation already speaks -- a ``(workspace, project)`` pair, or a
 fully-qualified ``WORKSPACE PROJECT NAME`` triple. A command that accepts one
@@ -29,7 +29,7 @@ from __future__ import annotations
 import typer
 
 from wtm.core import WtmError, current_dir, project_dir_for
-from wtm.locate import (
+from wtm.locator import (
     Ambiguous,
     Location,
     NotFound,
@@ -49,7 +49,7 @@ def _locate_one(
     :param args: the locator tokens (non-empty).
     :param command: the ``wtm`` sub-command name, so an ambiguity prints choices
         that can be pasted straight back.
-    :param tier: an optional leaf-tier pin (see :func:`wtm.locate.locate`).
+    :param tier: an optional leaf-tier pin (see :func:`wtm.locator.locate`).
     :returns: the sole matching location.
     :raises WtmError: nothing matched, or several did and the current context
         could not single one out.

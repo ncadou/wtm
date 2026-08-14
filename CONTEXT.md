@@ -68,7 +68,7 @@ its cwd-inferred project, relaxing to the workspace alone on a miss; a unique
 in-context match resolves silently, otherwise the tie stands and prints as
 before. The tiebreak only ever turns a former ambiguity error into a hit -- it
 never touches an already-unique resolution -- and the core cascade stays pure and
-global (it is a CLI-layer post-filter). Lives in `wtm.locate`: `locate` is the
+global (it is a CLI-layer post-filter). Lives in `wtm.locator`: `locate` is the
 pure cascade over a `LocationIndex` snapshot, `build_index` the filesystem-bound
 (git-free) edge. The CLI-side edge (`_locate_one` and its `_locate_project` /
 `_locate_worktree_args` / `_locate_parent_args` shapes) is command-agnostic and

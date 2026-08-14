@@ -26,7 +26,7 @@ from wtm.cli.completions.target import _complete_project, _complete_workspace_ar
 from wtm.config import Config, GenericTarget, validate_arbitrary_key
 from wtm.core import current_dir
 from wtm.hooks import Scope
-from wtm.locate import LocationIndex, Resolved, build_index, locate
+from wtm.locator import LocationIndex, Resolved, build_index, locate
 
 # --- target-parameterized helpers (shared by every reading) ----------------
 

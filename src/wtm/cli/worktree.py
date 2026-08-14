@@ -23,7 +23,7 @@ from wtm.cli.locator import _locate_one, _locate_parent_args, _locate_project
 from wtm.config import resolve_project_dir
 from wtm.core import WtmError, current_dir, remap_dir, rescue_dir, worktree_name
 from wtm.hooks import Scope
-from wtm.locate import Location, Tier, build_index
+from wtm.locator import Location, Tier, build_index
 from wtm.output import emit_env_line, emit_shell, log, warn, worktree_list_lines
 from wtm.target import looks_like_path
 from wtm.worktree import BranchStrategy, WorktreeCreated, WorktreeRenamed

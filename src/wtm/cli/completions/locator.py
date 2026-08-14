@@ -12,7 +12,7 @@ import typer
 from wtm.cli.completions.target import _TARGET_PRECEDENCE
 from wtm.config import Config
 from wtm.hooks import EVENTS
-from wtm.locate import Location, LocationIndex, Tier, build_index
+from wtm.locator import Location, LocationIndex, Tier, build_index
 
 
 def _complete_locate(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:

@@ -1,4 +1,4 @@
-"""Pure, subprocess-free tests for the locator (:mod:`wtm.locate`).
+"""Pure, subprocess-free tests for the locator (:mod:`wtm.locator`).
 
 The cascade is the test surface: :func:`locate` takes a :class:`LocationIndex`
 snapshot explicitly, so every tier, qualifier reading, and ambiguity is exercised
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from wtm.locate import (
+from wtm.locator import (
     Ambiguous,
     Location,
     LocationIndex,
