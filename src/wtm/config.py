@@ -17,7 +17,7 @@ This module is the *only* place that reads or writes ``.wtm`` config -- no other
 part of the app touches ``tomlkit`` or builds a ``.wtm/config.toml`` path. It
 offers three tiers, all on :class:`Config`:
 
-* a **generic value facility** -- :meth:`Config.get_value` /
+* an **arbitrary-key facility** -- :meth:`Config.get_value` /
   :meth:`Config.set_value` / :meth:`Config.unset_value` -- addressing any
   scope through a :class:`ConfigAddress` and a key (a bare key, or a tuple for a
   nested table). This is the substrate every other tier is built on;
@@ -223,7 +223,7 @@ class HookSpec:
 class ProjectAnnotation:
     """Config overlay for a discovered project (never a declaration).
 
-    :param extra: arbitrary (non-reserved) keys resolved by the locality merge,
+    :param extra: arbitrary keys resolved by the locality merge,
         beyond the known scalar fields.
     """
 
@@ -237,7 +237,7 @@ class ProjectAnnotation:
 class Workspace:
     """A declared workspace: a named projects root plus its config overlay.
 
-    :param extra: arbitrary (non-reserved) keys resolved by the locality merge,
+    :param extra: arbitrary keys resolved by the locality merge,
         beyond the known scalar fields.
     """
 
@@ -258,7 +258,7 @@ class ResolvedWorktree:
     """The worktree tier of the resolved view (locality-merged over the ladder).
 
     :param description: the worktree's scalar annotation, if any.
-    :param extra: arbitrary (non-reserved) keys resolved by the locality merge.
+    :param extra: arbitrary keys resolved by the locality merge.
     """
 
     name: str
@@ -341,7 +341,7 @@ class ConfigSlice:
 
 @dataclass(frozen=True)
 class GenericTarget:
-    """The cwd-inferred entity a generic ``config`` key acts on.
+    """The cwd-inferred entity an arbitrary ``config`` key acts on.
 
     Resolved by :meth:`Config.resolve_generic_target`: *label* names the entity
     for messages, *probes* is its locality cascade (most-local-first, feeding
@@ -381,7 +381,7 @@ class SourceRung:
     tier: str | None = None
 
 
-# --- generic value store -----------------------------------------------------
+# --- arbitrary-key store -----------------------------------------------------
 
 
 Key = str | tuple[str, ...]
@@ -395,7 +395,7 @@ _CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
 _SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
 # Builtin non-entity-specific keys: shared defaults whose read resolution
 # inherits down the containment chain (Layer 2), rather than staying entity-local.
-# The generic `config get` folds an entity's own cascade plus its ancestors' for
+# The arbitrary-key `config get` folds an entity's own cascade plus its ancestors' for
 # these, so it reports the same effective value a real command would use. The
 # effective set is this builtin allowlist unioned with the user-declared
 # `inheritable` array (see :meth:`Config.inheritable_keys`); a key's membership is
@@ -418,7 +418,7 @@ def validate_arbitrary_key(key: str) -> None:
     The container tables (``hooks`` / ``projects`` / ``worktrees``), the
     user-file declarations (``path`` / ``default_workspace``), the global
     registry table (``workspaces``), and the ``inheritable`` allowlist own their
-    own typed surfaces; the generic key facility must not shadow them.
+    own typed surfaces; the arbitrary-key facility must not shadow them.
     """
     if key in RESERVED_KEYS:
         raise WtmError(
@@ -827,7 +827,7 @@ class Config:
 
         return ws.hooks.dir or ws.path / ".wtm" / "hooks"
 
-    # --- generic value facility ----------------------------------------------
+    # --- arbitrary-key facility ----------------------------------------------
 
     def get_value(self, address: ConfigAddress, key: Key) -> str | None:
         """Read one scalar at *key* from the file *address* names (raw, unmerged).
@@ -946,10 +946,10 @@ class Config:
 
         raise WtmError(f"cannot write a worktree annotation at {scope} scope")
 
-    # --- generic key surface (arbitrary keys, cwd-inferred entity) -----------
+    # --- arbitrary-key surface (cwd-inferred entity) -------------------------
 
     def resolve_generic_target(self, cwd: Path | None) -> GenericTarget:
-        """Resolve the cwd-inferred entity a generic ``config`` key acts on.
+        """Resolve the cwd-inferred entity an arbitrary ``config`` key acts on.
 
         Picks the deepest entity the cwd sits inside -- worktree, else project,
         else the active workspace -- and returns a :class:`GenericTarget` naming
@@ -1192,7 +1192,7 @@ class Config:
     def effective_keys(self, target: GenericTarget) -> list[tuple[str, SourceRung]]:
         """The non-``(unset)`` keys ``config get`` would resolve for *target*.
 
-        Completion material for the generic ``config get``: every key whose
+        Completion material for the arbitrary-key ``config get``: every key whose
         :meth:`resolve_generic_value` yields a non-empty chain, paired with its
         most-local (winning) rung. The effective set is the entity's own present
         arbitrary keys (walked across *target*'s probe cascade, reserved keys

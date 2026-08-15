@@ -107,7 +107,7 @@ def config_show(
 
 
 def _print_extra(indent: str, extra: dict[str, object]) -> None:
-    """Render an entity's arbitrary (non-reserved) keys, always in the cwd descent."""
+    """Render an entity's arbitrary keys, always in the cwd descent."""
     for key, value in sorted(extra.items()):
         print(f"{indent}{key}: {value}")
 
@@ -234,7 +234,7 @@ def config_base_branch(
     log(f"base_branch set to '{value}'")
 
 
-# --- generic key surface (arbitrary keys, cwd-inferred entity) ---------------
+# --- arbitrary-key surface (cwd-inferred entity) -------------------------------
 
 
 @config_app.command(name="set")

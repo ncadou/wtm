@@ -192,7 +192,7 @@ not cascade: `project enter` fires `project-enter` across its scopes but never
 `wtm.config` is the single module that reads or writes any `.wtm` config -- no
 other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It
 loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
-on `Config`, three write/read tiers: a **generic value facility**
+on `Config`, three write/read tiers: an **arbitrary-key facility**
 (`get_value`/`set_value`/`unset_value` plus element-wise
 `add_to_array`/`remove_from_array` and `set_table_value`/`unset_table_value`
 over a `ConfigAddress` naming any scope
@@ -213,7 +213,7 @@ once per ancestor above the file. All I/O is one comment-preserving `tomlkit`
 round-trip with an atomic replace, serialised by a **per-directory lock**
 (`flock` on the file's containing dir -- stable, unlike the file, which
 `os.replace` swaps on every write, and leaving no lock artifact to clean up);
-every write (scalar or array, generic or structural) funnels through one
+every write (scalar or array, arbitrary-key or structural) funnels through one
 `_transaction` primitive that re-reads the file fresh under the lock and applies
 just its delta -- a read-modify-write, so a concurrent writer's *other* keys
 survive (and a no-op change is elided, neither creating an empty file nor
@@ -228,10 +228,10 @@ scope, system and worktree included, is writable) via `-s/--scope` on the
 calling command (default: the deepest scope whose dir exists); the
 `*_write_target` resolvers map a scope to its `(address, key-prefix)` write site,
 and `resolve_generic_target`/`resolve_generic_value` expose the same cascade to
-the generic `config set/get/unset` and inline `hook set/unset` surfaces over the
+the arbitrary-key `config set/get/unset` and inline `hook set/unset` surfaces over the
 cwd-inferred entity (for an *inheritable* key -- the builtin `base_branch` per
 `INHERITABLE_KEYS`, or any key named in the user's accumulating `inheritable`
-array -- the generic read folds the entity's own cascade plus its ancestors' so
+array -- the arbitrary-key read folds the entity's own cascade plus its ancestors' so
   `config get` reports the same effective value a real command uses, and
   `--origin` labels each rung by its definition tier; inheritance reaches
   `config show` too, via a shared tier-fold that fills a descendant's `extra`
@@ -287,6 +287,26 @@ ancestor's contribution is itself already **locality-merged**) and only for an
 most-local *file* winning within one entity is a **locality merge**, not
 inheritance.
 _Avoid_: cascade, scope inheritance, override
+
+**Arbitrary key**:
+A config key with no dedicated typed surface -- equivalently, any key that is
+not a **reserved key** (`hooks`, `projects`, `worktrees`, `workspaces`, `path`,
+`default_workspace`, `inheritable`), each of which owns its own command. The
+schema-open escape hatch: read and written through the **arbitrary-key
+facility** (`config set/get/unset KEY [VALUE]`, backed by
+`Config.get_value`/`set_value`/`unset_value` over a `ConfigAddress`); every
+other key is one of the named, typed surfaces. An arbitrary key resolves by the
+**uniform locality merge** alone (most-local present value wins) and is
+**entity-local by default** -- it never falls to a descendant entity unless
+opted onto the **inheritable** axis (see **Inheritable key**). After resolution
+it lands in the entity dataclass's `extra` dict (the arbitrary-key payload);
+`validate_arbitrary_key` rejects a reserved name at the write site, and
+`config show` prints every arbitrary key along the shown branch. The code
+identifiers `GenericTarget`/`resolve_generic_target`/`resolve_generic_value`
+name this same facility (the prose term and the symbol names diverge).
+_Avoid_: custom key, user key, generic key, non-reserved key (say "arbitrary
+key"); `extra` is the *payload field* that holds arbitrary keys, not the keys
+themselves.
 
 **Inheritable key** (non-entity-specific key):
 A config key that undergoes **inheritance** -- equivalently, a

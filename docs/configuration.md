@@ -37,7 +37,7 @@ Worktrees add one more rung (`[worktrees.T]` project-local,
 Most config is hand-edited; management commands write it for you (a
 comment-preserving `tomlkit` round-trip with an atomic replace). All reads and
 writes go through one authority — `wtm.config` — the only module that touches a
-`.wtm/config.toml` file. It offers a generic value facility (read/write any
+`.wtm/config.toml` file. It offers an arbitrary-key facility (read/write any
 scalar at any named scope), a typed read view, and named structural registry
 mutations (`add`/`set`/`rename`/`delete` workspace, `default_workspace`, global
 `base_branch`) that write the **user file** and own their cross-key fixups (a
@@ -65,7 +65,7 @@ value (e.g. the user-file registry annotation) resurface.
 
 ## Arbitrary keys (`config set/get/unset`)
 
-Any non-reserved key cascades too. `wtm config set/get/unset KEY [VALUE]` acts
+Any arbitrary key cascades too. `wtm config set/get/unset KEY [VALUE]` acts
 on the **cwd-inferred entity** (the deepest one the cwd sits inside — worktree,
 else project, else the active workspace); `-s/--scope` picks the file tier the
 same way annotations do.
@@ -210,7 +210,7 @@ ancestor and its own descendants) up to the depth cap.
 
 On-disk entities are unioned with declared ones, so annotated-but-inert
 projects and declared-but-absent worktrees still surface (an inert project is
-marked `(no .git on disk)`). Arbitrary (non-reserved) keys resolved along the
+marked `(no .git on disk)`). Arbitrary keys resolved along the
 shown branch are always printed.
 
 `--origin` tags each value with its **winning** scope (the full chain lives in

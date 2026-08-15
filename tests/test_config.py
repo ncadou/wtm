@@ -4,7 +4,7 @@ Both sides of the engine are exercised directly against :meth:`Config.load` and
 its methods, driven by TOML files under ``tmp_path`` and env vars, with no
 ``wtm`` invocation and no git: config *resolution* (the workspace registry,
 active-workspace precedence, per-scope hook merging, base-branch cascade) and
-config *writes* (the generic value facility, the structural registry mutations,
+config *writes* (the arbitrary-key facility, the structural registry mutations,
 comment preservation, scope policy, and the ``default_workspace`` fixups).
 Lifecycle (enter/leave) and CLI wiring live in :mod:`tests.test_wtm`.
 """
@@ -306,7 +306,7 @@ def test_workspace_local_project_base_branch_provenance(
 def test_project_arbitrary_key_cascades_into_extra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A non-reserved key resolves most-local-first and lands in `extra`.
+    # An arbitrary key resolves most-local-first and lands in `extra`.
     ws = tmp_path / "w"
     proj = ws / "proj"
     (proj / ".wtm").mkdir(parents=True)
@@ -729,7 +729,7 @@ def test_workspace_local_empty_string_clears_registry_scalar(
 def test_workspace_arbitrary_key_populates_extra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A non-reserved workspace key resolves most-local-first into Workspace.extra
+    # An arbitrary workspace key resolves most-local-first into Workspace.extra
     # (the registry engine used to leave extra permanently empty).
     ws = tmp_path / "w"
     (ws / ".wtm").mkdir(parents=True)
@@ -780,7 +780,7 @@ def test_global_default_workspace_presence_based(
 
 
 # =============================================================================
-# Writes: the generic value facility + the structural registry mutations.
+# Writes: the arbitrary-key facility + the structural registry mutations.
 # =============================================================================
 
 
@@ -819,7 +819,7 @@ def _seed_user(cfg: Path, name: str, path: Path, **extra: str) -> None:
     cfg.write_text(prev + body)
 
 
-# --- generic value facility --------------------------------------------------
+# --- arbitrary-key facility ---------------------------------------------------
 
 
 def test_get_value_reads_scope_scalar(user_cfg: Path, tmp_path: Path) -> None:
@@ -1028,7 +1028,7 @@ def test_structural_write_does_not_clobber_concurrent_key(user_cfg: Path, tmp_pa
 def test_arrays_do_not_merge_across_scopes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A generic array reads most-local-whole-array (replace), never a cross-scope
+    # An arbitrary-key array reads most-local-whole-array (replace), never a cross-scope
     # union -- so distinct per-tier names are the way to keep per-scope arrays.
     ws = tmp_path / "w"
     proj = ws / "proj"

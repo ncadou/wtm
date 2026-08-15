@@ -41,8 +41,8 @@ writable — and correctly resolved — at every ancestor scope.
 ## Decision
 
 Replace the per-field cascades with a single **locality-ordered, recursive
-merge** over the whole scope ladder, plus explicit write-placement and a generic
-key/value surface.
+merge** over the whole scope ladder, plus explicit write-placement and an
+arbitrary-key surface.
 
 ### Uniform storage layout
 
@@ -89,7 +89,7 @@ outside the payload cascade.
   worktree → {worktree, project, workspace, user, system}. `WTM_NO_CONFIG` still
   refuses all writes; workspace declarations stay user-file-only.
 - Worktrees gain a `description` field.
-- A generic `config set/get/unset KEY [VALUE]` surface writes/reads arbitrary
+- An arbitrary-key `config set/get/unset KEY [VALUE]` surface writes/reads arbitrary
   keys at a chosen scope; `config get KEY --sources` reports the full probe chain
   (including inheritance steps), while `config show --sources` labels each value
   with its winning scope only. (The 2026-07-30 addendum renames `--sources` to
@@ -120,14 +120,14 @@ All six phases are shipped (each was independently shippable, and each landed in
 order); the five addenda below record the follow-on corrections and extensions
 made after phase 6.
 
-1. Resolver rewrite: probe tables, generic Layer-1 merge + provenance, Layer-2
+1. Resolver rewrite: probe tables, arbitrary-key Layer-1 merge + provenance, Layer-2
    inheritance registry, kind-clash errors, top-level self layout; retire
    `_parse_project_local` / `_base_branch_cascade`. Data model gains
    `extra: dict` on `ProjectAnnotation` / `Workspace` / `ResolvedWorktree`, plus
    `description` on `ResolvedWorktree`.
 2. `-s/--scope` write placement on `project set` / `workspace set`.
 3. Worktree tier: `worktree set` + deep worktree read-cascade.
-4. Generic `config set/get/unset` + arbitrary-key cascade + reserved-name
+4. Arbitrary-key `config set/get/unset` + arbitrary-key cascade + reserved-name
    validation.
 5. Inline-hook writer `hook set/unset`.
 6. `config show` rewrite + docs (this ADR, `CONTEXT.md`, `docs/configuration.md`).
@@ -151,7 +151,7 @@ scope, and `config get` enforces the kind-clash error like `config show`.
 
 ## Addendum (2026-07-24): inheritance-aware `config get`, and cleanups
 
-Phase 4 shipped the generic `config get/set/unset` surface, but `config get`
+Phase 4 shipped the arbitrary-key `config get/set/unset` surface, but `config get`
 resolved only Layer 1 (the entity's own locality cascade), contradicting this
 ADR's promise that `config get KEY --sources` reports the chain *including
 inheritance steps*. The gap was user-visible: from inside a project,
@@ -160,7 +160,7 @@ inherited workspace/global default — the two read paths disagreed.
 
 `config get` is now inheritance-aware. An **inheritable-key registry**
 (`INHERITABLE_KEYS`, today just `base_branch`) drives it: for such a key the
-generic resolver folds an *extended*, tier-tagged probe list — the entity's own
+arbitrary-key resolver folds an *extended*, tier-tagged probe list — the entity's own
 cascade followed by its ancestors' (project → workspace → global) — so the
 most-local winner matches `base_branch_provenance` exactly. Because the extended
 list stays most-local-first, no new precedence logic is needed. `--sources` now
@@ -174,7 +174,7 @@ Two cleanups rode along. Layer 1's per-leaf provenance return from
 `_merge_locality` was dead (every caller discarded it, and it records only the
 single winner — it cannot feed the `--sources` full chain), so it was removed;
 the read view still reports provenance via `base_branch_provenance`. And the
-generic write path now marks its container tables (`workspaces` / `projects` /
+arbitrary-key write path now marks its container tables (`workspaces` / `projects` /
 `worktrees`) as super-tables like the structural writers, so a fresh deep write
 renders dotted `[workspaces.W.projects.P]` headers with no empty parent lines.
 
@@ -209,7 +209,7 @@ divergence class the previous addendum closed for `base_branch`).
 tier of its own, so a worktree-local `base_branch` is ignored (keeping
 `config get` aligned with `base_branch_provenance` / `create`), whereas a
 user-declared inheritable key set worktree-local *is* honoured. That is the only
-place a builtin's chain differs from the generic one.
+place a builtin's chain differs from the arbitrary-key one.
 
 ## Addendum (2026-07-28): CLI/env surface and rationale left implicit
 
@@ -217,14 +217,14 @@ The Decision recorded the resolution engine but glossed three parts of the shipp
 surface. Documenting them here (no behaviour change) so the ADR matches the code.
 
 - **The `config base-branch` command.** The "Write placement and CLI" bullets
-  cover `project set` / `workspace set` / `worktree set`, the generic
+  cover `project set` / `workspace set` / `worktree set`, the arbitrary-key
   `config set/get/unset`, and `hook set/unset`, but omit the dedicated
   `wtm config base-branch [VALUE] [--clear]`. It is the read/set/clear surface for
   the **global top-level** `base_branch` default (the inheritance floor below the
   workspace tier): with no VALUE it prints the effective global default annotated
   with its winning scope, and set/clear write the user-scope top-level key. It is
   a thin wrapper over the `set_base_branch` / `clear_base_branch` structural
-  mutations named in the Decision — a convenience peer of the generic surface, not
+  mutations named in the Decision — a convenience peer of the arbitrary-key surface, not
   a new mechanism.
 
 - **System-scope selection is env-only; there is no `WTM_NO_SYSTEM`.** The system
@@ -253,7 +253,7 @@ now the six names in `RESERVED_KEYS`: `hooks`, `projects`, `worktrees`, `path`,
 
 ## Addendum (2026-07-30): kind-symmetric element-wise writes, and `-o/--origin`
 
-Phase 4's generic surface grew array mutation as a pair of `config set` flags
+Phase 4's arbitrary-key surface grew array mutation as a pair of `config set` flags
 (`--array-add` / `--array-remove`), which put a *removal* on the `set` verb and
 left the third TOML kind — the **table** — with no CLI at all, writable only by
 hand or through the reserved `hooks` surface. The asymmetry was in the verbs, not

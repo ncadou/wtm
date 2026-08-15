@@ -1,7 +1,7 @@
 """Cross-layer shared helpers used by both completions and command groups.
 
-The shared substrate that straddles the completion/command divide: the generic
-write-scope resolver and its help text (hook + config), the worktree-name
+The shared substrate that straddles the completion/command divide: the
+arbitrary-key write-scope resolver and its help text (hook + config), the worktree-name
 projection (completion + project tree view), and the resolved-rung label
 (completion + ``config get``). Kept import-free of group modules and
 completions so both layers may import it without forming a cycle.
@@ -20,7 +20,7 @@ _GENERIC_SCOPE_HELP = (
 
 
 def _generic_scope(target: GenericTarget, scope: Scope | None) -> Scope:
-    """Resolve/validate the write scope for a generic key against *target*."""
+    """Resolve/validate the write scope for an arbitrary key against *target*."""
     scope = scope if scope is not None else target.default_scope
     if scope not in target.allowed_scopes:
         allowed = ", ".join(s.value for s in target.allowed_scopes)

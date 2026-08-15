@@ -1313,7 +1313,7 @@ def test_complete_config_key_effective_set(root: Path, monkeypatch: pytest.Monke
     assert items["base_branch"] == "config in workspace"
     assert items["owner"] == "config in project"
     assert items["labels"] == "config in project"
-    # Reserved keys never appear (they own typed surfaces, not the generic get).
+    # Reserved keys never appear (they own typed surfaces, not the arbitrary-key get).
     assert "path" not in items
     assert "projects" not in items
     assert "inheritable" not in items
@@ -4734,7 +4734,7 @@ def test_config_show_json_no_base_branch_source(root: Path) -> None:
 
 
 def test_config_set_workspaces_refused(root: Path) -> None:
-    # ``workspaces`` is the global registry table (reserved): the generic key
+    # ``workspaces`` is the global registry table (reserved): the arbitrary-key
     # surface refuses it, pointing at the dedicated ``wtm workspace`` verbs.
     _seed_repo(root, "proj")
     res = run("config", "set", "workspaces", "bar", root=root, cwd=root / "proj")
@@ -4936,7 +4936,7 @@ def test_worktree_set_has_no_top_level_shortcut(root: Path) -> None:
     assert res.returncode != 0
 
 
-# --- generic config set / get / unset (arbitrary keys, cwd-inferred entity) ---
+# --- arbitrary-key config set / get / unset (cwd-inferred entity) ---
 
 
 def test_config_set_get_project_local(root: Path) -> None:
@@ -5068,7 +5068,7 @@ def test_config_show_reflects_inherited_user_key(root: Path) -> None:
 
 
 def test_config_set_user_scope_renders_dotted_headers(root: Path) -> None:
-    # A fresh deep user-scope generic write produces dotted [workspaces.W.
+    # A fresh deep user-scope arbitrary-key write produces dotted [workspaces.W.
     # projects.P] headers -- no empty [workspaces] / [projects] container lines.
     cfg = root / "cfg.toml"
     cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')

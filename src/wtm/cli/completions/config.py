@@ -1,6 +1,6 @@
-"""Config shell completion: generic keys, table cells, array elements, scope.
+"""Config shell completion: arbitrary keys, table cells, array elements, scope.
 
-The generic-key commands (``config set``/``unset``/``get``) accept an optional
+The arbitrary-key commands (``config set``/``unset``/``get``) accept an optional
 **locator** prefix naming the target entity. Because both the locator and the
 key group are variable-token positionals sharing a single variadic, every slot
 unions two readings (three for ``get``, whose SUBKEY is bare-optional):

@@ -176,7 +176,7 @@ def hook_set(
 
     Writes ``[...hooks.on] EVENT = "CMD"`` at the entity's table-path for the
     chosen ``--scope`` (defaulting to the deepest scope whose directory exists),
-    reusing the generic-key prefix machinery. Replaces any inline command
+    reusing the arbitrary-key prefix machinery. Replaces any inline command
     already declared for EVENT at that scope's file; commands still accumulate
     across scopes at read time.
     """
