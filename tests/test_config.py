@@ -955,6 +955,149 @@ def test_set_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) ->
         Config.load().set_table_value(address, "env", "TIER", "prod")
 
 
+# --- arbitrary-key sections (dotted paths + deep-merge) ----------------------
+
+
+def test_validate_arbitrary_key_path_checks_head_only() -> None:
+    # A dotted path's head segment is reserved-checked; deeper segments are
+    # harmless cells (a `workspaces` cell under a user section is allowed).
+    from wtm.config import validate_arbitrary_key_path
+
+    validate_arbitrary_key_path("ci.runner.image")  # ok
+    validate_arbitrary_key_path(("ci", "workspaces"))  # deep reserved segment ok
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key_path("hooks.on.x")
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key_path(("worktrees", "x"))
+
+
+def test_table_extra_deep_merges_across_locality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A table-valued arbitrary key merges per-cell across one entity's locality
+    # cascade (project-local file + workspace-file [projects.P]): the project's
+    # `ci.registry` and the workspace's `ci.runner` both survive in `extra`.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj.ci]\nrunner = "ubuntu"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    ci = annotation.extra["ci"]
+    assert ci == {"registry": "ghcr", "runner": "ubuntu"}
+
+
+def test_nested_table_deep_merges_across_locality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deep-merge recurses: cells under a shared sub-table combine across tiers.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci.runner]\nimage = "ubuntu"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj.ci.runner]\ntag = "latest"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["ci"] == {"runner": {"image": "ubuntu", "tag": "latest"}}
+
+
+def test_table_subpath_kind_clash_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A scalar at `ci.runner` in one scope and a table at `ci.runner.image` in
+    # another is a hard error (recursive kind check names the nested path).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj.ci.runner]\nimage = "x"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    with pytest.raises(WtmError, match="ci.runner"):
+        cfg.project_annotation(cfg.workspaces["a"], "proj")
+
+
+def test_inheritable_table_deep_merges_from_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An inheritable table key merges cell-by-cell down the containment chain:
+    # the project's `ci.registry` and the workspace's `ci.runner` combine.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    body = f'inheritable = ["ci"]\n[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["ci"] == {"registry": "ghcr", "runner": "ubuntu"}
+
+
+def test_inheritable_table_local_cell_wins_over_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In a deep-merged inheritable table, the more-local cell overrides the
+    # ancestor cell for the same sub-key (most-local wins per cell).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci]\nregistry = "local"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ws"\nrunner = "ubuntu"\n')
+    body = f'inheritable = ["ci"]\n[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["ci"] == {"registry": "local", "runner": "ubuntu"}
+
+
+def test_scalar_inheritable_key_still_skipped_when_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A scalar inheritable key present entity-locally still wins wholesale
+    # (unchanged): the ancestor value is not injected.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('deploy_env = "prod"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('deploy_env = "staging"\n')
+    body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["deploy_env"] == "prod"
+
+
+def test_effective_keys_deep_emits_dotted_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # deep=True walks table-valued keys, emitting every node (sub-table heads and
+    # leaf cells) as a dotted path, each labelled by the most-local rung carrying
+    # that cell -- the per-cell provenance material for deep dotted completion.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('[ci.runner]\nimage = "ubuntu"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj.ci.runner]\ntag = "latest"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    deep = dict(cfg.effective_keys(target, deep=True))
+    # Every node surfaces as a dotted path: the head, the sub-table, and both
+    # leaves (the project's image, the workspace's tag).
+    assert {"ci", "ci.runner", "ci.runner.image", "ci.runner.tag"} <= set(deep)
+    # Per-cell winner: image lives in the project file, tag in the workspace file.
+    assert deep["ci.runner.image"].scope == Scope.PROJECT
+    assert deep["ci.runner.tag"].scope == Scope.WORKSPACE
+    # The default (deep=False) stays top-level only: no dotted descendants.
+    assert {k for k, _ in cfg.effective_keys(target)} == {"ci"}
+
+
 def test_add_to_array_refused_under_no_config(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

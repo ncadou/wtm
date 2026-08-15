@@ -36,12 +36,15 @@ def _config_key_items(
     ancestor), each labelled ``config in <level>`` (its ``tier``/``scope``, the
     same definition level ``config get --origin`` prints) -- prefixed to avoid
     colliding with the locator kind labels (``workspace``/``project``/...
-    ``in <context>``) that share this completion's label column. With *array*
-    (``-a``), ``inheritable`` (the opt-in allowlist) is offered too, labelled
+    ``in <context>``) that share this completion's label column. Table-valued
+    keys are walked deep, so every addressable cell also appears as a dotted
+    path (``ci.runner.image``) labelled by its own carrying rung -- the dotted
+    counterpart of the one-level SUBKEY completion. With *array* (``-a``),
+    ``inheritable`` (the opt-in allowlist) is offered too, labelled
     ``allowlist`` (a role, not a provenance tier). Lenient; sorted by key.
     """
     try:
-        keys = config.effective_keys(target)
+        keys = config.effective_keys(target, deep=True)
     except Exception:
         return []
     items: dict[str, str] = {

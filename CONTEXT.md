@@ -301,7 +301,16 @@ other key is one of the named, typed surfaces. An arbitrary key resolves by the
 opted onto the **inheritable** axis (see **Inheritable key**). After resolution
 it lands in the entity dataclass's `extra` dict (the arbitrary-key payload);
 `validate_arbitrary_key` rejects a reserved name at the write site, and
-`config show` prints every arbitrary key along the shown branch. The code
+`config show` prints every arbitrary key along the shown branch. A KEY may be a
+**dotted path** (`ci.runner.image`) naming a cell inside a **section** (a TOML
+table); only the path's head segment is reserved-checked (deeper segments are
+harmless cells), and `validate_arbitrary_key_path` is the dotted-aware form. A
+section **deep-merges** across tiers -- per cell, most-local wins, recursively
+for nested tables -- on both the locality and (for an inheritable section) the
+inheritance axes; a scalar-vs-table clash at any sub-path is a hard error. The
+`-t`/`--table` flag is the one-level shorthand for a dotted write
+(`ci.runner image x -t` == `ci.runner.image x`). Arrays still do *not* merge
+(only tables do). The code
 identifiers `GenericTarget`/`resolve_generic_target`/`resolve_generic_value`
 name this same facility (the prose term and the symbol names diverge).
 _Avoid_: custom key, user key, generic key, non-reserved key (say "arbitrary

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import typer
@@ -19,11 +20,13 @@ from wtm.config import (
     ConfigSlice,
     DepthTier,
     GenericTarget,
+    Key,
     ResolvedProject,
     ResolvedWorkspace,
     ResolvedWorktree,
     SliceTarget,
-    validate_arbitrary_key,
+    SourceRung,
+    validate_arbitrary_key_path,
     validate_inheritable_element,
 )
 from wtm.core import WtmError, current_dir
@@ -106,10 +109,47 @@ def config_show(
     _print_config_slice(slice_, show_origin, hooks)
 
 
-def _print_extra(indent: str, extra: dict[str, object]) -> None:
-    """Render an entity's arbitrary keys, always in the cwd descent."""
+def _print_extra(
+    indent: str, extra: dict[str, object], origins: dict[str, list[SourceRung]] | None = None
+) -> None:
+    """Render an entity's arbitrary keys, always in the cwd descent.
+
+    A scalar prints as ``key: value``; a table (a section) prints as a ``key:``
+    header followed by its cells indented (recursively for nested sections), so a
+    deep-merged section reads as a tree rather than a Python dict repr. With
+    *origins* (the ``--origin`` path), each value is annotated ``[label]`` with
+    its defining tier/scope -- per-cell for a table (each leaf its own carrier),
+    mirroring ``config get --origin`` but in the ``config show`` colon style.
+    """
     for key, value in sorted(extra.items()):
-        print(f"{indent}{key}: {value}")
+        chain = origins.get(key) if origins else None
+        if isinstance(value, dict):
+            print(f"{indent}{key}:")
+            _print_extra_table(f"{indent}  ", value, chain, ())
+        else:
+            origin = f"  [{_rung_label(chain[0])}]" if chain else ""
+            print(f"{indent}{key}: {value}{origin}")
+
+
+def _print_extra_table(
+    indent: str, table: dict[str, object], chain: list[SourceRung] | None, rest: tuple[str, ...]
+) -> None:
+    """Render one section's cells, annotating each leaf with its carrying rung."""
+    for key in sorted(table):
+        value = table[key]
+        sub = (*rest, key)
+        if isinstance(value, dict):
+            print(f"{indent}{key}:")
+            _print_extra_table(f"{indent}  ", value, chain, sub)
+        else:
+            origin = ""
+            if chain:
+                for rung in chain:
+                    if _descend_path(rung.value, sub) is not None:
+                        origin = f"  [{_rung_label(rung)}]"
+
+                        break
+            print(f"{indent}{key}: {value}{origin}")
 
 
 def _print_scope_hooks(indent: str, spec: HookSpec, show_origin: bool, scope: str) -> None:
@@ -135,7 +175,7 @@ def _print_config_slice(slice: ConfigSlice, show_origin: bool, hooks: bool) -> N
             f"  [{slice.base_branch_source}]" if show_origin and slice.base_branch_source else ""
         )
         print(f"default base_branch: {slice.default_base_branch}{origin}")
-    _print_extra("", slice.global_extra)
+    _print_extra("", slice.global_extra, slice.global_extra_origins if show_origin else None)
     if hooks:
         _print_scope_hooks("", slice.global_hooks, show_origin, "global")
     for ws in slice.workspaces:
@@ -153,7 +193,7 @@ def _print_slice_workspace(
     if ws.entry.base_branch:
         bb_origin = f"  [{ws.base_branch_source}]" if show_origin and ws.base_branch_source else ""
         print(f"{indent}  base_branch: {ws.entry.base_branch}{bb_origin}")
-    _print_extra(f"{indent}  ", ws.entry.extra)
+    _print_extra(f"{indent}  ", ws.entry.extra, ws.extra_origins if show_origin else None)
     if hooks:
         _print_scope_hooks(f"{indent}  ", ws.entry.hooks, show_origin, "workspace")
     for project in ws.projects:
@@ -171,7 +211,7 @@ def _print_slice_project(
     if project.effective_base_branch:
         origin = f"  [{project.base_branch_source}]" if show_origin else ""
         print(f"{indent}  base_branch: {project.effective_base_branch}{origin}")
-    _print_extra(f"{indent}  ", project.extra)
+    _print_extra(f"{indent}  ", project.extra, project.extra_origins if show_origin else None)
     if hooks:
         _print_scope_hooks(f"{indent}  ", project.hooks, show_origin, "project")
     for worktree in project.worktrees:
@@ -185,7 +225,7 @@ def _print_slice_worktree(
     print(f"{indent}worktree {worktree.name}: {worktree.dir}")
     if worktree.description:
         print(f"{indent}  description: {worktree.description}")
-    _print_extra(f"{indent}  ", worktree.extra)
+    _print_extra(f"{indent}  ", worktree.extra, worktree.extra_origins if show_origin else None)
     if hooks:
         _print_scope_hooks(f"{indent}  ", worktree.hooks, show_origin, "worktree")
 
@@ -275,6 +315,12 @@ def config_set(
     element it takes is validated (a reserved or hardcoded-non-inheritable key
     such as ``description`` is refused).
 
+    KEY may be a dotted path (``ci.runner.image``) naming a cell inside a
+    section; ``-t`` is the one-level shorthand for the same thing (``ci.runner
+    image x -t`` equals ``ci.runner.image x``), and a bare KEY keeps its
+    top-level meaning. Only the head segment of a dotted path is checked
+    against the reserved names -- deeper segments are harmless cells.
+
     The locator prefix is ``args[:-N]`` (N flag-decided: 3 for ``-t``, else 2);
     it is absent when ``len(args) == N``. ``config set KEY VALUE`` (cwd-inferred)
     is unchanged.
@@ -297,7 +343,7 @@ def config_set(
     if key == "inheritable" and array:
         validate_inheritable_element(value)
     else:
-        validate_arbitrary_key(key)
+        validate_arbitrary_key_path(key)
     config = ctx.obj.config
     if loc_args:
         location = _locate_one(ctx, loc_args, command="config set")
@@ -308,7 +354,7 @@ def config_set(
         target = config.resolve_generic_target(current_dir(resolve=False))
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
-    full_key = (*prefix, key) if prefix else key
+    full_key = _join_key(prefix, key)
     if array:
         config.add_to_array(address, full_key, value)
         log(f"{target.label}: {key} += {value} [{scope.value}] ({address.file})")
@@ -340,63 +386,56 @@ def config_get(
 
     Prints the winning (most-local) value, or ``(unset)`` when the key appears
     nowhere in the entity's cascade. An array prints one element per line and a
-    table prints ``subkey = value`` per line (sorted); a scalar prints bare.
-    Passing SUBKEY reads a single cell of the table at KEY. ``--origin`` instead
-    lists every rung that carries the key, most-local first, each showing where
-    the value comes from -- its definition level (``project``/``workspace``/
-    ``global``) for an inherited key such as ``base_branch``, otherwise its scope
-    -- and the file it lives in.
+    table prints ``subkey = value`` per line (sorted, nested sub-tables
+    indented); a scalar prints bare. Passing SUBKEY reads a single cell of the
+    table at KEY. ``--origin`` instead lists where each value is defined:
+    per-cell for a table (each leaf ``path = value`` annotated with its source)
+    or one line per carrying rung for a scalar/array -- the definition level
+    (``project``/``workspace``/``global``) for an inherited key such as
+    ``base_branch``, otherwise its scope -- and the file it lives in.
 
-    An optional **locator** prefix may name the entity to act on (resolved
-    across every declared workspace). Because SUBKEY is bare-optional and the
-    locator is variable-token, ``config get A B`` (two args) is ambiguous; the
-    parse uses **data-type inference**: if ``A`` resolves to a table on the
-    cwd entity, ``B`` is a SUBKEY (backward-compatible); otherwise ``A`` is
-    tried as a locator and ``B`` as a KEY on that entity; if neither, the
-    fallback is ``KEY=A SUBKEY=B`` (prints ``(unset)``). Three or more args
-    require a resolving locator prefix.
+    KEY may be a dotted path (``ci.runner.image``) naming a nested cell; a
+    dotted key is never a locator (entity names have no dots), so the 2-arg
+    ``A B`` ambiguity only arises when ``A`` is bare. An optional **locator**
+    prefix may name the entity to act on (resolved across every declared
+    workspace). Because SUBKEY is bare-optional and the locator is
+    variable-token, ``config get A B`` (two bare args) is ambiguous; the parse
+    uses **data-type inference**: if ``A`` resolves to a table on the cwd
+    entity, ``B`` is a SUBKEY (backward-compatible); otherwise ``A`` is tried
+    as a locator and ``B`` as a KEY on that entity; if neither, the fallback is
+    ``KEY=A SUBKEY=B`` (prints ``(unset)``). Three or more args require a
+    resolving locator prefix.
     """
     if not args:
         raise WtmError("config get requires a KEY")
-    target, key, subkey = _resolve_get_target(ctx, args)
-    validate_arbitrary_key(key)
+    target, path = _resolve_get_target(ctx, args)
+    validate_arbitrary_key_path(path)
     config = ctx.obj.config
-    effective, chain = config.resolve_generic_value(target, key)
+    effective, chain = config.resolve_generic_value(target, path)
     if show_origin:
-        if not chain:
-            print("(unset)")
-
-            return
-        for rung in chain:
-            print(f"{rung.value}  [{_rung_label(rung)}]  {_tilde(rung.file)}")
-
-        return
-    if subkey is not None:
-        if not isinstance(effective, dict):
-            print("(unset)")
-
-            return
-        cell = effective.get(subkey)
-        print("(unset)" if cell is None else str(cell))
+        _print_origin(effective, chain, path)
 
         return
     print(_render_config_value(effective))
 
 
-def _resolve_get_target(
-    ctx: typer.Context, args: list[str]
-) -> tuple[GenericTarget, str, str | None]:
-    """Parse ``config get`` args into ``(target, key, subkey)`` by data-type inference.
+def _resolve_get_target(ctx: typer.Context, args: list[str]) -> tuple[GenericTarget, Key]:
+    """Parse ``config get`` args into ``(target, path)`` by data-type inference.
 
     The one wtm parse that depends on config content rather than count+flags
     alone: ``config get``'s SUBKEY is bare-optional, so ``A B`` is genuinely
-    ambiguous (LOCATOR+KEY, or KEY+SUBKEY). The inference, most-local-first:
+    ambiguous (LOCATOR+KEY, or KEY+SUBKEY). *path* is the resolved dotted path
+    (a bare string for a single segment, a tuple for a nested cell). The
+    inference, most-local-first:
 
-    - 1 arg: ``KEY=args[0]`` on the cwd entity (unchanged).
-    - 2 args ``[A, B]``: if ``A`` is a table on the cwd entity, ``B`` is its
-      SUBKEY (table wins, backward-compatible); else try ``A`` as a locator --
-      if it resolves, ``B`` is a KEY on that entity; else fall back to
-      ``KEY=A SUBKEY=B`` (prints ``(unset)``, backward-compatible).
+    - 1 arg: ``KEY=args[0]`` on the cwd entity (a dotted KEY splits into a
+      tuple path).
+    - 2 args ``[A, B]``: a dotted ``A`` is never a locator, so ``B`` is its
+      SUBKEY (``A.B`` path). A bare ``A`` that is a table on the cwd entity
+      takes ``B`` as its SUBKEY (table wins, backward-compatible); else ``A``
+      is tried as a locator -- if it resolves, ``B`` is a KEY on that entity;
+      else fall back to ``KEY=A SUBKEY=B`` (prints ``(unset)``,
+      backward-compatible).
     - 3+ args: try the SUBKEY reading (``args[:-2]`` as locator, ``args[-2]``
       as KEY, ``args[-1]`` as SUBKEY) when ``args[-2]`` is a table on the
       located entity; else try the KEY reading (``args[:-1]`` as locator,
@@ -406,13 +445,16 @@ def _resolve_get_target(
     cwd_target = config.resolve_generic_target(current_dir(resolve=False))
 
     if len(args) == 1:
-        return cwd_target, args[0], None
+        return cwd_target, _key_path(args[0])
 
     if len(args) == 2:
         a, b = args
+        if "." in a:
+            return cwd_target, _key_path(a, b)
+
         effective, _ = config.resolve_generic_value(cwd_target, a)
         if isinstance(effective, dict):
-            return cwd_target, a, b
+            return cwd_target, _key_path(a, b)
 
         location = _locate_optional(ctx, [a])
         if location is not None:
@@ -420,9 +462,9 @@ def _resolve_get_target(
                 location.workspace, location.project, location.name
             )
 
-            return target, b, None
+            return target, _key_path(b)
 
-        return cwd_target, a, b
+        return cwd_target, _key_path(a, b)
 
     # 3+ args: locator required. Try SUBKEY reading first (table wins).
     location = _locate_optional(ctx, args[:-2])
@@ -430,9 +472,9 @@ def _resolve_get_target(
         target = config.resolve_generic_target_for(
             location.workspace, location.project, location.name
         )
-        effective, _ = config.resolve_generic_value(target, args[-2])
+        effective, _ = config.resolve_generic_value(target, _key_path(args[-2]))
         if isinstance(effective, dict):
-            return target, args[-2], args[-1]
+            return target, _key_path(args[-2], args[-1])
 
     # Try KEY reading.
     location = _locate_optional(ctx, args[:-1])
@@ -441,25 +483,127 @@ def _resolve_get_target(
             location.workspace, location.project, location.name
         )
 
-        return target, args[-1], None
+        return target, _key_path(args[-1])
 
     raise WtmError(f"no entity matches: {' '.join(args[:-1])}")
+
+
+def _key_path(key: str, subkey: str | None = None) -> Key:
+    """Build a dotted path from a (possibly dotted) *key* and optional *subkey*."""
+    parts = [*key.split("."), *([subkey] if subkey is not None else [])]
+
+    return parts[0] if len(parts) == 1 else tuple(parts)
+
+
+def _print_origin(effective: object, chain: list[SourceRung], path: Key) -> None:
+    """Render ``config get --origin``: per-cell for a table, per-rung for a scalar.
+
+    For a scalar/array effective value, each carrying rung (most-local first) is
+    printed with its value, source label, and file -- descending the path past
+    the head to reach the cell. For a table, every leaf cell is printed as
+    ``full.path = value`` annotated with the most-local rung that defines it
+    (deep-merge provenance), so a section merged across tiers shows each cell's
+    own origin. ``(unset)`` when the chain is empty.
+    """
+    if not chain:
+        print("(unset)")
+
+        return
+    parts = (path,) if isinstance(path, str) else path
+    head, rest = parts[0], parts[1:]
+    if isinstance(effective, dict):
+        for sub, value, winner in _origin_leaves(effective, chain, rest):
+            full = ".".join((head, *sub))
+            if winner is None:
+                print(f"{full} = {value}")
+
+                continue
+            print(f"{full} = {value}  [{_rung_label(winner)}]  {_tilde(winner.file)}")
+
+        return
+    found = False
+    for rung in chain:
+        cell = _descend_path(rung.value, rest)
+        if cell is not None:
+            print(f"{cell}  [{_rung_label(rung)}]  {_tilde(rung.file)}")
+            found = True
+    if not found:
+        print("(unset)")
+
+
+def _origin_leaves(
+    table: dict[str, object], chain: list[SourceRung], rest: tuple[str, ...]
+) -> Iterator[tuple[tuple[str, ...], object, SourceRung | None]]:
+    """Yield each leaf cell of *table* with its sub-path and defining rung."""
+    for key in sorted(table):
+        value = table[key]
+        sub = (*rest, key)
+        if isinstance(value, dict):
+            yield from _origin_leaves(value, chain, sub)
+        else:
+            winner: SourceRung | None = None
+            for rung in chain:
+                if _descend_path(rung.value, sub) is not None:
+                    winner = rung
+
+                    break
+            yield sub, value, winner
+
+
+def _descend_path(value: object, parts: tuple[str, ...]) -> object:
+    """Walk *parts* inside *value*, returning the cell or ``None`` when absent."""
+    node: object = value
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+
+    return node
 
 
 def _render_config_value(value: object) -> str:
     """Render a resolved config value by kind for ``config get``.
 
     A scalar prints bare, an array one element per line, a table ``subkey =
-    value`` per line (sorted); an unset value prints ``(unset)``.
+    value`` per line (sorted); an unset value prints ``(unset)``. A nested table
+    indents its sub-tables, so a section renders readably at any depth.
     """
     if value is None:
         return "(unset)"
     if isinstance(value, dict):
-        return "\n".join(f"{k} = {value[k]}" for k in sorted(value))
+        return _render_table(value, "")
     if isinstance(value, (list, tuple)):
         return "\n".join(str(item) for item in value)
 
     return str(value)
+
+
+def _render_table(table: dict[str, object], indent: str) -> str:
+    """Render a (possibly nested) table as ``key = value`` / indented sub-tables."""
+    lines: list[str] = []
+    for key in sorted(table):
+        value = table[key]
+        if isinstance(value, dict):
+            lines.append(f"{indent}{key}:")
+            lines.append(_render_table(value, f"{indent}  "))
+        else:
+            lines.append(f"{indent}{key} = {value}")
+
+    return "\n".join(lines)
+
+
+def _join_key(prefix: tuple[str, ...], key: str) -> Key:
+    """Build a store key from a structural *prefix* and a (possibly dotted) *key*.
+
+    A dotted *key* (``ci.runner.image``) splits into its section path; the
+    *prefix* (the entity's table path, e.g. ``("workspaces", "ws")``) is prepended
+    verbatim. A single-part result stays a bare string (the store treats both
+    shapes via :func:`~wtm.config._key_parts`).
+    """
+    parts = (*prefix, *key.split("."))
+
+    return parts[0] if len(parts) == 1 else parts
 
 
 @config_app.command(name="unset")
@@ -489,8 +633,10 @@ def config_unset(
     SUBKEY``) removes SUBKEY from the table at KEY. The two flags are mutually
     exclusive. A no-op when the target is already absent at that tier.
 
-    The locator prefix is ``args[:-N]`` (N flag-decided: 2 for ``-a``/``-t``,
-    else 1); it is absent when ``len(args) == N``.
+    KEY may be a dotted path (``ci.runner.image``); see :func:`config_set` for
+    the head-segment reservation rule. The locator prefix is ``args[:-N]`` (N
+    flag-decided: 2 for ``-a``/``-t``, else 1); it is absent when ``len(args) ==
+    N``.
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
@@ -510,7 +656,7 @@ def config_unset(
         (key,) = args[-1:]
 
     if not (key == "inheritable" and array):
-        validate_arbitrary_key(key)
+        validate_arbitrary_key_path(key)
     config = ctx.obj.config
     if loc_args:
         location = _locate_one(ctx, loc_args, command="config unset")
@@ -521,7 +667,7 @@ def config_unset(
         target = config.resolve_generic_target(current_dir(resolve=False))
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
-    full_key = (*prefix, key) if prefix else key
+    full_key = _join_key(prefix, key)
     if array:
         config.remove_from_array(address, full_key, value)
         log(f"{target.label}: {key} -= {value} [{scope.value}] ({address.file})")

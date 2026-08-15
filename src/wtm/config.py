@@ -72,6 +72,7 @@ __all__ = [
     "Workspace",
     "resolve_project_dir",
     "validate_arbitrary_key",
+    "validate_arbitrary_key_path",
     "validate_inheritable_element",
 ]
 
@@ -259,6 +260,9 @@ class ResolvedWorktree:
 
     :param description: the worktree's scalar annotation, if any.
     :param extra: arbitrary keys resolved by the locality merge.
+    :param extra_origins: per-head :class:`SourceRung` chains for ``extra``,
+        the material ``config show --origin`` labels each cell with (empty when
+        origin rendering is off; never serialized to JSON).
     """
 
     name: str
@@ -266,6 +270,7 @@ class ResolvedWorktree:
     description: str | None = None
     hooks: HookSpec = field(default_factory=HookSpec)
     extra: dict[str, object] = field(default_factory=dict)
+    extra_origins: dict[str, list[SourceRung]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -281,25 +286,28 @@ class ResolvedProject:
     base_branch_source: str  # project | workspace | global | (none)
     hooks: HookSpec = field(default_factory=HookSpec)
     extra: dict[str, object] = field(default_factory=dict)
+    extra_origins: dict[str, list[SourceRung]] = field(default_factory=dict)
     worktree: ResolvedWorktree | None = None  # set only when cwd is in a worktree
     worktrees: tuple[ResolvedWorktree, ...] = ()  # every worktree; only the tree dump fills it
 
 
 @dataclass(frozen=True)
 class ResolvedWorkspace:
-    """A workspace with every project (and their worktrees) fully descended.
+    """A workspace with every project (and its worktrees) fully descended.
 
     The tree-dump analog of the shallow :class:`Workspace` entry: *entry* is the
     declared workspace itself and *projects* its fully-resolved projects (on-disk
     unioned with declared), each carrying its own ``worktrees`` tuple.
     *base_branch_source* is the scope value (``"workspace"``/``"user"``/
     ``"system"``) carrying the workspace's own ``base_branch``, or ``None`` --
-    used by ``config show --origin`` (text-only, never JSON).
+    used by ``config show --origin`` (text-only, never JSON). *extra_origins*
+    likewise feeds ``config show --origin`` for the workspace's own ``extra``.
     """
 
     entry: Workspace
     projects: tuple[ResolvedProject, ...] = ()
     base_branch_source: str | None = None
+    extra_origins: dict[str, list[SourceRung]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -328,7 +336,8 @@ class ConfigSlice:
     present; with ``-r`` the target's subtree expands. *workspaces* carries the
     pruned workspace nodes (empty when depth-limited below the workspace tier).
     *base_branch_source* is the scope value (``"user"``/``"system"``) declaring
-    the global default base_branch, or ``None``.
+    the global default base_branch, or ``None``. *global_extra_origins* feeds
+    ``config show --origin`` for the global node's ``extra``.
     """
 
     default_base_branch: str | None
@@ -337,6 +346,7 @@ class ConfigSlice:
     global_hooks: HookSpec
     workspaces: tuple[ResolvedWorkspace, ...]
     depth_limit: int
+    global_extra_origins: dict[str, list[SourceRung]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -425,6 +435,22 @@ def validate_arbitrary_key(key: str) -> None:
             f"'{key}' is a reserved key; use its dedicated command "
             f"(reserved: {', '.join(sorted(RESERVED_KEYS))})"
         )
+
+
+def validate_arbitrary_key_path(key: Key) -> None:
+    """Reject a reserved *head* segment in a (possibly dotted) arbitrary key.
+
+    A dotted path (``ci.runner.image``) names a cell inside a user section, so
+    only its head segment (``ci``) can collide with a reserved container table
+    -- deeper segments (``runner`` / ``image``) are harmless cells and may even
+    be named ``workspaces`` or ``projects`` without shadowing the structural
+    keys. A tuple *key* is already split; a string *key* is split on ``.`` here
+    (the store treats a dotted string as a single literal part, but a user-typed
+    key uses dots as separators). The bare-key case delegates to
+    :func:`validate_arbitrary_key`.
+    """
+    head = key.split(".", 1)[0] if isinstance(key, str) else key[0]
+    validate_arbitrary_key(head)
 
 
 def validate_inheritable_element(key: str) -> None:
@@ -1144,12 +1170,13 @@ class Config:
         Starts from *local* (the entity's Layer-1 locality-merged arbitrary
         keys); for every user-declared inheritable key (see
         :meth:`inheritable_keys`, excluding the builtin ``base_branch`` which owns
-        its typed :meth:`base_branch_provenance` surface) that is *absent*
-        entity-locally, injects the effective inherited value from the ancestor
-        chain. Entity-local values already win (they are the most-local rung, and
-        *local* already reflects the entity's own cascade), so this only supplies
-        keys a descendant left unset -- keeping ``config show`` and the resolved
-        view in step with ``config get``.
+        its typed :meth:`base_branch_provenance` surface) folds the ancestor
+        chain and merges it in. A *scalar* key already present entity-locally
+        wins wholesale (it is the most-local rung), so it is skipped -- but a
+        *table* key deep-merges ancestor cells into the local table (local cells
+        win, absent cells fall through), so a section inherits cell-by-cell
+        rather than being overridden as a whole -- keeping ``config show`` and
+        the resolved view in step with ``config get``.
         """
         if ws is None:
             return local
@@ -1157,39 +1184,53 @@ class Config:
         ancestors = self._ancestor_tiers(ws, project)
         merged = dict(local)
         for key in self.inheritable_keys(ws, project):
-            if key == "base_branch" or key in local:
+            if key == "base_branch" or key in local and not isinstance(local[key], dict):
                 continue
 
-            chain = _fold_tiers(self._store, ancestors, key)
-            if chain:
-                merged[key] = chain[0].value
+            effective, chain = _fold_tiers(self._store, ancestors, key)
+            if not chain:
+                continue
+            if key in local:
+                merged[key] = _deep_merge(effective, local[key])
+            else:
+                merged[key] = effective
 
         return merged
 
     def resolve_generic_value(
-        self, target: GenericTarget, key: str
+        self, target: GenericTarget, key: Key
     ) -> tuple[object | None, list[SourceRung]]:
         """Resolve *key* over *target*'s cascade: (effective value, full chain).
 
-        The effective value is the most-local present one (``None`` when unset);
-        the chain lists every rung that carries *key*, most-local-first, as
-        :class:`SourceRung` records -- the material for ``config get --origin``.
-        An inheritable key (see :meth:`inheritable_keys`) folds the entity's own
-        cascade plus its ancestors' (tier-tagged), so the effective value matches
-        what a real command would use; every other key stays entity-local. A
-        scalar/array/table kind clash for *key* across scopes is a hard error,
-        matching :func:`_merge_locality` (one rule for every read surface).
+        *key* is a bare key for a top-level scalar/table, or a tuple of parts
+        (equivalently a dotted path) for a nested cell. The *head* part is folded
+        over the cascade (a table head deep-merges across rungs; a scalar/array
+        head takes the most-local rung), then the remaining parts descend inside
+        the effective value. The effective value is ``None`` when unset; the
+        chain lists every rung that carries the *head*, most-local-first, as
+        :class:`SourceRung` records -- the material for ``config get --origin``
+        (which descends the same remaining parts per rung for per-cell
+        provenance). An inheritable key (see :meth:`inheritable_keys`) folds the
+        entity's own cascade plus its ancestors' (tier-tagged), so the effective
+        value matches what a real command would use; every other key stays
+        entity-local. A scalar/array/table kind clash for the head across scopes
+        is a hard error, matching :func:`_merge_locality` (one rule for every
+        read surface).
         """
-        rungs = target.inherit.get(key)
+        parts = _key_parts(key)
+        head, rest = parts[0], parts[1:]
+        rungs = target.inherit.get(head)
         tiered = (
             rungs if rungs is not None else [_TierProbe(None, probe) for probe in target.probes]
         )
-        chain = _fold_tiers(self._store, tiered, key)
-        effective = chain[0].value if chain else None
+        effective, chain = _fold_tiers(self._store, tiered, head)
+        effective = _descend_value(effective, rest)
 
         return effective, chain
 
-    def effective_keys(self, target: GenericTarget) -> list[tuple[str, SourceRung]]:
+    def effective_keys(
+        self, target: GenericTarget, *, deep: bool = False
+    ) -> list[tuple[str, SourceRung]]:
         """The non-``(unset)`` keys ``config get`` would resolve for *target*.
 
         Completion material for the arbitrary-key ``config get``: every key whose
@@ -1202,6 +1243,12 @@ class Config:
         :meth:`resolve_generic_value` returns, so a caller can label by its
         ``tier`` (an inheritable key) or ``scope`` (an entity-local key) without
         a second resolve.
+
+        With *deep*, each table-valued key is also walked into: every sub-table
+        head and leaf cell emits a dotted path (``ci.runner.image``) paired with
+        the most-local rung carrying that cell (per-cell provenance, mirroring
+        ``config get --origin``), so deep dotted completion offers every
+        addressable cell. Scalars and arrays emit their bare key only.
         """
         candidates: set[str] = set(target.inherit)
         for probe in target.probes:
@@ -1209,11 +1256,37 @@ class Config:
             candidates.update(key for key in table if key not in RESERVED_KEYS)
         keys: list[tuple[str, SourceRung]] = []
         for key in sorted(candidates):
-            _, chain = self.resolve_generic_value(target, key)
-            if chain:
-                keys.append((key, chain[0]))
+            effective, chain = self.resolve_generic_value(target, key)
+            if not chain:
+                continue
+            keys.append((key, chain[0]))
+            if deep and isinstance(effective, dict):
+                keys.extend(_dotted_candidates(effective, chain, (), key))
 
         return keys
+
+    def _extra_origins_for(
+        self, target: GenericTarget, extra: dict[str, object]
+    ) -> dict[str, list[SourceRung]]:
+        """Per-head :class:`SourceRung` chains for each key in *extra*.
+
+        The ``config show --origin`` material: for every arbitrary key on a slice
+        node, the same chain :meth:`resolve_generic_value` returns
+        (locality-merged, plus ancestors for an inheritable key), so the renderer
+        can label each cell with its defining tier/scope. Re-resolves per key
+        (cheap; the store is in-memory) rather than threading chains out of the
+        locality merge -- one source of truth, shared with ``config get --origin``.
+        """
+        return {key: self.resolve_generic_value(target, key)[1] for key in extra}
+
+    def _worktree_with_origins(
+        self, ws_name: str, pname: str, project_dir: Path, name: str
+    ) -> ResolvedWorktree:
+        """A slice worktree node with its ``extra`` origin chains attached."""
+        worktree = self.resolve_worktree(project_dir, name)
+        target = self.resolve_generic_target_for(ws_name, pname, name)
+
+        return replace(worktree, extra_origins=self._extra_origins_for(target, worktree.extra))
 
     # --- workspace lookup ----------------------------------------------------
 
@@ -1665,6 +1738,12 @@ class Config:
         global_payload, global_hooks = _merge_locality(self._store, _global_probes())
         global_extra = {k: v for k, v in global_payload.items() if k != "base_branch"}
         bb_source = self.base_branch_source()
+        # Global extra is locality-only (no ancestor to inherit from): each key's
+        # chain is its fold over the user/system top-level probes (tier=None).
+        global_tiered = [_TierProbe(None, p) for p in _global_probes()]
+        global_extra_origins = {
+            key: _fold_tiers(self._store, global_tiered, key)[1] for key in global_extra
+        }
 
         if depth_limit < 1:
             ws_entries: list[Workspace] = []
@@ -1686,6 +1765,7 @@ class Config:
             global_hooks=global_hooks,
             workspaces=workspaces,
             depth_limit=depth_limit,
+            global_extra_origins=global_extra_origins,
         )
 
     def _slice_workspace(
@@ -1693,8 +1773,11 @@ class Config:
     ) -> ResolvedWorkspace:
         """Fill one workspace node with the pruned set of projects for the slice."""
         bb_source = self.workspace_base_branch_source(ws)
+        extra_origins = self._extra_origins_for(self.resolve_generic_target_for(ws.name), ws.extra)
         if depth_limit < 2:
-            return ResolvedWorkspace(entry=ws, projects=(), base_branch_source=bb_source)
+            return ResolvedWorkspace(
+                entry=ws, projects=(), base_branch_source=bb_source, extra_origins=extra_origins
+            )
 
         if (
             target is not None
@@ -1713,7 +1796,9 @@ class Config:
             self._slice_project(ws, pname, target, recurse, depth_limit) for pname in project_names
         )
 
-        return ResolvedWorkspace(entry=ws, projects=projects, base_branch_source=bb_source)
+        return ResolvedWorkspace(
+            entry=ws, projects=projects, base_branch_source=bb_source, extra_origins=extra_origins
+        )
 
     def _slice_project(
         self,
@@ -1727,6 +1812,9 @@ class Config:
         project_dir = ws.path / pname
         annotation = self.project_annotation(ws, pname)
         effective, source = self.base_branch_provenance(ws, pname)
+        extra_origins = self._extra_origins_for(
+            self.resolve_generic_target_for(ws.name, pname), annotation.extra
+        )
 
         if depth_limit < 3:
             worktrees: tuple[ResolvedWorktree, ...] = ()
@@ -1736,10 +1824,12 @@ class Config:
             and target.workspace == ws.name
             and target.project == pname
         ):
-            worktrees = (self.resolve_worktree(project_dir, target.name),)
+            worktrees = (self._worktree_with_origins(ws.name, pname, project_dir, target.name),)
         elif recurse and (target is None or target.tier in ("workspace", "project")):
             wt_names = sorted(self._worktree_names(project_dir, pname, ws))
-            worktrees = tuple(self.resolve_worktree(project_dir, n) for n in wt_names)
+            worktrees = tuple(
+                self._worktree_with_origins(ws.name, pname, project_dir, n) for n in wt_names
+            )
         else:
             worktrees = ()
 
@@ -1753,6 +1843,7 @@ class Config:
             base_branch_source=source,
             hooks=annotation.hooks,
             extra=annotation.extra,
+            extra_origins=extra_origins,
             worktrees=worktrees,
         )
 
@@ -1871,21 +1962,29 @@ def _merge_locality(store: _Store, probes: Sequence[_Probe]) -> tuple[dict[str, 
                 continue
 
             _check_kind(key, payload.get(key), value, probe)
-            payload[key] = value
+            payload[key] = _deep_merge(payload.get(key), value) if key in payload else value
 
     return payload, hooks
 
 
-def _fold_tiers(store: _Store, tiered: Sequence[_TierProbe], key: str) -> list[SourceRung]:
-    """Fold *key* over a tier-tagged probe list into its most-local-first chain.
+def _fold_tiers(
+    store: _Store, tiered: Sequence[_TierProbe], key: str
+) -> tuple[object | None, list[SourceRung]]:
+    """Fold *key* over a tier-tagged probe list into (effective value, chain).
 
     Reads every rung, keeping those that carry *key* (skipping container tables),
     as :class:`SourceRung` records in most-local-first order -- the shared engine
     behind both ``config get`` (:meth:`Config.resolve_generic_value`) and the
     inheritance-aware ``extra`` fold in the resolved view / registry. A
     scalar/array/table kind clash for *key* across rungs is a hard error,
-    matching :func:`_merge_locality` (one rule for every read surface). The head
-    of the returned chain, when non-empty, is the effective value.
+    matching :func:`_merge_locality` (one rule for every read surface).
+
+    The *effective value* is the most-local rung's value for a scalar/array
+    (most-local wins, no merge), or the deep-merge of every carrying rung for a
+    table (least-to-most-local, most-local cell wins) -- so a section's cells
+    combine across tiers instead of a whole-table override. The returned *chain*
+    always carries each rung's own whole value (the material for ``--origin``
+    per-cell provenance); its head is the most-local rung, not the merge.
     """
     chain: list[SourceRung] = []
     prev: object = None
@@ -1898,18 +1997,32 @@ def _fold_tiers(store: _Store, tiered: Sequence[_TierProbe], key: str) -> list[S
             chain.append(SourceRung(probe.scope, value, probe.file, tiered_probe.tier))
             prev = value
 
-    return chain
+    effective = chain[0].value if chain else None
+    if chain and isinstance(effective, dict):
+        effective = _deep_merge_chain(chain)
+
+    return effective, chain
 
 
 def _check_kind(key: str, prev: object, value: object, probe: _Probe) -> None:
-    """Raise on a scalar/array/table kind clash for *key* across scopes."""
-    if prev is None or _kind(prev) == _kind(value):
+    """Raise on a scalar/array/table kind clash for *key* across scopes.
+
+    Recurses into matching sub-keys when both *prev* and *value* are tables, so
+    a scalar-vs-table clash at a nested path (e.g. ``ci.runner`` a scalar in one
+    scope and a table in another) is caught -- not just a top-level mismatch.
+    """
+    if prev is None:
         return
 
-    raise WtmError(
-        f"config key '{key}' has conflicting kinds across scopes "
-        f"({_kind(prev)} vs {_kind(value)} at {probe.file})"
-    )
+    if _kind(prev) != _kind(value):
+        raise WtmError(
+            f"config key '{key}' has conflicting kinds across scopes "
+            f"({_kind(prev)} vs {_kind(value)} at {probe.file})"
+        )
+
+    if isinstance(prev, dict) and isinstance(value, dict):
+        for sub, sub_value in value.items():
+            _check_kind(f"{key}.{sub}", prev.get(sub), sub_value, probe)
 
 
 def _kind(value: object) -> str:
@@ -1921,6 +2034,91 @@ def _kind(value: object) -> str:
         return "array"
 
     return "scalar"
+
+
+def _deep_merge(base: object, override: object) -> object:
+    """Recursively merge two config values; *override* wins per cell.
+
+    Two tables combine cell-by-cell (a *override* cell replaces the *base* cell;
+    a cell present in only one side is kept); any other pair (scalar/array vs
+    anything) takes *override* wholesale. Kinds are assumed already validated
+    by :func:`_check_kind`. Returns a plain dict for a table result so downstream
+    renderers never see a tomlkit container alias.
+    """
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged: dict[str, object] = dict(base)
+        for key, value in override.items():
+            merged[key] = _deep_merge(merged.get(key), value) if key in merged else value
+
+        return merged
+
+    return override
+
+
+def _deep_merge_chain(chain: Sequence[SourceRung]) -> object | None:
+    """Deep-merge the values of *chain* least-to-most-local (most-local wins)."""
+    if not chain:
+        return None
+
+    acc: object = chain[-1].value
+    for rung in reversed(chain[:-1]):
+        acc = _deep_merge(rung.value, acc)
+
+    return acc
+
+
+def _descend_value(value: object, parts: Sequence[str]) -> object | None:
+    """Walk *parts* inside *value*, returning the cell or ``None`` when absent."""
+    node: object = value
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+
+    return node
+
+
+def _cell_winner(chain: Sequence[SourceRung], rest: tuple[str, ...]) -> SourceRung | None:
+    """The most-local rung whose whole value carries the cell at *rest*.
+
+    Descends each rung's own value (most-local-first) by *rest*; the first
+    non-``None`` hit is the cell's defining rung -- the per-cell provenance a
+    deep completion label or ``--origin`` line prints. ``None`` when no rung
+    carries the cell (a merged table's every cell comes from some rung, so this
+    only happens for an out-of-tree *rest*).
+    """
+    for rung in chain:
+        if _descend_value(rung.value, rest) is not None:
+            return rung
+
+    return None
+
+
+def _dotted_candidates(
+    table: dict[str, object], chain: list[SourceRung], rest: tuple[str, ...], prefix: str
+) -> list[tuple[str, SourceRung]]:
+    """Emit every node under *table* as a dotted path with its carrying rung.
+
+    Walks *table* (a deep-merged effective value) in sorted key order, emitting
+    each sub-table head and leaf cell as ``prefix.sub`` paired with the
+    most-local rung that defines it (via :func:`_cell_winner`). Recurses into
+    nested sub-tables, accumulating *rest* so a deep cell's winner descends the
+    full path. Nodes no rung carries are skipped (defensive; the merge guarantees
+    a carrier for every merged cell).
+    """
+    out: list[tuple[str, SourceRung]] = []
+    for sub in sorted(table):
+        value = table[sub]
+        sub_rest = (*rest, sub)
+        path = f"{prefix}.{sub}"
+        winner = _cell_winner(chain, sub_rest)
+        if winner is not None:
+            out.append((path, winner))
+        if isinstance(value, dict):
+            out.extend(_dotted_candidates(value, chain, sub_rest, path))
+
+    return out
 
 
 # --- registry construction ---------------------------------------------------
@@ -1984,12 +2182,18 @@ def _workspace_inherited_extra(
 
     merged = dict(local)
     for key in keys:
-        if key == "base_branch" or key in local:
+        if key == "base_branch" or key in local and not isinstance(local[key], dict):
             continue
 
-        chain = _fold_tiers(store, [_TierProbe("global", p) for p in _global_probes()], key)
-        if chain:
-            merged[key] = chain[0].value
+        effective, chain = _fold_tiers(
+            store, [_TierProbe("global", p) for p in _global_probes()], key
+        )
+        if not chain:
+            continue
+        if key in local:
+            merged[key] = _deep_merge(effective, local[key])
+        else:
+            merged[key] = effective
 
     return merged
 

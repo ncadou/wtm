@@ -1318,7 +1318,11 @@ def test_complete_config_key_effective_set(root: Path, monkeypatch: pytest.Monke
     assert "projects" not in items
     assert "inheritable" not in items
     # Prefix filter.
-    assert dict(_complete_config_key(_C(), "la")) == {"labels": "config in project"}
+    assert dict(_complete_config_key(_C(), "la")) == {
+        "labels": "config in project",
+        "labels.env": "config in project",
+        "labels.tier": "config in project",
+    }
 
 
 def test_complete_config_subkey_table_cells(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1355,6 +1359,35 @@ def test_config_get_subkey_completion_e2e(root: Path) -> None:
     proj_dir = _seed_config_keys(root, "alpha")
     out = _complete(root, words="wtm config get labels ", cword="4", cwd=proj_dir)
     assert out.split() == ["env", "tier"]
+
+
+def test_config_get_dotted_key_completion_e2e(root: Path) -> None:
+    # Deep dotted completion: typing a dotted prefix offers every addressable
+    # cell under that head (the space-form SUBKEY completion above stays one
+    # level; the dotted KEY form descends the whole section).
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config get labels.", cword="3", cwd=proj_dir)
+    names = out.split()
+    assert "labels.env" in names
+    assert "labels.tier" in names
+    # The head itself is a prefix of ``labels.``, so it drops out of the filter.
+    assert "labels" not in names
+
+
+def test_config_get_top_level_completion_offers_deep_paths(root: Path) -> None:
+    # All deep paths always: a top-level TAB offers not just the head keys but
+    # every dotted cell, so a table's interior is discoverable from the start.
+    _seed_repo(root, "alpha")
+    proj_dir = _seed_config_keys(root, "alpha")
+    out = _complete(root, words="wtm config get ", cword="3", cwd=proj_dir)
+    names = out.split()
+    assert "labels" in names
+    assert "labels.env" in names
+    assert "labels.tier" in names
+    # An array (ports) is not a table: it emits its bare key, no dotted cells.
+    assert "ports" in names
+    assert all(not n.startswith("ports.") for n in names)
 
 
 def test_config_get_key_completion_labels_zsh(root: Path) -> None:
@@ -4559,6 +4592,86 @@ def test_config_show_arbitrary_keys_shown_in_cwd_descent(root: Path) -> None:
     assert "editor: nvim" in from_wt.stdout
 
 
+def test_config_show_origin_scalar_extra(root: Path) -> None:
+    # `config show --origin` annotates a scalar arbitrary key with its source
+    # tier, like it already does for base_branch/headers (terse [label]).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('editor = "nvim"\n')
+    res = run("config", "show", "--origin", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert "editor: nvim  [project]" in res.stdout
+    # Without --origin the extra stays label-free (no provenance appended).
+    plain = run("config", "show", root=root, cwd=cwd)
+    assert "editor: nvim\n" in plain.stdout
+    assert "[project]" not in plain.stdout
+
+
+def test_config_show_origin_per_cell_for_merged_table(root: Path) -> None:
+    # A table extra deep-merged across locality: each cell is annotated with its
+    # own source tier under --origin (per-cell, mirroring `config get --origin`),
+    # keeping the `config show` colon tree rather than the get command's `=` form.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[projects.proj.ci]\nrunner = "ubuntu"\n')
+    res = run("config", "show", "--origin", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert "ci:" in res.stdout
+    assert "registry: ghcr  [project]" in res.stdout
+    assert "runner: ubuntu  [workspace]" in res.stdout
+
+
+def test_config_show_origin_per_cell_for_nested_table(root: Path) -> None:
+    # Per-cell provenance recurses into nested sub-tables: each leaf keeps its
+    # own tier, indented under its sub-table header.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci.runner]\nimage = "ubuntu"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[projects.proj.ci.runner]\ntag = "latest"\n')
+    res = run("config", "show", "--origin", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert "ci:" in res.stdout
+    assert "runner:" in res.stdout
+    assert "image: ubuntu  [project]" in res.stdout
+    assert "tag: latest  [workspace]" in res.stdout
+
+
+def test_config_show_origin_inherited_table_per_cell(root: Path) -> None:
+    # An inheritable table merges down the containment chain; each cell keeps its
+    # own defining tier under --origin (the project cell vs the workspace-ancestor
+    # cell), not a single section-level label.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "show", "--origin", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "ci:" in res.stdout
+    assert "registry: ghcr  [project]" in res.stdout
+    assert "runner: ubuntu  [workspace]" in res.stdout
+
+
+def test_config_show_origin_global_extra(root: Path) -> None:
+    # A global-tier arbitrary key is annotated with its declaring scope
+    # (user/system), the global node having no ancestor to inherit from.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'editor = "nvim"\n[workspaces.ws]\npath = "{root}"\n')
+    res = run("config", "show", "--origin", root=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    assert "editor: nvim  [user]" in res.stdout
+
+
 def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
     _seed_repo(root, "proj")
     run("project", "set", "proj", "-b", "develop", root=root)
@@ -5148,6 +5261,239 @@ def test_config_get_readback_array_table_and_cell(root: Path) -> None:
     assert cell.stdout.strip() == "prod"
     missing = run("config", "get", "env", "NOPE", root=root, cwd=cwd)
     assert missing.stdout.strip() == "(unset)"
+
+
+# --- arbitrary-key sections: dotted paths + deep-merge -----------------------
+
+
+def test_config_set_dotted_path_creates_nested_section(root: Path) -> None:
+    # `config set ci.runner.image x` writes a nested [ci.runner] section.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "ci.runner.image", "ubuntu", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert "[ci.runner]" in text
+    assert 'image = "ubuntu"' in text
+    # Round-trip: `get` reads the dotted cell back.
+    cell = run("config", "get", "ci.runner.image", root=root, cwd=cwd)
+    assert cell.stdout.strip() == "ubuntu"
+
+
+def test_config_dotted_path_equals_table_flag(root: Path) -> None:
+    # `ci.runner image x -t` (KEY=ci.runner SUBKEY=image) and `ci.runner.image x`
+    # (dotted) write the same cell.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "ci.runner.image", "ubuntu", root=root, cwd=cwd)
+    run("config", "set", "ci.runner", "tag", "latest", "-t", root=root, cwd=cwd)
+    res = run("config", "get", "ci.runner", root=root, cwd=cwd)
+    assert "image = ubuntu" in res.stdout
+    assert "tag = latest" in res.stdout
+
+
+def test_config_dotted_path_equals_space_form(root: Path) -> None:
+    # `config get ci.runner` (dotted) == `config get ci runner` (space form).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "env", "TIER", "prod", "-t", root=root, cwd=cwd)
+    dotted = run("config", "get", "env.TIER", root=root, cwd=cwd)
+    spaced = run("config", "get", "env", "TIER", root=root, cwd=cwd)
+    assert dotted.stdout == spaced.stdout
+    assert dotted.stdout.strip() == "prod"
+
+
+def test_config_get_dotted_cell_unset(root: Path) -> None:
+    # A dotted path to an absent cell prints (unset).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "get", "ci.runner.nope", root=root, cwd=cwd)
+    assert res.stdout.strip() == "(unset)"
+
+
+def test_config_table_deep_merge_across_locality(root: Path) -> None:
+    # A section merges per-cell across one entity's locality cascade: the
+    # project-local [ci] and the workspace-file [projects.proj.ci] combine.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[projects.proj.ci]\nrunner = "ubuntu"\n')
+    res = run("config", "get", "ci", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert "registry = ghcr" in res.stdout
+    assert "runner = ubuntu" in res.stdout
+    # A dotted cell reads from the merged table whichever tier defined it.
+    assert run("config", "get", "ci.runner", root=root, cwd=cwd).stdout.strip() == "ubuntu"
+
+
+def test_config_table_deep_merge_across_inheritance(root: Path) -> None:
+    # An inheritable section merges cell-by-cell down the containment chain.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ci", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "registry = ghcr" in res.stdout
+    assert "runner = ubuntu" in res.stdout
+
+
+def test_config_origin_per_cell_for_merged_table(root: Path) -> None:
+    # `--origin` on a merged table labels each cell with its own source tier.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ci", "--origin", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "ci.registry = ghcr" in res.stdout
+    assert "ci.runner = ubuntu" in res.stdout
+    # Each cell is labelled by its defining tier (project vs workspace).
+    assert "ci.registry = ghcr  [project]" in res.stdout
+    assert "ci.runner = ubuntu  [workspace]" in res.stdout
+
+
+def test_config_origin_dotted_scalar_reports_carrier(root: Path) -> None:
+    # `--origin` on a dotted scalar lists only rungs carrying that exact cell.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ci.runner", "--origin", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "ubuntu  [workspace]" in res.stdout
+    # A cell no rung carries prints (unset).
+    missing = run("config", "get", "ci.image", "--origin", root=root, cwd=cwd, extra_env=env)
+    assert missing.stdout.strip() == "(unset)"
+
+
+def test_config_origin_scalar_unchanged(root: Path) -> None:
+    # A bare scalar's `--origin` keeps its one-line-per-rung format.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run(
+        "config",
+        "get",
+        "deploy_env",
+        "--origin",
+        root=root,
+        cwd=root / "proj",
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "staging  [workspace]" in res.stdout
+
+
+def test_config_nested_table_origin_per_cell(root: Path) -> None:
+    # Per-cell origin recurses into nested sub-tables.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci.runner]\nimage = "ubuntu"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci.runner]\ntag = "latest"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ci", "--origin", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "ci.runner.image = ubuntu  [project]" in res.stdout
+    assert "ci.runner.tag = latest  [workspace]" in res.stdout
+
+
+def test_config_table_subpath_kind_clash(root: Path) -> None:
+    # A scalar at `ci.runner` in one tier and a table at `ci.runner.image` in
+    # another is a hard error naming the nested path.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci.runner]\nimage = "x"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ci", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 1
+    assert "ci.runner" in res.stderr
+
+
+def test_config_reserved_head_rejected_dotted(root: Path) -> None:
+    # A dotted key's head segment may not be a reserved container name.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "hooks.on.x", "y", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "reserved key" in res.stderr.lower()
+    # A deeper reserved segment under a user section is a harmless cell.
+    ok = run("config", "set", "ci.workspaces", "ok", root=root, cwd=cwd)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_config_inheritable_dotted_rejected(root: Path) -> None:
+    # `inheritable` stays bare-only: a dotted form is rejected (head reserved).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "inheritable.x", "y", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "reserved key" in res.stderr.lower()
+
+
+def test_config_arrays_still_do_not_merge(root: Path) -> None:
+    # Arrays remain non-merging across tiers: the most-local array wins wholesale.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ports"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('ports = ["3001"]\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('ports = ["3002", "3003"]\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "ports", root=root, cwd=cwd, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.split() == ["3001"]
+
+
+def test_config_unset_dotted_cell(root: Path) -> None:
+    # `config unset ci.runner.image` removes one nested cell.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "ci.runner.image", "ubuntu", root=root, cwd=cwd)
+    run("config", "set", "ci.runner.tag", "latest", root=root, cwd=cwd)
+    res = run("config", "unset", "ci.runner.image", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert "image" not in text
+    assert 'tag = "latest"' in text
+
+
+def test_config_dotted_array_set(root: Path) -> None:
+    # `-a` works at a dotted path: adds to an array inside a section.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "ci.ports", "3001", "-a", root=root, cwd=cwd)
+    run("config", "set", "ci.ports", "3002", "-a", root=root, cwd=cwd)
+    res = run("config", "get", "ci.ports", root=root, cwd=cwd)
+    assert res.stdout.split() == ["3001", "3002"]
 
 
 def test_config_set_table_kind_clash_on_scalar(root: Path) -> None:

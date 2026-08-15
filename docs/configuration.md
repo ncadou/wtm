@@ -70,13 +70,40 @@ on the **cwd-inferred entity** (the deepest one the cwd sits inside — worktree
 else project, else the active workspace); `-s/--scope` picks the file tier the
 same way annotations do.
 
-- `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key.
+- `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key. `KEY` may be a
+  dotted path (`ci.runner.image`) naming a nested cell; see [Sections](#sections)
+  below.
 - `wtm config get KEY [SUBKEY] [--origin]` — resolve it (most-local wins). A
   scalar prints bare, an array one element per line, a table `subkey = value` per
-  line (sorted); pass `SUBKEY` to read a single table cell. `--origin` lists the
-  full chain, most-local first, each rung showing where the value comes from (its
-  scope) and the file it lives in.
+  line (sorted, nested sub-tables indented); pass `SUBKEY` to read a single table
+  cell, or use a dotted `KEY` to read a nested cell. `--origin` lists where each
+  value is defined: per-cell (`path = value  [source]  file`) for a table, or one
+  line per carrying rung for a scalar/array — its scope, or its definition level
+  (`project`/`workspace`/`global`) for an inherited key — and the file it lives in.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
+
+### Sections (dotted paths and deep-merge)
+
+A `KEY` may be a **dotted path** (`ci.runner.image`) naming a cell inside a
+section — a TOML table. `config set ci.runner.image ubuntu` writes
+`[ci.runner] image = "ubuntu"`; `config get ci.runner.image` reads it back. The
+`-t`/`--table` flag is the one-level shorthand for the same thing:
+`config set ci.runner image ubuntu -t` (KEY=`ci.runner`, SUBKEY=`image`) is
+identical to `config set ci.runner.image ubuntu`. A bare `KEY` keeps its
+top-level meaning. Only the **head** segment of a dotted path is checked against
+the reserved names (`hooks` / `projects` / `worktrees` / `workspaces` / `path` /
+`default_workspace` / `inheritable`) — deeper segments are harmless cells, so
+`ci.workspaces` is allowed (a cell named `workspaces` inside your `ci` section),
+but `hooks.on.x` is refused.
+
+A section **deep-merges** across tiers — per cell, most-local wins. If a project
+sets `[ci] registry` and the workspace sets `[ci] runner`, `config get ci` yields
+both; `config get ci.runner` resolves the workspace's. Nested tables merge
+recursively (`ci.runner.image` from one tier + `ci.runner.tag` from another →
+both). A scalar-vs-table clash at any sub-path (`ci.runner` a scalar in one
+tier, `ci.runner.image` a table in another) is a hard error. This holds on both
+axes: locality (one entity's scope files) and, for an inheritable section,
+inheritance down the containment chain.
 
 ### Array keys (`-a` / `--array`) and table keys (`-t` / `--table`)
 
@@ -85,18 +112,20 @@ element-wise, instead of writing a scalar:
 
 - `wtm config set KEY VALUE -a [-s SCOPE]` — add `VALUE` to the array at `KEY`
   (**set semantics**: idempotent, a value already present is a no-op); creates
-  the array on first add.
+  the array on first add. `KEY` may be dotted (`ci.ports`).
 - `wtm config unset KEY VALUE -a [-s SCOPE]` — strip every occurrence of `VALUE`
   from that array.
 - `wtm config set KEY SUBKEY VALUE -t [-s SCOPE]` — set `SUBKEY = VALUE` in the
-  table at `KEY`; creates the table on first set.
+  table at `KEY`; creates the table on first set. `KEY` may be dotted, so this is
+  the one-level form of a dotted write.
 - `wtm config unset KEY SUBKEY -t [-s SCOPE]` — remove `SUBKEY` from that table.
 
 `-a` and `-t` are mutually exclusive. Values are always stored as **strings**.
 Mutating a key that already holds a different kind (a scalar, or an array where a
 table is expected, or vice versa) is a hard error (the same kind-clash rule reads
 enforce). Arrays do **not** merge across scopes (unlike `hooks.on` /
-`inheritable`): a read takes the most-local scope's whole array. Give each tier a
+`inheritable`, and unlike *tables* which deep-merge per cell): a read takes the
+most-local scope's whole array. Give each tier a
 distinct name when you want per-tier arrays that don't shadow one another — e.g.
 a per-worktree port registry beside a per-project one:
 
@@ -213,10 +242,13 @@ projects and declared-but-absent worktrees still surface (an inert project is
 marked `(no .git on disk)`). Arbitrary keys resolved along the
 shown branch are always printed.
 
-`--origin` tags each value with its **winning** scope (the full chain lives in
-`config get KEY --origin`); `--hooks` also renders accumulated inline hooks per
-scope. Both are **ungated** — they apply in every mode, with or without `-r` or
-`-g` (the former subtree-only restriction is gone).
+`--origin` tags each value with its **winning** scope, arbitrary keys
+included: a section is labelled per cell (each leaf its own carrier, e.g.
+`ci:` / `  registry: ghcr  [project]`), mirroring `config get KEY --origin`'s
+per-cell provenance in the `config show` tree style. (The full per-rung chain
+lives in `config get KEY --origin`.) `--hooks` also renders accumulated inline
+hooks per scope. Both are **ungated** — they apply in every mode, with or
+without `-r` or `-g` (the former subtree-only restriction is gone).
 
 `-j`/`--json` emits the result as a nested JSON object instead of text, always
 rooted at global (`default_base_branch`, `base_branch_source`, `extra`, then
