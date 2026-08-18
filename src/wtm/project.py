@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wtm import config_writer, git, registry
-from wtm.config import Config, ProjectAnnotation, Scope, Workspace, resolve_project_dir
+from wtm.config import Config, ProjectAnnotation, Scope, resolve_project_dir
 from wtm.core import (
     WtmError,
     current_dir,
@@ -213,7 +213,7 @@ class Project:
             if ws is not None
             else ProjectAnnotation()
         )
-        effective, source = self._base_branch_provenance(ws, annotation)
+        effective, source = self.config.base_branch_provenance(ws, project_dir.name)
 
         return ProjectShown(
             name=project_dir.name,
@@ -225,19 +225,6 @@ class Project:
             base_branch_source=source,
             worktree_count=len(self._worktrees(workspace, project)),
         )
-
-    def _base_branch_provenance(
-        self, ws: Workspace | None, annotation: ProjectAnnotation
-    ) -> tuple[str | None, str]:
-        """Resolve the effective base_branch and the tier it came from."""
-        if annotation.base_branch:
-            return annotation.base_branch, "project"
-        if ws is not None and ws.base_branch:
-            return ws.base_branch, "workspace"
-        if self.config.default_base_branch:
-            return self.config.default_base_branch, "global"
-
-        return None, "(none)"
 
     def _worktrees(self, workspace: str | None, project: str | None) -> list:
         """Lenient worktree listing for the count (empty on any git failure)."""

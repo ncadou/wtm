@@ -41,6 +41,9 @@ __all__ = [
     "Config",
     "HookSpec",
     "ProjectAnnotation",
+    "ResolvedConfig",
+    "ResolvedProject",
+    "ResolvedWorktree",
     "Scope",
     "Workspace",
     "resolve_project_dir",
@@ -59,6 +62,8 @@ from wtm.core import (
     expand_path,
     project_dir_for,
     valid_project_name,
+    within,
+    worktree_name,
 )
 
 
@@ -117,6 +122,50 @@ class Workspace:
     hooks: HookSpec = field(default_factory=HookSpec)
     projects: dict[str, ProjectAnnotation] = field(default_factory=dict)
     scope: Scope = Scope.USER  # where it was ultimately declared (for --sources)
+
+
+# --- resolved view -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResolvedWorktree:
+    """The worktree tier of the resolved view (worktree-local config = hooks)."""
+
+    name: str
+    dir: Path
+    hooks: HookSpec = field(default_factory=HookSpec)
+
+
+@dataclass(frozen=True)
+class ResolvedProject:
+    """The cwd-bound project's effective annotation with base_branch provenance."""
+
+    name: str
+    dir: Path
+    exists: bool
+    description: str | None
+    base_branch: str | None  # the project-tier value, if any
+    effective_base_branch: str | None  # after the full resolution chain
+    base_branch_source: str  # project | workspace | global | (none)
+    hooks: HookSpec = field(default_factory=HookSpec)
+    worktree: ResolvedWorktree | None = None  # set only when cwd is in a worktree
+
+
+@dataclass(frozen=True)
+class ResolvedConfig:
+    """The effective config for the active cwd chain (workspace -> project -> worktree).
+
+    A depth-capped, cwd-oriented view: the active workspace's effective scalars
+    plus, only when the cwd sits inside them, the cwd-bound project and its
+    worktree. Non-active workspaces are left as their declared :class:`Workspace`
+    entries (rendered without descent).
+    """
+
+    workspaces: dict[str, Workspace]
+    active: str | None
+    default_base_branch: str | None
+    active_workspace: Workspace | None  # the active workspace's effective entry
+    project: ResolvedProject | None  # the cwd-bound project, when cwd is inside one
 
 
 # --- config ------------------------------------------------------------------
@@ -222,9 +271,32 @@ class Config:
 
     def base_branch_for(self, workspace: Workspace, name: str) -> str | None:
         """Resolve a project's configured base branch (most-specific first)."""
-        annotation = self.project_annotation(workspace, name)
+        return self.base_branch_provenance(workspace, name)[0]
 
-        return annotation.base_branch or workspace.base_branch or self.default_base_branch
+    def base_branch_provenance(
+        self, workspace: Workspace | None, name: str
+    ) -> tuple[str | None, str]:
+        """Resolve a project's effective base branch and the tier it came from.
+
+        The tier is one of ``project`` (project-local file or registry
+        annotation), ``workspace``, ``global``, or ``(none)``. The project-local
+        file and the registry annotation share the ``project`` tier: both are
+        per-project overrides and the annotation is not carried with a finer
+        scope once merged.
+        """
+        annotation = (
+            self.project_annotation(workspace, name)
+            if workspace is not None
+            else ProjectAnnotation()
+        )
+        if annotation.base_branch:
+            return annotation.base_branch, "project"
+        if workspace is not None and workspace.base_branch:
+            return workspace.base_branch, "workspace"
+        if self.default_base_branch:
+            return self.default_base_branch, "global"
+
+        return None, "(none)"
 
     def scope_hook_spec(self, scope: Scope, project_dir: Path, worktree_dir: Path) -> HookSpec:
         """Return the inline :class:`HookSpec` for *scope* given a target's dirs."""
@@ -284,6 +356,68 @@ class Config:
             _user_hooks_dir=user_dir,
             default_base_branch=user.get("base_branch") or system.get("base_branch"),
             default_workspace=default_workspace,
+        )
+
+    # --- resolved view -------------------------------------------------------
+
+    def resolve_view(self, *, cwd: Path | None = None) -> ResolvedConfig:
+        """Materialise the effective config for the active cwd chain.
+
+        Descent happens only in the active workspace, and only as deep as the
+        cwd sits: the cwd-bound project (if cwd is under one) carries its merged
+        effective annotation, and its worktree tier is attached only when cwd is
+        inside an actual worktree. ``None`` *cwd* (the shell dir was removed)
+        simply skips the descent.
+        """
+        cwd = cwd if cwd is not None else current_dir(resolve=False)
+        active_ws = self.workspaces.get(self.active) if self.active is not None else None
+
+        project = self._resolve_cwd_project(active_ws, cwd) if active_ws is not None else None
+
+        return ResolvedConfig(
+            workspaces=self.workspaces,
+            active=self.active,
+            default_base_branch=self.default_base_branch,
+            active_workspace=active_ws,
+            project=project,
+        )
+
+    def _resolve_cwd_project(self, ws: Workspace, cwd: Path | None) -> ResolvedProject | None:
+        """Resolve the cwd-bound project under *ws*, or ``None`` when cwd is elsewhere."""
+        if cwd is None:
+            return None
+        project_dir = project_dir_for(ws.path, abspath(str(cwd)))
+        if project_dir is None:
+            return None
+
+        annotation = self.project_annotation(ws, project_dir.name)
+        effective, source = self.base_branch_provenance(ws, project_dir.name)
+
+        return ResolvedProject(
+            name=project_dir.name,
+            dir=project_dir,
+            exists=(project_dir / ".git").is_dir(),
+            description=annotation.description,
+            base_branch=annotation.base_branch,
+            effective_base_branch=effective,
+            base_branch_source=source,
+            hooks=annotation.hooks,
+            worktree=self._resolve_cwd_worktree(project_dir, abspath(str(cwd))),
+        )
+
+    def _resolve_cwd_worktree(self, project_dir: Path, cwd: Path) -> ResolvedWorktree | None:
+        """Resolve the cwd-bound worktree under *project_dir*, else ``None``."""
+        worktrees_dir = project_dir / "worktrees"
+        if not within(cwd, worktrees_dir) or cwd == worktrees_dir:
+            return None
+        rel = cwd.relative_to(worktrees_dir)
+        wt_dir = worktrees_dir / rel.parts[0]
+        name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
+
+        return ResolvedWorktree(
+            name=name,
+            dir=wt_dir,
+            hooks=_parse_worktree_local(wt_dir / ".wtm" / "config.toml"),
         )
 
 

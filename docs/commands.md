@@ -106,7 +106,10 @@ resolve [[[WORKSPACE] PROJECT] NAME]                  print a worktree's path (n
 ## Config (`wtm config …`)
 
 ```
-show [--sources]              the effective merged config (--sources: declaring scope + inert-annotation flags)
+show [--sources] [--hooks]    the effective merged config for the current context: all workspaces, plus the
+                              cwd-bound project (and its worktree, if cwd is in one) with their resolved
+                              values (--sources: the tier each value resolves from + inert-annotation flags;
+                              --hooks: accumulated inline hooks per scope)
 base-branch [VALUE] [--clear] get/set/clear the global default base_branch (user config); the getter
                               shows the effective value and the scope it comes from
 ```

@@ -3489,6 +3489,56 @@ def test_config_show_reports_base_branch_source(root: Path) -> None:
     assert "default base_branch: main  [user]" in res.stdout
 
 
+def test_config_show_surfaces_cwd_project_local_base_branch(root: Path) -> None:
+    # A project-local base_branch is invisible in the workspace listing but must
+    # surface (with a [project] source) when the cwd is inside that project.
+    _seed_repo(root, "proj")
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("config", "show", "--sources", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert "project proj:" in res.stdout
+    assert "base_branch: develop  [project]" in res.stdout
+
+
+def test_config_show_no_descent_from_workspace_root(root: Path) -> None:
+    # Standing at the workspace root, no project block is rendered even when a
+    # project carries local settings.
+    _seed_repo(root, "proj")
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("config", "show", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "project proj:" not in res.stdout
+
+
+def test_config_show_worktree_tier_only_when_cwd_inside(root: Path) -> None:
+    # A worktree-local hook shows under --hooks only when cwd is in that worktree.
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    wt = root / "proj" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True, exist_ok=True)
+    (wt / ".wtm" / "config.toml").write_text('[hooks.on]\nenter = "echo hi"\n')
+
+    from_wt = run("config", "show", "--hooks", "--sources", root=root, cwd=wt)
+    assert from_wt.returncode == 0, from_wt.stderr
+    assert "worktree feat:" in from_wt.stdout
+    assert "hook enter = echo hi  [worktree]" in from_wt.stdout
+
+    from_proj = run("config", "show", "--hooks", root=root, cwd=root / "proj")
+    assert "worktree feat:" not in from_proj.stdout
+
+
+def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("project", "set", "proj", "-b", "develop", root=root)
+    (root / "proj" / ".wtm" / "config.toml").write_text(
+        '[project]\nbase_branch = "develop"\n[project.hooks.on]\ninstall = "make deps"\n'
+    )
+    without = run("config", "show", root=root, cwd=root / "proj")
+    assert "hook install" not in without.stdout
+    with_hooks = run("config", "show", "--hooks", root=root, cwd=root / "proj")
+    assert "hook install = make deps" in with_hooks.stdout
+
+
 def test_project_set_writes_local_config(root: Path) -> None:
     _seed_repo(root, "proj")
     res = run("project", "set", "proj", "-b", "develop", "-d", "the proj", root=root)

@@ -38,8 +38,13 @@ is present, otherwise they fall back to the user-file registry entry/annotation.
 One consequence: `wtm workspace add -b main` records `base_branch` in the
 registry entry, but a later `wtm workspace set -b develop` (once the dir exists)
 writes the workspace-local file, which *wins* on merge — and clearing it there
-(`set -b ""`) lets the registry value resurface. `wtm config show [--sources]`
-prints the effective merge and where each value comes from.
+(`set -b ""`) lets the registry value resurface. `wtm config show [--sources]
+[--hooks]` prints the effective merge for the current context and where each
+value comes from: it lists all workspaces, then descends only in the active one
+as far as the cwd sits — the cwd-bound project's resolved annotation (its
+`.wtm/config.toml` merged over the registry annotation) and, when the cwd is
+inside a worktree, that worktree's tier. `--sources` tags the actual tier each
+value resolves from; `--hooks` also renders accumulated inline hooks per scope.
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its

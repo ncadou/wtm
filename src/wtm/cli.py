@@ -17,7 +17,7 @@ import typer
 from typer.core import TyperGroup
 
 from wtm import git, registry
-from wtm.config import Config, resolve_project_dir
+from wtm.config import Config, HookSpec, ResolvedConfig, resolve_project_dir
 from wtm.core import (
     WtmError,
     current_dir,
@@ -1781,16 +1781,22 @@ app.add_typer(config_app, name="config", rich_help_panel="Command groups")
 def config_show(
     ctx: typer.Context,
     sources: bool = typer.Option(
-        False, "--sources", help="Annotate where each workspace was declared"
+        False, "-s", "--sources", help="Annotate where each value comes from"
     ),
+    hooks: bool = typer.Option(False, "--hooks", help="Also show accumulated inline hooks"),
 ) -> None:
-    """Show the effective merged config (workspaces, defaults, annotations).
+    """Show the effective merged config for the current context.
 
-    A read-only view of the resolved configuration for debugging the layered
-    merge. ``--sources`` marks the scope each workspace was declared in and
-    flags inert annotations (projects with no directory on disk).
+    A read-only view of the resolved configuration. All declared workspaces are
+    listed; the active one descends only as far as the cwd sits -- the cwd-bound
+    project's effective annotation (registry annotation merged with its
+    ``.wtm/config.toml``, project-local winning), and its worktree tier when the
+    cwd is inside a worktree. ``--sources`` annotates the actual tier each value
+    resolves from and flags inert annotations (projects with no dir on disk);
+    ``--hooks`` also renders accumulated inline hooks per scope along that chain.
     """
     config = ctx.obj.config
+    view = config.resolve_view()
     print(f"active workspace: {config.active or '(none)'}")
     if config.default_base_branch:
         origin = f"  [{registry.base_branch_source().value}]" if sources else ""
@@ -1809,6 +1815,42 @@ def config_show(
             bits = [b for b in (ann.description, ann.base_branch) if b]
             detail = f" ({', '.join(bits)})" if bits else ""
             print(f"    project {pname}{detail}{inert}")
+        if hooks:
+            _print_scope_hooks("    ", ws.hooks, sources, "workspace")
+
+    _print_effective_project(view, sources, hooks)
+
+
+def _print_effective_project(view: ResolvedConfig, sources: bool, hooks: bool) -> None:
+    """Render the cwd-bound project (and its worktree) from the resolved view."""
+    project = view.project
+    if project is None:
+        return
+
+    print(f"project {project.name}: {project.dir}")
+    if project.description:
+        print(f"  description: {project.description}")
+    if project.effective_base_branch:
+        origin = f"  [{project.base_branch_source}]" if sources else ""
+        print(f"  base_branch: {project.effective_base_branch}{origin}")
+    if hooks:
+        _print_scope_hooks("  ", project.hooks, sources, "project")
+
+    worktree = project.worktree
+    if worktree is None:
+        return
+
+    print(f"  worktree {worktree.name}: {worktree.dir}")
+    if hooks:
+        _print_scope_hooks("    ", worktree.hooks, sources, "worktree")
+
+
+def _print_scope_hooks(indent: str, spec: HookSpec, sources: bool, scope: str) -> None:
+    """Render a scope's inline hooks (``event = cmd``), skipping empty specs."""
+    for event, commands in sorted(spec.on.items()):
+        for command in commands:
+            origin = f"  [{scope}]" if sources else ""
+            print(f"{indent}hook {event} = {command}{origin}")
 
 
 @config_app.command(name="base-branch")
