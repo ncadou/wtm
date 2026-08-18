@@ -1554,6 +1554,43 @@ def test_rescue_dir_none_when_outside_or_no_cwd(
     assert rescue_dir(None, wt, project) is None
 
 
+# --- core.current_dir / abspath under a deleted cwd (unit) -------------------
+
+
+def test_current_dir_none_when_getcwd_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wtm.core import current_dir
+
+    def _boom() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr("wtm.core.os.getcwd", _boom)
+    assert current_dir() is None
+    assert current_dir(resolve=False) is None
+
+
+def test_current_dir_resolve_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wtm.core import current_dir
+
+    monkeypatch.setattr("wtm.core.os.getcwd", lambda: "/some/path")
+    monkeypatch.setattr("wtm.core.os.path.realpath", lambda _p: "/real/path")
+    assert current_dir(resolve=False) == Path("/some/path")
+    assert current_dir() == Path("/real/path")
+
+
+def test_abspath_relative_arg_deleted_cwd_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wtm.core import WtmError, abspath
+
+    def _boom() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr("wtm.core.os.getcwd", _boom)
+    # An absolute arg never touches the cwd, so it still works.
+    assert abspath("/already/absolute") == Path("/already/absolute")
+    # A relative arg must read the (gone) cwd -> clear WtmError, not a traceback.
+    with pytest.raises(WtmError, match="cwd is unavailable"):
+        abspath("relative/path")
+
+
 # --- rename ------------------------------------------------------------------
 
 

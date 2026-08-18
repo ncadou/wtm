@@ -135,6 +135,38 @@ def test_unknown_selected_workspace_errors(
         _load(monkeypatch, tmp_path, _two(tmp_path), cwd=tmp_path)
 
 
+def test_none_cwd_falls_through_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removed cwd (cwd=None) skips the cwd tier and uses default_workspace."""
+    a, b = tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    body = f'default_workspace="B"\n[workspaces.A]\npath="{a}"\n[workspaces.B]\npath="{b}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=None)
+    assert cfg.active == "B"
+
+
+def test_none_cwd_none_active_when_ambiguous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removed cwd with no default and several workspaces leaves no active one."""
+    cfg = _load(monkeypatch, tmp_path, _two(tmp_path), cwd=None)
+    assert cfg.active is None
+
+
+def test_deleted_cwd_does_not_crash_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config.load survives a cwd whose os.getcwd() raises (the deleted-dir case)."""
+
+    def _boom() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr("wtm.core.os.getcwd", _boom)
+    monkeypatch.setenv("WTM_CONFIG", str(_write(tmp_path / "c.toml", _two(tmp_path))))
+    cfg = Config.load()  # no explicit cwd -> reads the (gone) live cwd
+    assert cfg.active is None
+
+
 # --- system + user registry merge --------------------------------------------
 
 

@@ -146,6 +146,24 @@ def test_worktree_zero_args_defaults_to_cwd() -> None:
     assert r(TargetMode.WORKTREE, [], cwd=cwd) == cwd
 
 
+def test_worktree_zero_args_none_cwd_errors() -> None:
+    """A removed cwd (cwd=None) turns the cwd default into a clear error."""
+    with pytest.raises(WtmError, match="cwd is unavailable"):
+        resolve(TargetMode.WORKTREE, [], roots=ROOTS, active_root=ROOT, cwd=None)
+
+
+def test_worktree_single_name_none_cwd_errors() -> None:
+    """A 1-arg NAME cannot infer its project when the cwd is gone."""
+    with pytest.raises(WtmError, match="cwd is unavailable"):
+        resolve(TargetMode.WORKTREE, ["feat"], roots=ROOTS, active_root=ROOT, cwd=None)
+
+
+def test_name_only_single_name_none_cwd_errors() -> None:
+    """NAME_ONLY project inference from the cwd fails clearly when it is gone."""
+    with pytest.raises(WtmError, match="cwd is unavailable"):
+        resolve(TargetMode.NAME_ONLY, ["feat"], roots=ROOTS, active_root=ROOT, cwd=None)
+
+
 def test_delete_zero_args_requires_target() -> None:
     with pytest.raises(WtmError, match="target is required"):
         r(TargetMode.DELETE, [], cwd=ROOT / "alpha")

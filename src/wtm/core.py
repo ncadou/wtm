@@ -40,12 +40,22 @@ class WtmError(Exception):
 
 
 def abspath(value: str) -> Path:
-    """Absolute path without requiring the leaf to exist (no symlink resolve)."""
+    """Absolute path without requiring the leaf to exist (no symlink resolve).
+
+    A relative *value* is resolved against the live cwd; if that cwd has been
+    removed :func:`os.getcwd` raises, surfaced here as a clear :class:`WtmError`
+    rather than a bare ``FileNotFoundError`` traceback.
+    """
     path = Path(value)
     if path.is_absolute():
         return path
 
-    return Path(os.getcwd()) / path
+    try:
+        cwd = os.getcwd()
+    except OSError as exc:
+        raise WtmError(f"cwd is unavailable; cannot resolve relative path: {value!r}") from exc
+
+    return Path(cwd) / path
 
 
 def expand_path(value: str) -> Path:
@@ -107,16 +117,23 @@ def project_dir_for(projects_root: Path, cwd: Path) -> Path | None:
     return projects_root / parts[0]
 
 
-def current_dir() -> Path | None:
-    """Return the canonical cwd, or ``None`` if it is unavailable (e.g. deleted).
+def current_dir(*, resolve: bool = True) -> Path | None:
+    """Return the cwd, or ``None`` if it is unavailable (e.g. deleted).
 
     Read it up front, before any destructive operation: once the cwd is removed
     ``os.getcwd()`` raises and the shell's location is lost.
+
+    :param resolve: canonicalise via ``realpath`` (the default, for the
+        delete/rename rescue callers that compare against a realpath'd worktree);
+        pass ``False`` for the non-symlink-resolved form that matches how
+        workspace/config paths are stored.
     """
     try:
-        return Path(os.path.realpath(os.getcwd()))
+        cwd = os.getcwd()
     except OSError:
         return None
+
+    return Path(os.path.realpath(cwd)) if resolve else Path(cwd)
 
 
 def rescue_dir(cwd: Path | None, worktree_dir: Path, project_dir: Path) -> Path | None:

@@ -37,7 +37,6 @@ __all__ = [
     "split_workspace_project",
 ]
 
-import os
 from enum import Enum
 from pathlib import Path
 
@@ -45,6 +44,7 @@ from wtm.config import Config
 from wtm.core import (
     WtmError,
     abspath,
+    current_dir,
     project_dir_for,
     reject_traversal,
     valid_project_name,
@@ -73,7 +73,7 @@ def resolve(
     *,
     roots: dict[str, Path],
     active_root: Path | None,
-    cwd: Path,
+    cwd: Path | None,
 ) -> Path:
     """Resolve *args* to a worktree directory under *mode*'s grammar (pure).
 
@@ -84,7 +84,9 @@ def resolve(
     :param active_root: the active workspace's projects root (the fallback for
         the ``<= 2``-token cases), or ``None`` when no workspace is active.
     :param cwd: the current directory (used for the cwd default / project
-        inference). Passed explicitly so the grammar stays pure.
+        inference), or ``None`` when the shell's directory was removed -- the
+        cwd-dependent forms then raise a clear error instead of crashing.
+        Passed explicitly so the grammar stays pure.
     :returns: the resolved worktree directory.
 
     Grammar:
@@ -113,14 +115,14 @@ def resolve(
                 "a target is required (WORKSPACE PROJECT NAME | PROJECT NAME | NAME | DIR)"
             )
 
-        return abspath(str(cwd))
+        return _require_cwd(cwd)
     if count == 1:
         arg = args[0]
         if looks_like_path(arg):
             return abspath(arg)
         reject_traversal(arg)
         root = _require_active(active_root)
-        project_dir = project_dir_for(root, cwd)
+        project_dir = project_dir_for(root, _require_cwd(cwd))
         if project_dir is None:
             raise WtmError(
                 "1-arg NAME given but cwd is not under "
@@ -215,7 +217,9 @@ def resolve_target(config: Config, mode: TargetMode, args: list[str]) -> Path:
     roots = {name: ws.path for name, ws in config.workspaces.items()}
     active_root = config.workspaces[config.active].path if config.active is not None else None
 
-    return resolve(mode, args, roots=roots, active_root=active_root, cwd=abspath(os.getcwd()))
+    cwd = current_dir(resolve=False)
+
+    return resolve(mode, args, roots=roots, active_root=active_root, cwd=cwd)
 
 
 # --- helpers -----------------------------------------------------------------
@@ -231,7 +235,7 @@ def looks_like_path(arg: str) -> bool:
 def _project_dir(
     roots: dict[str, Path],
     active_root: Path | None,
-    cwd: Path,
+    cwd: Path | None,
     workspace: str | None,
     project: str | None,
 ) -> Path:
@@ -242,7 +246,7 @@ def _project_dir(
         return _resolve_root(roots, active_root, workspace) / project
 
     root = _require_active(active_root)
-    project_dir = project_dir_for(root, cwd)
+    project_dir = project_dir_for(root, _require_cwd(cwd))
     if project_dir is None:
         raise WtmError(f"no PROJECT given and cwd is not under {root}")
 
@@ -258,6 +262,17 @@ def _resolve_root(roots: dict[str, Path], active_root: Path | None, workspace: s
         return roots[workspace]
 
     return _require_active(active_root)
+
+
+def _require_cwd(cwd: Path | None) -> Path:
+    """Return *cwd* or raise the shell-directory-gone error for a cwd-dependent form."""
+    if cwd is None:
+        raise WtmError(
+            "cwd is unavailable (the directory was removed); "
+            "pass an explicit target (WORKSPACE PROJECT NAME | PROJECT NAME | DIR)"
+        )
+
+    return cwd
 
 
 def _require_active(active_root: Path | None) -> Path:

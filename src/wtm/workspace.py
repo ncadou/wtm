@@ -417,7 +417,12 @@ def _prepare_path(raw: str | None) -> tuple[str, Path]:
     otherwise), matching how the reader treats config paths.
     """
     if raw is None:
-        cwd = abspath(os.getcwd())
+        cwd = current_dir(resolve=False)
+        if cwd is None:
+            raise WtmError(
+                "cwd is unavailable (the directory was removed); "
+                "pass an explicit PATH to 'workspace add'"
+            )
 
         return str(cwd), cwd
     if raw.startswith("~") or "$" in raw or raw.startswith("/"):

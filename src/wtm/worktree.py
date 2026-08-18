@@ -28,6 +28,7 @@ from wtm.core import (
     Context,
     WtmError,
     abspath,
+    current_dir,
     derive_context,
     reject_traversal,
 )
@@ -397,7 +398,11 @@ class Worktree:
         if not args:
             # No target: resolve the worktree we're standing in (touches git,
             # unlike the explicit-NAME forms). Absent a worktree, ask for a NAME.
-            cwd = abspath(os.getcwd())
+            cwd = current_dir(resolve=False)
+            if cwd is None:
+                raise WtmError(
+                    "cwd is unavailable (the directory was removed); pass PROJECT NAME or NAME"
+                )
             if not git.is_repo(cwd):
                 raise WtmError(
                     "no NAME given and cwd is not inside a worktree (pass PROJECT NAME or NAME)"

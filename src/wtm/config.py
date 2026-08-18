@@ -55,6 +55,7 @@ from pathlib import Path
 from wtm.core import (
     WtmError,
     abspath,
+    current_dir,
     expand_path,
     project_dir_for,
     valid_project_name,
@@ -251,14 +252,15 @@ class Config:
         """Load and resolve config from files + env for one invocation.
 
         :param cwd: the current directory for cwd-based workspace inference
-            (defaults to the live cwd).
+            (defaults to the live cwd, or ``None`` when the cwd has been removed
+            -- then the cwd tier is simply skipped rather than crashing).
 
         The active workspace is resolved from ``$WTM_WORKSPACE > cwd >
         default_workspace > sole workspace``; there is no ``-w`` flag -- a
         WORKSPACE named in a command's positionals overrides this per-target
         (see :mod:`wtm.target`).
         """
-        cwd = cwd if cwd is not None else abspath(os.getcwd())
+        cwd = cwd if cwd is not None else current_dir(resolve=False)
         no_config = _flag_env("WTM_NO_CONFIG")
         no_system = no_config or _flag_env("WTM_NO_SYSTEM")
 
@@ -298,7 +300,8 @@ def resolve_project_dir(config: Config, workspace: str | None, project: str | No
 
         return root / project
 
-    project_dir = project_dir_for(root, abspath(os.getcwd()))
+    cwd = current_dir(resolve=False)
+    project_dir = project_dir_for(root, cwd) if cwd is not None else None
     if project_dir is None:
         raise WtmError(f"no PROJECT given and cwd is not under {root}")
 
@@ -373,14 +376,15 @@ def _apply_workspace_local(ws: Workspace, local: dict) -> Workspace:
 def _resolve_active(
     registry: dict[str, Workspace],
     *,
-    cwd: Path,
+    cwd: Path | None,
     default_workspace: str | None,
 ) -> str | None:
     """Resolve the active workspace name per the documented precedence.
 
     ``$WTM_WORKSPACE > cwd (longest match) > default_workspace > sole workspace
     > None``. A WORKSPACE named in a command's positionals overrides this
-    per-target (see :mod:`wtm.target`); there is no ``-w`` flag.
+    per-target (see :mod:`wtm.target`); there is no ``-w`` flag. A ``None`` *cwd*
+    (the shell's directory was removed) simply skips the cwd tier.
     """
     selector = os.environ.get("WTM_WORKSPACE")
     if selector:
@@ -389,7 +393,7 @@ def _resolve_active(
 
         return selector
 
-    matched = _workspace_for_cwd(registry, cwd)
+    matched = _workspace_for_cwd(registry, cwd) if cwd is not None else None
     if matched is not None:
         return matched
 
