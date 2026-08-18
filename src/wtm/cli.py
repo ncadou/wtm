@@ -1386,6 +1386,20 @@ def config_show(
 app.add_typer(hook_app, name="hook", rich_help_panel="Command groups")
 
 
+@app.command(name="shell-init")
+def shell_init() -> None:
+    """Print the shell wrapper so it can be sourced from a shell rc.
+
+    Emits the packaged ``wtm/shell/wtm.sh`` to stdout, defining the ``wtm``
+    function that lets movers like ``enter``/``create -c`` cd the calling shell.
+    Source it directly (``eval "$(wtm shell-init)"``) or cache the output to a
+    file and source that. Mirrors ``--show-completion``.
+    """
+    from importlib.resources import files
+
+    print(files("wtm").joinpath("shell/wtm.sh").read_text(), end="")
+
+
 def main() -> None:
     """Entry point: run the typer app, mapping WtmError to ``wtm: ...`` exit 1."""
     try:
