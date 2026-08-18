@@ -4645,7 +4645,8 @@ def test_config_show_origin_per_cell_for_nested_table(root: Path) -> None:
 def test_config_show_origin_inherited_table_per_cell(root: Path) -> None:
     # An inheritable table merges down the containment chain; each cell keeps its
     # own defining tier under --origin (the project cell vs the workspace-ancestor
-    # cell), not a single section-level label.
+    # cell), not a single section-level label. Inherited cells are suppressed at
+    # the descendant, so the project block carries only its own cell.
     cfg = root / "cfg.toml"
     cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
     _seed_repo(root, "proj")
@@ -4660,6 +4661,9 @@ def test_config_show_origin_inherited_table_per_cell(root: Path) -> None:
     assert "ci:" in res.stdout
     assert "registry: ghcr  [project]" in res.stdout
     assert "runner: ubuntu  [workspace]" in res.stdout
+    # The workspace-inherited cell is not echoed at the project tier.
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "runner" not in proj_block
 
 
 def test_config_show_origin_global_extra(root: Path) -> None:
@@ -5161,8 +5165,8 @@ def test_config_get_user_declared_key_inherits(root: Path) -> None:
 
 
 def test_config_show_reflects_inherited_user_key(root: Path) -> None:
-    # `config show` (the resolved-view read path) agrees with `config get`: a
-    # declared inheritable key absent project-locally surfaces on the descendant.
+    # A declared inheritable key absent project-locally is suppressed at the
+    # project and shown only at its defining ancestor (the workspace).
     cfg = root / "cfg.toml"
     cfg.write_text(
         f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
@@ -5176,8 +5180,104 @@ def test_config_show_reflects_inherited_user_key(root: Path) -> None:
         extra_env={"WTM_CONFIG": str(cfg)},
     )
     assert res.returncode == 0, res.stderr
-    assert "deploy_env" in res.stdout
-    assert "staging" in res.stdout
+    ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "deploy_env: staging" in ws_block
+    assert "deploy_env" not in proj_block
+
+
+def test_config_show_suppresses_inherited_base_branch_at_project(root: Path) -> None:
+    # The headline case: a workspace-wide base_branch is shown at the workspace
+    # tier only, not echoed under every project. The global default and the
+    # workspace value each appear once, at their definition sites.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'base_branch = "master"\n[workspaces.ws]\npath = "{root}"\nbase_branch = "main"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run("config", "show", "-r", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    assert "default base_branch: master" in res.stdout
+    ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
+    assert "base_branch: main" in ws_block
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "base_branch" not in proj_block
+
+
+def test_config_show_suppresses_inherited_arbitrary_scalar_at_project(root: Path) -> None:
+    # An inheritable scalar defined at the workspace is suppressed at the project.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
+    )
+    _seed_repo(root, "proj")
+    res = run("config", "show", "-r", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "deploy_env: staging" in ws_block
+    assert "deploy_env" not in proj_block
+
+
+def test_config_show_suppresses_inherited_table_cells_per_cell(root: Path) -> None:
+    # An inheritable table deep-merges cell-by-cell; each cell is shown only at
+    # its defining tier. The project cell appears under the project, the
+    # workspace-ancestor cell under the workspace -- neither is echoed at the
+    # other tier.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
+    (cwd / ".wtm" / "config.toml").write_text('[ci]\nregistry = "ghcr"\n')
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "show", "-r", root=root, cwd=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "registry: ghcr" in proj_block
+    assert "runner" not in proj_block
+    assert "runner: ubuntu" in ws_block
+    assert "registry" not in ws_block
+
+
+def test_config_show_suppresses_inherited_keys_at_worktree(root: Path) -> None:
+    # Suppression is uniform across all tiers: a worktree block shows only
+    # worktree-local arbitrary keys; inherited values (from project, workspace,
+    # or global) are pushed up to their defining ancestors.
+    cfg = root / "cfg.toml"
+    cfg.write_text(
+        f'inheritable = ["deploy_env"]\n[workspaces.ws]\npath = "{root}"\ndeploy_env = "staging"\n'
+    )
+    _seed_repo(root, "proj")
+    run("create", "proj", "feat", root=root)
+    (root / "proj" / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / "proj" / ".wtm" / "config.toml").write_text('deploy_env = "prod"\n')
+    res = run("config", "show", "-r", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
+    proj_block = res.stdout.split("project proj:", 1)[1].split("worktree feat:", 1)[0]
+    wt_block = res.stdout.split("worktree feat:", 1)[1]
+    assert "deploy_env: staging" in ws_block
+    assert "deploy_env: prod" in proj_block
+    assert "deploy_env" not in wt_block
+
+
+def test_config_show_omits_empty_inherited_table_header(root: Path) -> None:
+    # When every cell of an inheritable table is inherited (the project defines
+    # no cell of its own), the section header itself is suppressed -- no orphan
+    # ``ci:`` line is left at the project tier.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'inheritable = ["ci"]\n[workspaces.ws]\npath = "{root}"\n')
+    _seed_repo(root, "proj")
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text('[ci]\nrunner = "ubuntu"\n')
+    res = run("config", "show", "-r", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    proj_block = res.stdout.split("project proj:", 1)[1]
+    assert "ci:" not in proj_block
 
 
 def test_config_set_user_scope_renders_dotted_headers(root: Path) -> None:

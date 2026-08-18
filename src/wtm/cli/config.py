@@ -72,9 +72,13 @@ def config_show(
 
     One optional unpinned locator (or cwd) resolves a target entity. One pruned
     tree rooted at global is rendered. ``-r`` extends downward (additive);
-    ``-d TIER`` caps the deepest tier rendered. ``--origin`` annotates where
-    each value comes from; ``--hooks`` renders accumulated inline hooks. Both
-    work in all modes.
+    ``-d TIER`` caps the deepest tier rendered. The text view shows each value
+    at its defining tier only -- an inherited value is suppressed at the
+    descendant and appears once, at its definition site on the same branch (no
+    value is lost; the defining ancestor is always rendered above). ``--json``
+    instead emits the full effective merged values (machine-readable, no
+    provenance). ``--origin`` annotates each shown value with its source;
+    ``--hooks`` renders accumulated inline hooks. Both work in all modes.
     """
     config = ctx.obj.config
     args = args or []
@@ -109,47 +113,98 @@ def config_show(
     _print_config_slice(slice_, show_origin, hooks)
 
 
+def _defined_here(tier: str | None, entity_tier: str) -> bool:
+    """True when a value is defined at *entity_tier* (not inherited from an ancestor).
+
+    A rung's ``tier`` is ``None`` for a plain (entity-local) key whose scope
+    already names the source, or the inheritance level (``project`` /
+    ``workspace`` / ``global``) it came from for an inheritable key. The value
+    is shown only when that tier matches the entity being rendered -- so an
+    inherited value is suppressed at the descendant and appears once, at its
+    defining tier on the same global-rooted branch.
+    """
+    return tier is None or tier == entity_tier
+
+
 def _print_extra(
-    indent: str, extra: dict[str, object], origins: dict[str, list[SourceRung]] | None = None
+    indent: str,
+    extra: dict[str, object],
+    origins: dict[str, list[SourceRung]],
+    entity_tier: str,
+    show_origin: bool,
 ) -> None:
-    """Render an entity's arbitrary keys, always in the cwd descent.
+    """Render an entity's arbitrary keys, showing each value where it is defined.
 
     A scalar prints as ``key: value``; a table (a section) prints as a ``key:``
     header followed by its cells indented (recursively for nested sections), so a
     deep-merged section reads as a tree rather than a Python dict repr. With
-    *origins* (the ``--origin`` path), each value is annotated ``[label]`` with
-    its defining tier/scope -- per-cell for a table (each leaf its own carrier),
-    mirroring ``config get --origin`` but in the ``config show`` colon style.
+    *show_origin* (the ``--origin`` path), each value is annotated ``[label]``
+    with its defining tier/scope -- per-cell for a table (each leaf its own
+    carrier), mirroring ``config get --origin`` but in the ``config show`` colon
+    style.
+
+    Inherited values are suppressed: a key (or, for a table, a cell) is shown
+    only when its most-local carrying rung is defined at *entity_tier* (see
+    :func:`_defined_here`). The defining ancestor is always on the rendered
+    global-rooted branch, so no value is lost -- it appears once, at its
+    definition site. A table whose every cell is inherited is omitted entirely
+    (header included), so no orphan empty-section header is left behind.
     """
     for key, value in sorted(extra.items()):
-        chain = origins.get(key) if origins else None
+        chain = origins.get(key, [])
         if isinstance(value, dict):
-            print(f"{indent}{key}:")
-            _print_extra_table(f"{indent}  ", value, chain, ())
+            lines = _print_extra_table(f"{indent}  ", value, chain, (), entity_tier, show_origin)
+            if lines:
+                print(f"{indent}{key}:")
+                print("\n".join(lines))
         else:
-            origin = f"  [{_rung_label(chain[0])}]" if chain else ""
+            if chain and not _defined_here(chain[0].tier, entity_tier):
+                continue
+            origin = f"  [{_rung_label(chain[0])}]" if show_origin and chain else ""
             print(f"{indent}{key}: {value}{origin}")
 
 
 def _print_extra_table(
-    indent: str, table: dict[str, object], chain: list[SourceRung] | None, rest: tuple[str, ...]
-) -> None:
-    """Render one section's cells, annotating each leaf with its carrying rung."""
+    indent: str,
+    table: dict[str, object],
+    chain: list[SourceRung],
+    rest: tuple[str, ...],
+    entity_tier: str,
+    show_origin: bool,
+) -> list[str]:
+    """Render one section's cells, returning the lines that survive suppression.
+
+    Each leaf cell is kept only when its most-local carrying rung (found by
+    descending *rest* + the cell's key into each rung's value) is defined at
+    *entity_tier*; an inherited cell is dropped. A nested sub-table is emitted
+    with its header only when at least one of its own cells survives, so no
+    orphan empty-section header remains. With *show_origin*, each surviving leaf
+    is annotated ``[label]`` with its carrying rung.
+    """
+    lines: list[str] = []
     for key in sorted(table):
         value = table[key]
         sub = (*rest, key)
         if isinstance(value, dict):
-            print(f"{indent}{key}:")
-            _print_extra_table(f"{indent}  ", value, chain, sub)
+            child_lines = _print_extra_table(
+                f"{indent}  ", value, chain, sub, entity_tier, show_origin
+            )
+            if child_lines:
+                lines.append(f"{indent}{key}:")
+                lines.extend(child_lines)
         else:
-            origin = ""
-            if chain:
-                for rung in chain:
-                    if _descend_path(rung.value, sub) is not None:
-                        origin = f"  [{_rung_label(rung)}]"
+            winner: SourceRung | None = None
+            for rung in chain:
+                if _descend_path(rung.value, sub) is not None:
+                    winner = rung
 
-                        break
-            print(f"{indent}{key}: {value}{origin}")
+                    break
+            if winner is not None and not _defined_here(winner.tier, entity_tier):
+                continue
+            origin = f"  [{_rung_label(winner)}]" if show_origin and winner is not None else ""
+            lines.append(f"{indent}{key}: {value}{origin}")
+
+    return lines
 
 
 def _print_scope_hooks(indent: str, spec: HookSpec, show_origin: bool, scope: str) -> None:
@@ -167,15 +222,18 @@ def _print_config_slice(slice: ConfigSlice, show_origin: bool, hooks: bool) -> N
     """Render a global-rooted pruned config slice as text.
 
     One tree from global down to *depth_limit*, with ``--origin`` annotating
-    each value's source and ``--hooks`` rendering accumulated inline hooks at
-    every tier. Both flags are ungated (work in all modes, per Q6).
+    each shown value's source and ``--hooks`` rendering accumulated inline hooks
+    at every tier. Both flags are ungated (work in all modes, per Q6). Inherited
+    values are suppressed at descendants: each value is rendered only at its
+    defining tier, so the text view shows where things are defined rather than
+    echoing the effective (inherited) value at every descendant.
     """
     if slice.default_base_branch:
         origin = (
             f"  [{slice.base_branch_source}]" if show_origin and slice.base_branch_source else ""
         )
         print(f"default base_branch: {slice.default_base_branch}{origin}")
-    _print_extra("", slice.global_extra, slice.global_extra_origins if show_origin else None)
+    _print_extra("", slice.global_extra, slice.global_extra_origins, "global", show_origin)
     if hooks:
         _print_scope_hooks("", slice.global_hooks, show_origin, "global")
     for ws in slice.workspaces:
@@ -193,7 +251,7 @@ def _print_slice_workspace(
     if ws.entry.base_branch:
         bb_origin = f"  [{ws.base_branch_source}]" if show_origin and ws.base_branch_source else ""
         print(f"{indent}  base_branch: {ws.entry.base_branch}{bb_origin}")
-    _print_extra(f"{indent}  ", ws.entry.extra, ws.extra_origins if show_origin else None)
+    _print_extra(f"{indent}  ", ws.entry.extra, ws.extra_origins, "workspace", show_origin)
     if hooks:
         _print_scope_hooks(f"{indent}  ", ws.entry.hooks, show_origin, "workspace")
     for project in ws.projects:
@@ -203,15 +261,21 @@ def _print_slice_workspace(
 def _print_slice_project(
     project: ResolvedProject, indent: str, show_origin: bool, hooks: bool
 ) -> None:
-    """Render one project node with origin/hooks, descending its pruned worktrees."""
+    """Render one project node with origin/hooks, descending its pruned worktrees.
+
+    ``base_branch`` is shown only when defined at the project tier (not
+    inherited from the workspace or global default); the defining ancestor
+    carries it above. Inherited arbitrary keys are likewise suppressed (see
+    :func:`_print_extra`).
+    """
     inert = "" if project.exists else "  (no .git on disk)"
     print(f"{indent}project {project.name}: {project.dir}{inert}")
     if project.description:
         print(f"{indent}  description: {project.description}")
-    if project.effective_base_branch:
+    if project.effective_base_branch and project.base_branch_source == "project":
         origin = f"  [{project.base_branch_source}]" if show_origin else ""
         print(f"{indent}  base_branch: {project.effective_base_branch}{origin}")
-    _print_extra(f"{indent}  ", project.extra, project.extra_origins if show_origin else None)
+    _print_extra(f"{indent}  ", project.extra, project.extra_origins, "project", show_origin)
     if hooks:
         _print_scope_hooks(f"{indent}  ", project.hooks, show_origin, "project")
     for worktree in project.worktrees:
@@ -225,7 +289,7 @@ def _print_slice_worktree(
     print(f"{indent}worktree {worktree.name}: {worktree.dir}")
     if worktree.description:
         print(f"{indent}  description: {worktree.description}")
-    _print_extra(f"{indent}  ", worktree.extra, worktree.extra_origins if show_origin else None)
+    _print_extra(f"{indent}  ", worktree.extra, worktree.extra_origins, "worktree", show_origin)
     if hooks:
         _print_scope_hooks(f"{indent}  ", worktree.hooks, show_origin, "worktree")
 
