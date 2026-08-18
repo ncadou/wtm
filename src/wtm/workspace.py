@@ -3,7 +3,7 @@
 CLI-agnostic orchestration, like :mod:`wtm.project` / :mod:`wtm.worktree`: methods
 return result objects and never print, log, or drive the shell (that is
 :mod:`wtm.cli`'s job). Registry-mutating verbs (add/delete/set/rename/default)
-delegate every write to :mod:`wtm.registry`, the single write seam; the
+delegate every write to :mod:`wtm.config` (the single config authority); the
 lifecycle verbs (enter/leave) fire the ``workspace-enter`` / ``workspace-leave``
 events via :func:`wtm.hooks.run_workspace_hooks`.
 
@@ -28,8 +28,8 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from wtm import config_writer, git, registry
-from wtm.config import Config, Scope
+from wtm import git
+from wtm.config import Config, ConfigAddress, Scope
 from wtm.core import (
     WtmError,
     abspath,
@@ -139,7 +139,7 @@ class Workspaces:
         system entry or reuses another workspace's path.
         """
         _valid_workspace_name(name)
-        scopes = registry.declaring_scopes(name)
+        scopes = self.config.declaring_scopes(name)
         if Scope.USER in scopes:
             raise WtmError(
                 f"workspace '{name}' already declared (user scope); "
@@ -150,7 +150,7 @@ class Workspaces:
         missing, created = self._materialise(resolved, create=create)
         duplicate_of = self._path_owner(resolved)
 
-        registry.add_workspace(name, persist, description=description, base_branch=base_branch)
+        self.config.add_workspace(name, persist, description=description, base_branch=base_branch)
 
         return WorkspaceAdded(
             name=name,
@@ -164,7 +164,7 @@ class Workspaces:
 
     def delete(self, name: str) -> WorkspaceDeleted:
         """Unregister a workspace from the user-scope config (never touches disk)."""
-        scopes = registry.declaring_scopes(name)
+        scopes = self.config.declaring_scopes(name)
         if not scopes:
             raise WtmError(f"workspace '{name}' is not declared")
         if Scope.USER not in scopes:
@@ -173,7 +173,7 @@ class Workspaces:
                 "edit the system config to remove it"
             )
 
-        cleared = registry.remove_workspace(name)
+        cleared = self.config.remove_workspace(name)
 
         return WorkspaceDeleted(
             name=name,
@@ -229,31 +229,31 @@ class Workspaces:
         """Write ``path`` to the user-scope registry entry (system-only refused)."""
         self._require_user_scope(name)
         persist, _ = _prepare_path(path)
-        registry.set_workspace(name, path=persist)
+        self.config.set_workspace(name, path=persist)
 
     def _set_registry_scalars(
         self, name: str, *, description: str | None, base_branch: str | None
     ) -> None:
         """Write description/base_branch to the user-scope registry entry."""
         self._require_user_scope(name)
-        registry.set_workspace(name, description=description, base_branch=base_branch)
+        self.config.set_workspace(name, description=description, base_branch=base_branch)
 
     def _set_local_scalars(
         self, ws_dir: Path, *, description: str | None, base_branch: str | None
     ) -> None:
         """Write/clear description/base_branch in ``<ws>/.wtm/config.toml`` (top-level)."""
-        local = ws_dir / ".wtm" / "config.toml"
+        address = ConfigAddress.workspace(ws_dir)
         for key, value in (("description", description), ("base_branch", base_branch)):
             if value is None:
                 continue
             if value == "":
-                config_writer.unset_scalar(local, key)
+                self.config.unset_value(address, key)
             else:
-                config_writer.set_scalar(local, key, value)
+                self.config.set_value(address, key, value)
 
     def _require_user_scope(self, name: str) -> None:
         """Raise unless *name* is declared at user scope (route system-only via add)."""
-        scopes = registry.declaring_scopes(name)
+        scopes = self.config.declaring_scopes(name)
         if Scope.USER in scopes:
             return
         if scopes:
@@ -266,25 +266,25 @@ class Workspaces:
     def rename(self, old: str, new: str) -> WorkspaceRenamed:
         """Rename the registry key (never moves the directory on disk)."""
         _valid_workspace_name(new)
-        old_scopes = registry.declaring_scopes(old)
+        old_scopes = self.config.declaring_scopes(old)
         if Scope.USER not in old_scopes:
             if old_scopes:
                 raise WtmError(
                     f"workspace '{old}' is declared only at system scope; cannot rename it"
                 )
             raise WtmError(f"workspace '{old}' is not declared")
-        if registry.declaring_scopes(new):
+        if self.config.declaring_scopes(new):
             raise WtmError(f"workspace '{new}' already declared")
 
-        fixed = registry.rename_workspace(old, new)
+        fixed = self.config.rename_workspace(old, new)
 
         return WorkspaceRenamed(old=old, new=new, fixed_default=fixed)
 
     def default_set(self, name: str) -> None:
         """Set the top-level ``default_workspace`` (name must be declared)."""
-        if not registry.declaring_scopes(name):
+        if not self.config.declaring_scopes(name):
             raise WtmError(f"workspace '{name}' is not declared")
-        registry.set_default(name)
+        self.config.set_default(name)
 
     def default_show(self) -> str | None:
         """Return the current ``default_workspace``, or ``None`` when unset."""
@@ -292,7 +292,7 @@ class Workspaces:
 
     def default_clear(self) -> None:
         """Remove the top-level ``default_workspace`` key."""
-        registry.clear_default()
+        self.config.clear_default()
 
     # --- read view -----------------------------------------------------------
 

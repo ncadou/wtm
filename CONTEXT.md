@@ -123,17 +123,30 @@ the target project, it fires that worktree's `leave` first
 not cascade: `project enter` fires `project-enter` across its scopes but never
 `workspace-enter`.
 
-**Registry write seam**:
-`wtm` reads config everywhere but writes through only two seams. `wtm.registry`
-mutates the *user-scope* file -- its `[workspaces.*]` entries (paths + per-project
-annotations) and top-level `default_workspace` / `base_branch` -- while
-`wtm.config_writer` mutates the *entity-local* `.wtm/config.toml` files
-(workspace and project scope). Both use a comment-preserving `tomlkit` round-trip
-with an atomic replace; neither writes system or worktree config. Scalar writes
-(`workspace set`, `project set`) target the most-local home that already exists:
-the entity's own `.wtm/config.toml` when its dir is present, else the user-file
-entry/annotation. The `add`/`set`/`rename`/`delete`/`default` verbs refuse
-system-only names (for the registry-entry writes) and `WTM_NO_CONFIG`.
+**Config authority**:
+`wtm.config` is the single module that reads or writes any `.wtm` config -- no
+other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It
+loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
+on `Config`, three write/read tiers: a **generic value facility**
+(`get_value`/`set_value`/`unset_value` over a `ConfigAddress` naming any scope
+plus a bare or tuple key -- the substrate everything else is built on), the
+**typed read view** (the `Workspace`/`ProjectAnnotation`/`HookSpec` dataclasses;
+scalars resolve most-specific-first via declarative cascades over the value
+facility, e.g. `base_branch_provenance`), and the **structural registry
+mutations** (`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
+`set`/`clear_base_branch`, `set_project_annotation`) that write only the user
+file and own their cross-key fixups (a rename follows a dangling
+`default_workspace`). All I/O is one comment-preserving `tomlkit` round-trip with
+an atomic replace; a write does not refresh the loaded snapshot (`wtm` loads
+once, acts, exits). Writes name their target scope explicitly (every scope,
+system and worktree included, is writable); the *most-local home that exists*
+placement -- the entity's own `.wtm/config.toml` when its dir is present, else
+the user-file entry/annotation -- is the calling command's policy
+(`wtm.workspace` / `wtm.project`), not the engine's. Workspace *declarations*
+(`add`/`set --path`/`rename`/`default`) stay user-file-only and refuse
+system-only names. `WTM_NO_CONFIG` suppresses all reads and refuses all writes;
+there is no `WTM_NO_SYSTEM` (point `WTM_SYSTEM_CONFIG` at an absent path to skip
+system scope).
 
 **Scope**:
 Where a hook/config is discovered/declared, from most general to most specific:

@@ -13,8 +13,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from wtm import config_writer, git, registry
-from wtm.config import Config, ProjectAnnotation, Scope, resolve_project_dir
+from wtm import git
+from wtm.config import Config, ConfigAddress, ProjectAnnotation, Scope, resolve_project_dir
 from wtm.core import (
     WtmError,
     current_dir,
@@ -173,14 +173,14 @@ class Project:
         fields = (("description", description), ("base_branch", base_branch))
 
         if project_dir.is_dir():
-            local = project_dir / ".wtm" / "config.toml"
+            address = ConfigAddress.project(project_dir)
             for key, value in fields:
                 if value is None:
                     continue
                 if value == "":
-                    config_writer.unset_table_scalar(local, "project", key)
+                    self.config.unset_value(address, ("project", key))
                 else:
-                    config_writer.set_table_scalar(local, "project", key, value)
+                    self.config.set_value(address, ("project", key), value)
 
             return ProjectSet(name=project_dir.name, dir=project_dir, local=True)
 
@@ -189,14 +189,14 @@ class Project:
             raise WtmError(
                 f"project dir does not exist and is not under a declared workspace: {project_dir}"
             )
-        if Scope.USER not in registry.declaring_scopes(ws.name):
+        if Scope.USER not in self.config.declaring_scopes(ws.name):
             raise WtmError(
                 f"project dir does not exist and workspace '{ws.name}' is not "
                 "declared at user scope; create the project dir first"
             )
         for key, value in fields:
             if value is not None:
-                registry.set_project_annotation(ws.name, project_dir.name, key, value or None)
+                self.config.set_project_annotation(ws.name, project_dir.name, key, value or None)
 
         return ProjectSet(name=project_dir.name, dir=project_dir, local=False)
 

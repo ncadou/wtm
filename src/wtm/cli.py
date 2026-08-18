@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 import typer
 from typer.core import TyperGroup
 
-from wtm import git, registry
+from wtm import git
 from wtm.config import Config, HookSpec, ResolvedConfig, resolve_project_dir
 from wtm.core import (
     WtmError,
@@ -1846,7 +1846,7 @@ def config_show(
     view = config.resolve_view()
     print(f"active workspace: {config.active or '(none)'}")
     if config.default_base_branch:
-        origin = f"  [{registry.base_branch_source().value}]" if sources else ""
+        origin = f"  [{config.base_branch_source().value}]" if sources else ""
         print(f"default base_branch: {config.default_base_branch}{origin}")
 
     print("workspaces:")
@@ -1917,7 +1917,7 @@ def config_base_branch(
     if clear:
         if value is not None:
             raise WtmError("--clear takes no VALUE")
-        registry.clear_base_branch()
+        ctx.obj.config.clear_base_branch()
         log("cleared base_branch")
 
         return
@@ -1927,12 +1927,12 @@ def config_base_branch(
             print("(none set)")
 
             return
-        source = registry.base_branch_source()
+        source = ctx.obj.config.base_branch_source()
         marker = f" [{source.value}]" if source is not None else ""
         print(f"{current}{marker}")
 
         return
-    registry.set_base_branch(value)
+    ctx.obj.config.set_base_branch(value)
     log(f"base_branch set to '{value}'")
 
 

@@ -97,7 +97,7 @@ def _config_env(root: Path, workspace_hooks_dir: Path | None = None) -> dict[str
     """Env deltas pointing wtm at the sole-workspace config for *root*."""
     return {
         "WTM_CONFIG": str(_write_config(root, workspace_hooks_dir)),
-        "WTM_NO_SYSTEM": "1",
+        "WTM_SYSTEM_CONFIG": str(root / "_no_system_config.toml"),
         "WTM_WORKSPACE": "ws",
     }
 
@@ -121,7 +121,7 @@ def _isolated_env(
     root.mkdir(parents=True, exist_ok=True)
     env = {
         "WTM_CONFIG": str(_write_config(root, workspace_hooks_dir)),
-        "WTM_NO_SYSTEM": "1",
+        "WTM_SYSTEM_CONFIG": str(root / "_no_system_config.toml"),
         "WTM_USER_HOOKS_DIR": str(hooks_dir if hooks_dir is not None else root / "_no_user_hooks"),
         "WTM_SYSTEM_HOOKS_DIR": str(
             system_hooks_dir if system_hooks_dir is not None else root / "_no_system_hooks"
@@ -803,7 +803,7 @@ def test_locate_completion_context_spans_workspace(
     _seed_index_worktree(roots[0], "datactl", "feat")  # dev/datactl
     _seed_index_worktree(roots[1], "api", "feat")  # prod/api (same worktree name)
     monkeypatch.setenv("WTM_CONFIG", str(config))
-    monkeypatch.setenv("WTM_NO_SYSTEM", "1")
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(tmp_path / "_no_system_config.toml"))
     monkeypatch.delenv("WTM_WORKSPACE", raising=False)  # let the config's workspaces stand
     from wtm.cli import _complete_locate
 
@@ -822,7 +822,7 @@ def test_locate_completion_context_caps_at_two(
     for project in ("a", "b", "c", "d"):
         _seed_index_worktree(roots[0], project, "shared")
     monkeypatch.setenv("WTM_CONFIG", str(config))
-    monkeypatch.setenv("WTM_NO_SYSTEM", "1")
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(tmp_path / "_no_system_config.toml"))
     monkeypatch.delenv("WTM_WORKSPACE", raising=False)  # let the config's workspaces stand
     from wtm.cli import _complete_locate
 
@@ -3285,7 +3285,7 @@ def _run_multi(
     """Run wtm against a hand-written multi-workspace config."""
     env = {
         "WTM_CONFIG": str(config),
-        "WTM_NO_SYSTEM": "1",
+        "WTM_SYSTEM_CONFIG": str(config.parent / "_no_system_config.toml"),
         "WTM_USER_HOOKS_DIR": str(config.parent / "_no_user_hooks"),
         "WTM_SYSTEM_HOOKS_DIR": str(config.parent / "_no_system_hooks"),
         "GIT_AUTHOR_NAME": "t",

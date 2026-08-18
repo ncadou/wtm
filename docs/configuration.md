@@ -18,11 +18,14 @@ expansion.
 
 Most config is hand-edited; a few defaults have management commands that write
 config for you (a comment-preserving `tomlkit` round-trip with an atomic
-replace). Two seams do the writing: `wtm.registry` owns every write to the
-**user file** (the `[workspaces.*]` registry entries, top-level
-`default_workspace` and `base_branch`), and `wtm.config_writer` owns the
-**entity-local** `.wtm/config.toml` files (workspace and project scope). No
-command writes system or worktree config.
+replace). All reads and writes go through one authority — `wtm.config` — the
+only module that touches a `.wtm/config.toml` file. It offers a generic value
+facility (read/write any scalar at any named scope), a typed read view, and the
+named structural registry mutations (`add`/`set`/`rename`/`delete` workspace,
+`default_workspace`, global `base_branch`, project annotations) that write the
+**user file** and own their cross-key fixups (a rename follows a dangling
+`default_workspace`). Writes name their target scope explicitly; the
+"most-local home that exists" placement below is the calling command's policy.
 
 | default | command | writes |
 |---|---|---|
@@ -85,9 +88,8 @@ scopes); per-project scalars are deliberately *not* env-settable.
 
 - `WTM_WORKSPACE` — select the active workspace by name
 - `WTM_CONFIG` — user config file path (replaces the `$XDG_CONFIG_HOME` default)
-- `WTM_SYSTEM_CONFIG` — system config file path (default `/etc/wtm/config.toml`)
-- `WTM_NO_SYSTEM` — ignore system-scope config + hooks
-- `WTM_NO_CONFIG` — ignore all config files (env + CLI + defaults only)
+- `WTM_SYSTEM_CONFIG` — system config file path (default `/etc/wtm/config.toml`; point it at an absent path to skip system scope)
+- `WTM_NO_CONFIG` — ignore all config files for reads, and refuse all config writes (env + CLI + defaults only)
 - `WTM_SYSTEM_HOOKS_DIR` / `WTM_USER_HOOKS_DIR` — builtin hooks dir for that scope
 - `WTM_NO_HOOKS` — disable all hook firing
 - `XDG_CONFIG_HOME` — user config + user hooks location
