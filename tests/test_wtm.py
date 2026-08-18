@@ -1034,6 +1034,96 @@ def test_create_rejects_traversal(root: Path) -> None:
     assert "may not contain '..'" in res.stderr
 
 
+def _advance_origin(root: Path, project: str) -> str:
+    """Add a commit to *project*'s origin source repo; return its short sha.
+
+    :func:`_seed_repo` bare-clones from ``_sources/<project>``, so that source
+    is the project's origin. Advancing it simulates an origin that moved ahead
+    of the local bare repo's ``origin/*`` refs -- the state ``create -f`` must
+    catch up to before forking a new branch.
+    """
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(root / "_gitconfig"),
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    source = root / "_sources" / project
+    (source / "later.txt").write_text("later\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "later"], check=True, env=git_env)
+    sha = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+        env=git_env,
+    ).stdout.strip()
+
+    return sha
+
+
+def test_create_fetch_forks_from_latest_origin(root: Path) -> None:
+    # -f fetches origin before resolution, so a new branch includes the commit
+    # the origin gained after the clone; without -f it would fork from the stale
+    # origin/HEAD and miss it.
+    _seed_repo(root, "alpha")
+    _advance_origin(root, "alpha")
+    res = run("create", "alpha", "feat", "-f", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "fetched origin" in res.stderr
+    wt = root / "alpha" / "worktrees" / "feat"
+    assert (wt / "later.txt").exists()
+
+
+def test_create_without_fetch_forks_from_stale_origin(root: Path) -> None:
+    # The mirror of the above: no -f means no catch-up, so the post-clone commit
+    # is absent from the new branch.
+    _seed_repo(root, "alpha")
+    _advance_origin(root, "alpha")
+    res = run("create", "alpha", "feat", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "fetched origin" not in res.stderr
+    assert not (root / "alpha" / "worktrees" / "feat" / "later.txt").exists()
+
+
+def test_create_fetch_without_origin_warns_and_continues(root: Path) -> None:
+    # An origin-less project (project new) with -f: the fetch is a no-op, warned,
+    # and creation proceeds normally.
+    assert run("project", "new", "alpha", root=root).returncode == 0
+    res = run("create", "alpha", "main", "-f", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "no origin remote; skipped fetch" in res.stderr
+    assert (root / "alpha" / "worktrees" / "main").is_dir()
+
+
+def test_create_fetch_failure_aborts_without_residue(root: Path) -> None:
+    # A broken origin makes the fetch fail; -f must abort before any filesystem
+    # mutation, leaving no worktree dir behind.
+    _seed_repo(root, "alpha")
+    git_dir = root / "alpha" / ".git"
+    subprocess.run(
+        ["git", "-C", str(git_dir), "remote", "set-url", "origin", "/no/such/repo"],
+        check=True,
+    )
+    res = run("create", "alpha", "feat", "-f", root=root)
+    assert res.returncode == 1
+    assert not (root / "alpha" / "worktrees" / "feat").exists()
+
+
+def test_enter_create_fetch_forks_from_latest_origin(root: Path, tmp_path: Path) -> None:
+    # enter --create shares create's path, so -f fetches there too.
+    _seed_repo(root, "alpha")
+    _advance_origin(root, "alpha")
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "-c", "-f", "alpha", "feat", root=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert "fetched origin" in res.stderr
+    assert (root / "alpha" / "worktrees" / "feat" / "later.txt").exists()
+
+
 def test_create_cd_emits_to_shell_file(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     shell_file = tmp_path / "cd"

@@ -53,6 +53,7 @@ class WorktreeCreated:
     strategy: BranchStrategy
     branch: str
     base: str | None  # base ref for NEW_BRANCH, else None
+    fetched: bool  # whether -f/--fetch actually fetched origin (False if skipped)
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ class Worktree:
         branch: str | None,
         base: str | None,
         destdir: str | None,
+        do_fetch: bool,
         do_install: bool,
         do_enter: bool,
         strict: bool,
@@ -107,6 +109,12 @@ class Worktree:
         Fires ``pre-create`` before any filesystem mutation, then (post-move)
         the ``post-create`` event, then ``install`` (when *do_install*), then
         ``enter`` (when *do_enter*, i.e. the caller cds into the new worktree).
+
+        When *do_fetch*, ``origin`` is fetched (and its HEAD refreshed) after the
+        ``pre-create`` veto but before any filesystem mutation, so branch
+        resolution forks from the freshest origin state. A missing ``origin``
+        remote is skipped (reported via :attr:`WorktreeCreated.fetched`); a
+        failing fetch aborts before any residue is left.
 
         A brand-new branch forks from *base* if given (``--base/--off``), else
         the project's configured base branch, else ``origin/HEAD``/``HEAD``.
@@ -142,6 +150,16 @@ class Worktree:
             git_common_dir=git_dir,
         )
         run_hooks("pre-create", pre_context, self.config, strict=strict, hcwd=project_dir)
+
+        # Fetch after the pre-create veto but before any filesystem mutation, so
+        # branch resolution below sees the freshest origin refs. A missing origin
+        # is a no-op (fetched stays False); a failing fetch raises and aborts here,
+        # leaving no dir behind.
+        fetched = False
+        if do_fetch and "origin" in git.list_remotes(git_dir):
+            git.fetch(git_dir, "origin")
+            git.set_head(git_dir, "origin")
+            fetched = True
 
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +201,7 @@ class Worktree:
             run_hooks("enter", context, self.config, strict=strict)
 
         return WorktreeCreated(
-            context=context, strategy=strategy, branch=branch, base=resolved_base
+            context=context, strategy=strategy, branch=branch, base=resolved_base, fetched=fetched
         )
 
     def _configured_base(self, project_dir: Path) -> str | None:

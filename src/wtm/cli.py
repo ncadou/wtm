@@ -887,6 +887,9 @@ def create(
     destdir: str | None = typer.Option(None, "-d", "--dir", help="Destination dir"),
     do_cd: bool = typer.Option(False, "-c", "--cd", help="cd into the new worktree"),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks too"),
+    do_fetch: bool = typer.Option(
+        False, "-f", "--fetch", help="Fetch origin first so a new branch forks from the latest"
+    ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
     """Add a worktree (and branch) to a project."""
@@ -895,10 +898,15 @@ def create(
         branch=branch,
         base=base,
         destdir=destdir,
+        do_fetch=do_fetch,
         do_install=do_install,
         do_enter=do_cd,
         strict=strict,
     )
+    if do_fetch and not result.fetched:
+        warn("no origin remote; skipped fetch")
+    elif result.fetched:
+        log("fetched origin")
     log(_describe_create(result))
     if do_cd:
         dest = result.context.dir
@@ -1081,6 +1089,12 @@ def enter(
         autocompletion=_complete_branch,
     ),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks first"),
+    do_fetch: bool = typer.Option(
+        False,
+        "-f",
+        "--fetch",
+        help="With --create, fetch origin first so a new branch forks from the latest",
+    ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
     """cd into a worktree, project, or workspace, resolved from a locator (experiment).
@@ -1114,10 +1128,15 @@ def enter(
         branch=branch,
         base=base,
         destdir=None,
+        do_fetch=do_fetch,
         do_install=do_install,
         do_enter=True,
         strict=strict,
     )
+    if do_fetch and not result.fetched:
+        warn("no origin remote; skipped fetch")
+    elif result.fetched:
+        log("fetched origin")
     log(_describe_create(result))
     dest = result.context.dir
     emit_shell(cd=dest, env=worktree.env_for_dir(dest))

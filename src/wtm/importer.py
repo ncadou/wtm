@@ -511,6 +511,7 @@ class Import:
                     branch=spec.branch,
                     base=None,
                     destdir=None,
+                    do_fetch=False,
                     do_install=False,
                     do_enter=False,
                     strict=strict,
