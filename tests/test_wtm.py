@@ -749,11 +749,12 @@ def test_locate_completion_global_union_and_labels(
     monkeypatch.chdir(root)  # the locator is global; cwd does not scope it
     from wtm.cli import _complete_locate
 
-    # Slot 0 is the whole universe: every worktree, project, and workspace.
+    # Slot 0 is the whole universe: every worktree, project, and workspace. A
+    # worktree carries its project context; a single-workspace project stays bare.
     assert _labels(_complete_locate(_Ctx(()), "")) == {
         "alpha": "project",
         "beta": "project",
-        "feat": "worktree",
+        "feat": "worktree in alpha",
         "ws": "workspace",
     }
 
@@ -766,8 +767,8 @@ def test_locate_completion_collision_hint(root: Path, monkeypatch: pytest.Monkey
     _use_config(monkeypatch, root)
     from wtm.cli import _complete_locate
 
-    # 'shared' names two worktrees -> the winning tier's collision count shows.
-    assert _labels(_complete_locate(_Ctx(()), ""))["shared"] == "worktree (2)"
+    # 'shared' names two worktrees -> the winning tier enumerates their contexts.
+    assert _labels(_complete_locate(_Ctx(()), ""))["shared"] == "worktree in alpha, beta"
 
 
 def test_locate_completion_narrows_by_qualifier(
@@ -781,7 +782,66 @@ def test_locate_completion_narrows_by_qualifier(
     from wtm.cli import _complete_locate
 
     # A leading project qualifier narrows the next slot to that project's worktrees.
-    assert _labels(_complete_locate(_Ctx(("alpha",)), "")) == {"feat": "worktree"}
+    assert _labels(_complete_locate(_Ctx(("alpha",)), "")) == {"feat": "worktree in alpha"}
+
+
+def _seed_index_worktree(ws_root: Path, project: str, name: str) -> None:
+    """Scaffold a project + worktree on disk for the git-free locator index.
+
+    :func:`build_index` only reads dirs holding a ``.git``, so a bare marker
+    suffices -- no real git worktree needed. Used by the multi-workspace label
+    tests, which exercise :func:`_complete_locate` (filesystem-only) directly.
+    """
+    (ws_root / project / ".git").mkdir(parents=True, exist_ok=True)
+    (ws_root / project / "worktrees" / name / ".git").mkdir(parents=True, exist_ok=True)
+
+
+def test_locate_completion_context_spans_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["dev", "prod"])
+    _seed_index_worktree(roots[0], "datactl", "feat")  # dev/datactl
+    _seed_index_worktree(roots[1], "api", "feat")  # prod/api (same worktree name)
+    monkeypatch.setenv("WTM_CONFIG", str(config))
+    monkeypatch.setenv("WTM_NO_SYSTEM", "1")
+    monkeypatch.delenv("WTM_WORKSPACE", raising=False)  # let the config's workspaces stand
+    from wtm.cli import _complete_locate
+
+    # >1 workspace declared -> the context carries workspace/project (slash form);
+    # 'feat' collides across workspaces, so both contexts enumerate.
+    labels = _labels(_complete_locate(_Ctx(()), ""))
+    assert labels["datactl"] == "project in dev"
+    assert labels["api"] == "project in prod"
+    assert labels["feat"] == "worktree in dev/datactl, prod/api"
+
+
+def test_locate_completion_context_caps_at_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["ws"])
+    for project in ("a", "b", "c", "d"):
+        _seed_index_worktree(roots[0], project, "shared")
+    monkeypatch.setenv("WTM_CONFIG", str(config))
+    monkeypatch.setenv("WTM_NO_SYSTEM", "1")
+    monkeypatch.delenv("WTM_WORKSPACE", raising=False)  # let the config's workspaces stand
+    from wtm.cli import _complete_locate
+
+    # A worktree name across four projects (single workspace) -> two contexts then
+    # a '+N more' tail.
+    assert _labels(_complete_locate(_Ctx(()), ""))["shared"] == "worktree in a, b +2 more"
+
+
+def test_locate_completion_context_with_shadow(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "beta", root=root)  # worktree named like project 'beta'
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_locate
+
+    # 'beta' wins as a worktree (context shown); the project role it shadows trails.
+    assert _labels(_complete_locate(_Ctx(()), ""))["beta"] == "worktree in alpha (also project)"
 
 
 def test_hook_target_labels_event(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -841,10 +901,11 @@ def test_zsh_completion_renders_kind_labels(root: Path) -> None:
     _seed_repo(root, "beta")
     run("create", "alpha", "feat", root=root)
     out = _complete_zsh(root, args="wtm enter ", cwd=repo)
-    # zsh format is "value":"help"; each candidate carries its kind label.
+    # zsh format is "value":"help"; each candidate carries its kind label, and the
+    # locator winner also carries its location context.
     assert '"alpha":"project"' in out
     assert '"beta":"project"' in out
-    assert '"feat":"worktree"' in out
+    assert '"feat":"worktree in alpha"' in out
 
 
 # --- branch completion (-b) --------------------------------------------------
