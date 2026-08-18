@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 import typer
 from typer.core import TyperGroup
 
-from wtm import git
+from wtm import git, registry
 from wtm.config import Config, resolve_project_dir
 from wtm.core import (
     WtmError,
@@ -391,7 +391,7 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str
 
 
 project_app = typer.Typer(
-    help="Project-level operations (enter, leave, new, clone, list, resolve).",
+    help="Project-level operations (enter, leave, new, clone, list, resolve, set, show).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -649,6 +649,60 @@ def project_leave(
     log(f"left project '{result.name}'")
     cd_dir = result.cd_dir if (not no_cd and result.cd_dir is not None) else None
     emit_shell(cd=cd_dir, env={}, fallback=False)
+
+
+@project_app.command(name="set")
+def project_set(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_project,
+    ),
+    base_branch: str | None = typer.Option(
+        None, "-b", "--base-branch", help="Base branch (empty clears it)"
+    ),
+    description: str | None = typer.Option(
+        None, "-d", "--description", help="Description (empty clears it)"
+    ),
+) -> None:
+    """Annotate a project's base_branch / description (partial update).
+
+    Writes ``<project>/.wtm/config.toml`` when the project dir exists, else the
+    user-scope registry annotation. A field passed as ``""`` clears it.
+    """
+    workspace, project = split_workspace_project(args or [])
+    result = ctx.obj.project.set(
+        workspace, project, base_branch=base_branch, description=description
+    )
+    home = result.dir / ".wtm" / "config.toml" if result.local else "user config"
+    log(f"updated project '{result.name}' ({home})")
+
+
+@project_app.command(name="show")
+def project_show(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_project,
+    ),
+) -> None:
+    """Show a project's detail (dir, description, base_branch + provenance, worktrees)."""
+    workspace, project = split_workspace_project(args or [])
+    result = ctx.obj.project.show(workspace, project)
+    exists = "" if result.exists else "  (no .git on disk)"
+    print(f"name: {result.name}")
+    print(f"dir: {result.dir}{exists}")
+    if result.description:
+        print(f"description: {result.description}")
+    if result.base_branch:
+        print(f"base_branch: {result.base_branch}")
+    effective = result.effective_base_branch or "(built-in: origin/HEAD > HEAD > orphan)"
+    print(f"effective base_branch: {effective} [{result.base_branch_source}]")
+    print(f"worktrees: {result.worktree_count}")
 
 
 # --- worktree management -----------------------------------------------------
@@ -1378,7 +1432,12 @@ def workspace_set(
         None, "-b", "--base-branch", help="Base branch (empty clears it)"
     ),
 ) -> None:
-    """Edit an existing user-scope workspace entry in place (partial update)."""
+    """Edit an existing workspace's scalars (partial update).
+
+    ``--path`` always rewrites the user-scope registry entry. ``--description`` /
+    ``--base-branch`` write ``<ws>/.wtm/config.toml`` when the workspace dir
+    exists, else the registry entry.
+    """
     result = ctx.obj.workspaces.set(
         name, path=path, description=description, base_branch=base_branch
     )
@@ -1476,7 +1535,7 @@ def workspace_leave(
 
 
 config_app = typer.Typer(
-    help="Inspect the effective wtm configuration (read-only).",
+    help="Inspect config (show) and manage the global default (base-branch).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -1499,7 +1558,8 @@ def config_show(
     config = ctx.obj.config
     print(f"active workspace: {config.active or '(none)'}")
     if config.default_base_branch:
-        print(f"default base_branch: {config.default_base_branch}")
+        origin = f"  [{registry.base_branch_source().value}]" if sources else ""
+        print(f"default base_branch: {config.default_base_branch}{origin}")
 
     print("workspaces:")
     for name, ws in sorted(config.workspaces.items()):
@@ -1514,6 +1574,42 @@ def config_show(
             bits = [b for b in (ann.description, ann.base_branch) if b]
             detail = f" ({', '.join(bits)})" if bits else ""
             print(f"    project {pname}{detail}{inert}")
+
+
+@config_app.command(name="base-branch")
+def config_base_branch(
+    ctx: typer.Context,
+    value: str | None = typer.Argument(
+        None, metavar="[VALUE]", help="New global base_branch (omit to show)"
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove the top-level base_branch key"),
+) -> None:
+    """Get, set, or clear the global default base_branch (user config).
+
+    With no VALUE it prints the effective global default a real command would
+    take, annotated with the scope it comes from; setting or clearing writes the
+    user-scope top-level ``base_branch``.
+    """
+    if clear:
+        if value is not None:
+            raise WtmError("--clear takes no VALUE")
+        registry.clear_base_branch()
+        log("cleared base_branch")
+
+        return
+    if value is None:
+        current = ctx.obj.config.default_base_branch
+        if not current:
+            print("(none set)")
+
+            return
+        source = registry.base_branch_source()
+        marker = f" [{source.value}]" if source is not None else ""
+        print(f"{current}{marker}")
+
+        return
+    registry.set_base_branch(value)
+    log(f"base_branch set to '{value}'")
 
 
 # Register the hook group last so the "Command groups" panel lists it after

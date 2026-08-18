@@ -100,11 +100,16 @@ not cascade: `project enter` fires `project-enter` across its scopes but never
 `workspace-enter`.
 
 **Registry write seam**:
-`wtm` reads config everywhere but writes only via `wtm.registry`, which mutates
-the *user-scope* file's `[workspaces.*]` entries and top-level
-`default_workspace` (comment-preserving `tomlkit` round-trip, atomic replace).
-The `add`/`set`/`rename`/`delete`/`default` verbs refuse system-only names and
-`WTM_NO_CONFIG`.
+`wtm` reads config everywhere but writes through only two seams. `wtm.registry`
+mutates the *user-scope* file -- its `[workspaces.*]` entries (paths + per-project
+annotations) and top-level `default_workspace` / `base_branch` -- while
+`wtm.config_writer` mutates the *entity-local* `.wtm/config.toml` files
+(workspace and project scope). Both use a comment-preserving `tomlkit` round-trip
+with an atomic replace; neither writes system or worktree config. Scalar writes
+(`workspace set`, `project set`) target the most-local home that already exists:
+the entity's own `.wtm/config.toml` when its dir is present, else the user-file
+entry/annotation. The `add`/`set`/`rename`/`delete`/`default` verbs refuse
+system-only names (for the registry-entry writes) and `WTM_NO_CONFIG`.
 
 **Scope**:
 Where a hook/config is discovered/declared, from most general to most specific:

@@ -1,17 +1,19 @@
-"""The single write seam for wtm: user-scope registry mutations.
+"""The user-file write seam for wtm: registry + top-level default mutations.
 
-Everything else in :mod:`wtm` reads config (via :mod:`wtm.config`, using stdlib
-``tomllib``); this module is the *only* place that writes it, and it writes only
-the **user-scope** file -- its ``[workspaces.*]`` registry entries and the
-top-level ``default_workspace`` key. System/project/worktree config stays
-read-only and hand-edited.
+This module owns *all* writes to the **user-scope** config file -- its
+``[workspaces.*]`` registry entries (path/description/base_branch plus per-project
+annotations) and the top-level ``default_workspace`` / ``base_branch`` keys. Its
+sibling :mod:`wtm.config_writer` owns the *entity-local* ``.wtm/config.toml``
+files (workspace and project scope); together they are the only places that write
+config. System/worktree config stays read-only and hand-edited.
 
 Writes are comment- and format-preserving: the user file is re-read fresh with
 ``tomlkit``, the document mutated, and written back atomically (temp file in the
-same directory, then ``os.replace``). Untouched sections -- comments, key order,
-other tables -- survive byte-for-byte. A missing file (and its parent dirs) is
-created on first write. ``WTM_NO_CONFIG`` (ignore all config) makes a write a
-hard error: mutating a file we are told to ignore is contradictory.
+same directory, then ``os.replace`` -- both via :mod:`wtm.config_writer`).
+Untouched sections -- comments, key order, other tables -- survive byte-for-byte.
+A missing file (and its parent dirs) is created on first write. ``WTM_NO_CONFIG``
+(ignore all config) makes a write a hard error: mutating a file we are told to
+ignore is contradictory.
 
 Scope detection reads the raw user and system files directly (``tomllib``), so
 the add/set/rename/delete verbs can tell a user-scope entry from a system-only
@@ -22,21 +24,22 @@ from __future__ import annotations
 
 __all__ = [
     "add_workspace",
+    "base_branch_source",
+    "clear_base_branch",
     "clear_default",
     "declaring_scopes",
     "remove_workspace",
     "rename_workspace",
+    "set_base_branch",
     "set_default",
+    "set_project_annotation",
     "set_workspace",
 ]
-
-import os
-import tempfile
-import tomllib
 
 import tomlkit
 
 from wtm.config import Scope, _flag_env, _read_toml, _system_config_path, _user_config_path
+from wtm.config_writer import load_doc, set_top_level, write_doc
 from wtm.core import WtmError
 
 # --- scope detection (reads) -------------------------------------------------
@@ -64,6 +67,24 @@ def declaring_scopes(name: str) -> set[Scope]:
 def default_workspace() -> str | None:
     """Return the user file's top-level ``default_workspace``, if any."""
     return _read_toml(_user_config_path()).get("default_workspace")
+
+
+def base_branch_source() -> Scope | None:
+    """Return the scope declaring the top-level ``base_branch`` (user wins), or ``None``.
+
+    Reads the raw user and system files so the getter can annotate which scope a
+    real command would take the global default from. ``WTM_NO_SYSTEM`` /
+    ``WTM_NO_CONFIG`` suppress the system / all files, mirroring
+    :meth:`Config.load`.
+    """
+    no_config = _flag_env("WTM_NO_CONFIG")
+    no_system = no_config or _flag_env("WTM_NO_SYSTEM")
+    if not no_config and _read_toml(_user_config_path()).get("base_branch"):
+        return Scope.USER
+    if not no_system and _read_toml(_system_config_path()).get("base_branch"):
+        return Scope.SYSTEM
+
+    return None
 
 
 # --- registry mutations (writes) ---------------------------------------------
@@ -160,7 +181,7 @@ def remove_workspace(name: str) -> bool:
 def set_default(name: str) -> None:
     """Set the top-level ``default_workspace`` key in the user file."""
     doc = _load_user_doc()
-    doc["default_workspace"] = name
+    set_top_level(doc, "default_workspace", name)
     _write_user_doc(doc)
 
 
@@ -171,25 +192,56 @@ def clear_default() -> None:
     _write_user_doc(doc)
 
 
+def set_base_branch(value: str) -> None:
+    """Set the top-level ``base_branch`` (global default fork point) in the user file."""
+    doc = _load_user_doc()
+    set_top_level(doc, "base_branch", value)
+    _write_user_doc(doc)
+
+
+def clear_base_branch() -> None:
+    """Remove the top-level ``base_branch`` key from the user file."""
+    doc = _load_user_doc()
+    doc.pop("base_branch", None)
+    _write_user_doc(doc)
+
+
+def set_project_annotation(workspace: str, project: str, key: str, value: str | None) -> None:
+    """Set (or clear) one project-annotation scalar under a workspace's registry entry.
+
+    Writes ``[workspaces.WORKSPACE.projects.PROJECT] key = value`` into the user
+    file (the user-scope fallback for a project whose dir does not yet exist);
+    a ``None``/empty *value* removes the key. The workspace must already be
+    declared at user scope.
+    """
+    doc = _load_user_doc()
+    entry = _existing_entry(doc, workspace)
+    projects = entry.get("projects")
+    if projects is None:
+        projects = tomlkit.table(is_super_table=True)
+        entry["projects"] = projects
+    annotation = projects.get(project)
+    if annotation is None:
+        annotation = tomlkit.table()
+        projects[project] = annotation
+    if value:
+        annotation[key] = value
+    else:
+        annotation.pop(key, None)
+    _write_user_doc(doc)
+
+
 # --- document helpers --------------------------------------------------------
 
 
 def _load_user_doc() -> tomlkit.TOMLDocument:
     """Read the user file fresh with tomlkit (empty document when absent).
 
-    Refuses under ``WTM_NO_CONFIG`` (writing a file we are told to ignore is a
-    contradiction). A parse error is fatal, mirroring the read path.
+    Delegates to :mod:`wtm.config_writer`, which refuses under ``WTM_NO_CONFIG``
+    (writing a file we are told to ignore is a contradiction) and treats a parse
+    error as fatal, mirroring the read path.
     """
-    if _flag_env("WTM_NO_CONFIG"):
-        raise WtmError("cannot write config while WTM_NO_CONFIG is set")
-    path = _user_config_path()
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return tomlkit.parse(handle.read())
-    except FileNotFoundError:
-        return tomlkit.document()
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise WtmError(f"config error in {path}: {exc}") from exc
+    return load_doc(_user_config_path())
 
 
 def _workspaces_table(doc: tomlkit.TOMLDocument):
@@ -218,17 +270,4 @@ def _existing_entry(doc: tomlkit.TOMLDocument, name: str):
 
 def _write_user_doc(doc: tomlkit.TOMLDocument) -> None:
     """Atomically write *doc* to the user config file (creating parent dirs)."""
-    path = _user_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = tomlkit.dumps(doc)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".wtm-config.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    write_doc(_user_config_path(), doc)

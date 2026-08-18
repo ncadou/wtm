@@ -7,14 +7,14 @@ presentation: methods return data (paths, name lists) and never print or log;
 
 from __future__ import annotations
 
-__all__ = ["Project", "ProjectEntered", "ProjectLeft"]
+__all__ = ["Project", "ProjectEntered", "ProjectLeft", "ProjectSet", "ProjectShown"]
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from wtm import git
-from wtm.config import Config, resolve_project_dir
+from wtm import config_writer, git, registry
+from wtm.config import Config, ProjectAnnotation, Scope, Workspace, resolve_project_dir
 from wtm.core import (
     WtmError,
     current_dir,
@@ -41,6 +41,29 @@ class ProjectLeft:
     name: str
     cd_dir: Path | None  # None means "stay put"
     cascaded: bool  # a worktree 'leave' fired first
+
+
+@dataclass(frozen=True)
+class ProjectSet:
+    """Result of :meth:`Project.set`: what was edited and where."""
+
+    name: str
+    dir: Path
+    local: bool  # True: wrote <project>/.wtm/config.toml; False: the registry annotation
+
+
+@dataclass(frozen=True)
+class ProjectShown:
+    """Result of :meth:`Project.show`: a read-only per-project detail view."""
+
+    name: str
+    dir: Path
+    exists: bool
+    description: str | None
+    base_branch: str | None  # the project-tier annotation value, if any
+    effective_base_branch: str | None  # after the full resolution chain
+    base_branch_source: str  # project | workspace | global | (none)
+    worktree_count: int
 
 
 class Project:
@@ -123,6 +146,105 @@ class Project:
             "WTM_WORKSPACE": ws.name if ws is not None else "",
             "WTM_WORKSPACE_DIR": str(ws.path if ws is not None else project_dir.parent),
         }
+
+    # --- annotation ----------------------------------------------------------
+
+    def set(
+        self,
+        workspace: str | None,
+        project: str | None,
+        *,
+        base_branch: str | None,
+        description: str | None,
+    ) -> ProjectSet:
+        """Edit a project's annotation scalars (base_branch / description).
+
+        Writes the project-local ``<project>/.wtm/config.toml`` ``[project]``
+        table when the project dir exists, else falls back to the user-scope
+        registry annotation ``[workspaces.WS.projects.PROJECT]`` -- the most-local
+        home that exists. The fallback requires the containing workspace to be
+        declared at user scope. A field passed as ``""`` clears it; at least one
+        field must be given.
+        """
+        if base_branch is None and description is None:
+            raise WtmError("nothing to set (pass --base-branch or --description)")
+
+        project_dir = resolve_project_dir(self.config, workspace, project)
+        fields = (("description", description), ("base_branch", base_branch))
+
+        if project_dir.is_dir():
+            local = project_dir / ".wtm" / "config.toml"
+            for key, value in fields:
+                if value is None:
+                    continue
+                if value == "":
+                    config_writer.unset_table_scalar(local, "project", key)
+                else:
+                    config_writer.set_table_scalar(local, "project", key, value)
+
+            return ProjectSet(name=project_dir.name, dir=project_dir, local=True)
+
+        ws = self.config.workspace_of(project_dir)
+        if ws is None:
+            raise WtmError(
+                f"project dir does not exist and is not under a declared workspace: {project_dir}"
+            )
+        if Scope.USER not in registry.declaring_scopes(ws.name):
+            raise WtmError(
+                f"project dir does not exist and workspace '{ws.name}' is not "
+                "declared at user scope; create the project dir first"
+            )
+        for key, value in fields:
+            if value is not None:
+                registry.set_project_annotation(ws.name, project_dir.name, key, value or None)
+
+        return ProjectSet(name=project_dir.name, dir=project_dir, local=False)
+
+    def show(self, workspace: str | None, project: str | None) -> ProjectShown:
+        """Return a read-only detail view for a project (its resolved annotation)."""
+        project_dir = resolve_project_dir(self.config, workspace, project)
+        ws = (
+            self.config.workspaces.get(workspace)
+            if workspace is not None
+            else self.config.workspace_of(project_dir)
+        )
+        annotation = (
+            self.config.project_annotation(ws, project_dir.name)
+            if ws is not None
+            else ProjectAnnotation()
+        )
+        effective, source = self._base_branch_provenance(ws, annotation)
+
+        return ProjectShown(
+            name=project_dir.name,
+            dir=project_dir,
+            exists=(project_dir / ".git").is_dir(),
+            description=annotation.description,
+            base_branch=annotation.base_branch,
+            effective_base_branch=effective,
+            base_branch_source=source,
+            worktree_count=len(self._worktrees(workspace, project)),
+        )
+
+    def _base_branch_provenance(
+        self, ws: Workspace | None, annotation: ProjectAnnotation
+    ) -> tuple[str | None, str]:
+        """Resolve the effective base_branch and the tier it came from."""
+        if annotation.base_branch:
+            return annotation.base_branch, "project"
+        if ws is not None and ws.base_branch:
+            return ws.base_branch, "workspace"
+        if self.config.default_base_branch:
+            return self.config.default_base_branch, "global"
+
+        return None, "(none)"
+
+    def _worktrees(self, workspace: str | None, project: str | None) -> list:
+        """Lenient worktree listing for the count (empty on any git failure)."""
+        try:
+            return Worktree(self.config).list(workspace, project, strict=False)
+        except (WtmError, git.GitError):
+            return []
 
     # --- lifecycle -----------------------------------------------------------
 

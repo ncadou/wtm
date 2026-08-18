@@ -3176,9 +3176,51 @@ def test_workspace_add_duplicate_user_name_errors(root: Path) -> None:
 
 
 def test_workspace_set_edits_entry(root: Path) -> None:
+    # The 'ws' dir exists, so scalar edits land in its workspace-local file.
     res = run("workspace", "set", "ws", "-d", "edited", root=root)
     assert res.returncode == 0, res.stderr
-    assert 'description = "edited"' in _config_text(root)
+    assert 'description = "edited"' in (root / ".wtm" / "config.toml").read_text()
+
+
+def test_config_base_branch_set_show_clear(root: Path) -> None:
+    # A test-owned config file so writes persist across invocations (the default
+    # harness config is rewritten on every run).
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert "(none set)" in run("config", "base-branch", root=root, extra_env=env).stdout
+    assert run("config", "base-branch", "main", root=root, extra_env=env).returncode == 0
+    assert 'base_branch = "main"' in cfg.read_text()
+    assert "main [user]" in run("config", "base-branch", root=root, extra_env=env).stdout
+    assert run("config", "base-branch", "--clear", root=root, extra_env=env).returncode == 0
+    assert "base_branch =" not in cfg.read_text()
+
+
+def test_config_show_reports_base_branch_source(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    res = run("config", "show", "--sources", root=root, extra_env={"WTM_CONFIG": str(cfg)})
+    assert res.returncode == 0, res.stderr
+    assert "default base_branch: main  [user]" in res.stdout
+
+
+def test_project_set_writes_local_config(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("project", "set", "proj", "-b", "develop", "-d", "the proj", root=root)
+    assert res.returncode == 0, res.stderr
+    local = (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert "[project]" in local
+    assert 'base_branch = "develop"' in local
+    assert 'description = "the proj"' in local
+
+
+def test_project_show_outputs_detail(root: Path) -> None:
+    _seed_repo(root, "proj")
+    run("project", "set", "proj", "-b", "develop", root=root)
+    res = run("project", "show", "proj", root=root)
+    assert res.returncode == 0, res.stderr
+    assert "name: proj" in res.stdout
+    assert "effective base_branch: develop [project]" in res.stdout
 
 
 def test_workspace_rename_moves_key(root: Path) -> None:

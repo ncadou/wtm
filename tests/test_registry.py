@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from wtm import registry
+from wtm import config_writer, registry
 from wtm.config import Config, Scope
 from wtm.core import WtmError
+from wtm.project import Project
 from wtm.workspace import Workspaces
 
 
@@ -165,9 +166,23 @@ def _seed_user(cfg: Path, name: str, path: Path, **extra: str) -> None:
     cfg.write_text(prev + body)
 
 
-def test_set_updates_fields(cfg: Path, tmp_path: Path) -> None:
+def test_set_updates_fields_local(cfg: Path, tmp_path: Path) -> None:
+    # The workspace dir exists, so description/base_branch land in its
+    # workspace-local <ws>/.wtm/config.toml, not the user-scope registry entry.
     ws = tmp_path / "w"
     ws.mkdir()
+    _seed_user(cfg, "w", ws)
+    _ops().set("w", path=None, description="edited", base_branch="dev")
+    local = (ws / ".wtm" / "config.toml").read_text()
+    assert 'description = "edited"' in local
+    assert 'base_branch = "dev"' in local
+    # The registry entry keeps only what it had (path).
+    assert "edited" not in cfg.read_text()
+
+
+def test_set_falls_back_to_registry_when_dir_absent(cfg: Path, tmp_path: Path) -> None:
+    # No workspace dir on disk -> scalars fall back to the user-scope entry.
+    ws = tmp_path / "gone"
     _seed_user(cfg, "w", ws)
     _ops().set("w", path=None, description="edited", base_branch="dev")
     text = cfg.read_text()
@@ -175,12 +190,14 @@ def test_set_updates_fields(cfg: Path, tmp_path: Path) -> None:
     assert 'base_branch = "dev"' in text
 
 
-def test_set_empty_clears_field(cfg: Path, tmp_path: Path) -> None:
+def test_set_empty_clears_local_field(cfg: Path, tmp_path: Path) -> None:
     ws = tmp_path / "w"
     ws.mkdir()
-    _seed_user(cfg, "w", ws, description="old")
+    _seed_user(cfg, "w", ws)
+    _ops().set("w", path=None, description="first", base_branch=None)
+    assert 'description = "first"' in (ws / ".wtm" / "config.toml").read_text()
     _ops().set("w", path=None, description="", base_branch=None)
-    assert "description" not in cfg.read_text()
+    assert "description" not in (ws / ".wtm" / "config.toml").read_text()
 
 
 def test_set_empty_path_rejected(cfg: Path, tmp_path: Path) -> None:
@@ -196,14 +213,28 @@ def test_set_requires_a_field(cfg: Path, tmp_path: Path) -> None:
 
 
 def test_set_unknown_errors(cfg: Path) -> None:
-    with pytest.raises(WtmError, match="not declared"):
+    with pytest.raises(WtmError, match="unknown workspace"):
         _ops().set("ghost", path=None, description="x", base_branch=None)
 
 
-def test_set_system_only_refused(
+def test_set_system_only_local_allowed(
     cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _system(monkeypatch, tmp_path, f'[workspaces.s]\npath = "{tmp_path}"\n')
+    # A system-declared workspace whose dir exists can carry a workspace-local
+    # override (the system-only refusal applies only to the registry fallback).
+    ws = tmp_path / "s"
+    ws.mkdir()
+    _system(monkeypatch, tmp_path, f'[workspaces.s]\npath = "{ws}"\n')
+    _ops().set("s", path=None, description="x", base_branch=None)
+    assert 'description = "x"' in (ws / ".wtm" / "config.toml").read_text()
+
+
+def test_set_system_only_registry_fallback_refused(
+    cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # System-only + no dir on disk -> the registry fallback is refused.
+    ws = tmp_path / "gone"
+    _system(monkeypatch, tmp_path, f'[workspaces.s]\npath = "{ws}"\n')
     with pytest.raises(WtmError, match="system scope"):
         _ops().set("s", path=None, description="x", base_branch=None)
 
@@ -335,3 +366,133 @@ def test_declaring_scopes(cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert registry.declaring_scopes("sysonly") == {Scope.SYSTEM}
     assert registry.declaring_scopes("useronly") == {Scope.USER}
     assert registry.declaring_scopes("nobody") == set()
+
+
+# --- global base_branch (top-level) ------------------------------------------
+
+
+def test_base_branch_set_clear_and_source(cfg: Path) -> None:
+    registry.set_base_branch("main")
+    assert 'base_branch = "main"' in cfg.read_text()
+    assert registry.base_branch_source() is Scope.USER
+    registry.clear_base_branch()
+    assert "base_branch" not in cfg.read_text()
+    assert registry.base_branch_source() is None
+
+
+def test_base_branch_source_prefers_user_over_system(
+    cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _system(monkeypatch, tmp_path, 'base_branch = "trunk"\n')
+    assert registry.base_branch_source() is Scope.SYSTEM
+    registry.set_base_branch("main")
+    assert registry.base_branch_source() is Scope.USER
+
+
+# --- project annotation (registry fallback) ----------------------------------
+
+
+def test_set_project_annotation_writes_nested_table(cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    _seed_user(cfg, "w", ws)
+    registry.set_project_annotation("w", "api", "base_branch", "develop")
+    text = cfg.read_text()
+    assert "[workspaces.w.projects.api]" in text
+    assert 'base_branch = "develop"' in text
+    # Clearing removes just that key.
+    registry.set_project_annotation("w", "api", "base_branch", None)
+    assert "develop" not in cfg.read_text()
+
+
+def test_set_project_annotation_requires_user_entry(cfg: Path) -> None:
+    with pytest.raises(WtmError, match="not declared at user scope"):
+        registry.set_project_annotation("ghost", "api", "base_branch", "x")
+
+
+# --- config_writer entity-local seam -----------------------------------------
+
+
+def test_config_writer_scalar_roundtrip_preserves_comments(cfg: Path, tmp_path: Path) -> None:
+    local = tmp_path / "ws" / ".wtm" / "config.toml"
+    local.parent.mkdir(parents=True)
+    local.write_text("# ws-local\ndescription = 'keep'\n")
+    config_writer.set_scalar(local, "base_branch", "main")
+    text = local.read_text()
+    assert "# ws-local" in text
+    assert "description = 'keep'" in text
+    assert 'base_branch = "main"' in text
+    config_writer.unset_scalar(local, "base_branch")
+    assert "base_branch" not in local.read_text()
+
+
+def test_config_writer_table_scalar_roundtrip(tmp_path: Path) -> None:
+    local = tmp_path / "proj" / ".wtm" / "config.toml"
+    config_writer.set_table_scalar(local, "project", "base_branch", "develop")
+    text = local.read_text()
+    assert "[project]" in text
+    assert 'base_branch = "develop"' in text
+    config_writer.unset_table_scalar(local, "project", "base_branch")
+    assert "develop" not in local.read_text()
+
+
+def test_config_writer_refused_under_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WTM_NO_CONFIG", "1")
+    with pytest.raises(WtmError, match="WTM_NO_CONFIG"):
+        config_writer.set_scalar(tmp_path / "x.toml", "k", "v")
+
+
+# --- project annotation via the Project service ------------------------------
+
+
+def _proj_ops() -> Project:
+    """Build a Project bound to a freshly loaded config."""
+    return Project(Config.load())
+
+
+def test_project_set_writes_local_when_dir_exists(cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(cfg, "w", ws)
+    result = _proj_ops().set("w", "api", base_branch="develop", description="the api")
+    assert result.local
+    local = (ws / "api" / ".wtm" / "config.toml").read_text()
+    assert "[project]" in local
+    assert 'base_branch = "develop"' in local
+    assert 'description = "the api"' in local
+    assert "develop" not in cfg.read_text()  # not the registry
+
+
+def test_project_set_falls_back_to_registry_when_dir_absent(cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    _seed_user(cfg, "w", ws)
+    result = _proj_ops().set("w", "api", base_branch="develop", description=None)
+    assert not result.local
+    text = cfg.read_text()
+    assert "[workspaces.w.projects.api]" in text
+    assert 'base_branch = "develop"' in text
+
+
+def test_project_set_requires_a_field(cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    ws.mkdir()
+    _seed_user(cfg, "w", ws)
+    with pytest.raises(WtmError, match="nothing to set"):
+        _proj_ops().set("w", "api", base_branch=None, description=None)
+
+
+def test_project_show_base_branch_provenance(cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    (ws / "api").mkdir(parents=True)
+    _seed_user(cfg, "w", ws, base_branch="wsdefault")
+    # Workspace-tier default until the project overrides it.
+    shown = _proj_ops().show("w", "api")
+    assert shown.effective_base_branch == "wsdefault"
+    assert shown.base_branch_source == "workspace"
+    _proj_ops().set("w", "api", base_branch="develop", description=None)
+    shown = _proj_ops().show("w", "api")
+    assert shown.effective_base_branch == "develop"
+    assert shown.base_branch_source == "project"

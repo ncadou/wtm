@@ -28,7 +28,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from wtm import git, registry
+from wtm import config_writer, git, registry
 from wtm.config import Config, Scope
 from wtm.core import (
     WtmError,
@@ -189,38 +189,79 @@ class Workspaces:
         description: str | None,
         base_branch: str | None,
     ) -> WorkspaceSet:
-        """Edit an existing user-scope entry in place (partial update).
+        """Edit an existing workspace's scalars (partial update).
 
-        At least one field must be given. A field passed as ``""`` is removed;
-        ``path`` may not be emptied. System-only names are refused (route them
-        through ``add`` to create a user-scope shadow).
+        ``--path`` always writes the user-scope registry entry (the declaration
+        is *found* via its path, so it cannot live in the workspace-local file);
+        it refuses a system-only name. ``--description`` / ``--base-branch`` write
+        the workspace-local ``<ws>/.wtm/config.toml`` when the workspace dir
+        exists, else fall back to the registry entry -- the most-local home that
+        exists. A field passed as ``""`` is removed; ``path`` may not be emptied.
+        At least one field must be given.
         """
         if path is None and description is None and base_branch is None:
             raise WtmError("nothing to set (pass --path, --description, or --base-branch)")
         if path == "":
             raise WtmError("a workspace path may not be empty")
 
-        scopes = registry.declaring_scopes(name)
-        if Scope.USER not in scopes:
-            if scopes:
-                raise WtmError(
-                    f"workspace '{name}' is declared only at system scope; "
-                    "use 'wtm workspace add' to create a user-scope override"
-                )
-            raise WtmError(f"workspace '{name}' is not declared")
+        ws = self._require(name)
+        if path is not None:
+            self._set_registry_path(name, path)
 
-        persist: str | None = None
         resolved: Path | None = None
         missing = False
         if path:
-            persist, resolved = _prepare_path(path)
+            _, resolved = _prepare_path(path)
             missing, _ = self._materialise(resolved, create=False)
 
-        registry.set_workspace(
-            name, path=persist, description=description, base_branch=base_branch
-        )
+        # Scalars land in the workspace-local file when its dir exists, else in
+        # the user-scope registry entry (system-only refused only for the latter).
+        target = resolved if resolved is not None else ws.path
+        if description is not None or base_branch is not None:
+            if target.is_dir():
+                self._set_local_scalars(target, description=description, base_branch=base_branch)
+            else:
+                self._set_registry_scalars(name, description=description, base_branch=base_branch)
 
         return WorkspaceSet(name=name, resolved=resolved, missing=missing)
+
+    def _set_registry_path(self, name: str, path: str) -> None:
+        """Write ``path`` to the user-scope registry entry (system-only refused)."""
+        self._require_user_scope(name)
+        persist, _ = _prepare_path(path)
+        registry.set_workspace(name, path=persist)
+
+    def _set_registry_scalars(
+        self, name: str, *, description: str | None, base_branch: str | None
+    ) -> None:
+        """Write description/base_branch to the user-scope registry entry."""
+        self._require_user_scope(name)
+        registry.set_workspace(name, description=description, base_branch=base_branch)
+
+    def _set_local_scalars(
+        self, ws_dir: Path, *, description: str | None, base_branch: str | None
+    ) -> None:
+        """Write/clear description/base_branch in ``<ws>/.wtm/config.toml`` (top-level)."""
+        local = ws_dir / ".wtm" / "config.toml"
+        for key, value in (("description", description), ("base_branch", base_branch)):
+            if value is None:
+                continue
+            if value == "":
+                config_writer.unset_scalar(local, key)
+            else:
+                config_writer.set_scalar(local, key, value)
+
+    def _require_user_scope(self, name: str) -> None:
+        """Raise unless *name* is declared at user scope (route system-only via add)."""
+        scopes = registry.declaring_scopes(name)
+        if Scope.USER in scopes:
+            return
+        if scopes:
+            raise WtmError(
+                f"workspace '{name}' is declared only at system scope; "
+                "use 'wtm workspace add' to create a user-scope override"
+            )
+        raise WtmError(f"workspace '{name}' is not declared")
 
     def rename(self, old: str, new: str) -> WorkspaceRenamed:
         """Rename the registry key (never moves the directory on disk)."""

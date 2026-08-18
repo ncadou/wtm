@@ -29,7 +29,8 @@ show    [NAME]            detail for one workspace (path, description, base_bran
 add     NAME [PATH] [-d DESC] [-b BASE] [-c]
                           register a workspace (user scope; PATH default: cwd; -c mkdir -p)
 set     NAME [-p PATH] [-d DESC] [-b BASE]
-                          edit an existing user-scope entry in place (empty value clears a field)
+                          edit a workspace (empty value clears a field); -p rewrites the registry
+                          entry, -d/-b write <ws>/.wtm/config.toml if the dir exists else the entry
 rename  OLD NEW           rename the registry key (does not move the directory)
 delete  NAME             unregister a workspace (user scope; never touches the projects root)
 default [NAME] [--clear] get/set/clear default_workspace
@@ -38,10 +39,12 @@ leave   [NAME] [-C]      fire workspace-leave hooks (cascading the worktree leav
 ```
 
 Workspaces are *declared* in config. `wtm` reads config from every scope but
-*writes* only the user-scope file's `[workspaces.*]` registry and the top-level
-`default_workspace` key — via `add`/`set`/`rename`/`delete`/`default`, using a
-comment-preserving `tomlkit` round-trip with an atomic replace. System config
-stays hand-edited (those verbs refuse system-only names).
+*writes* only the user file (its `[workspaces.*]` registry and the top-level
+`default_workspace` / `base_branch` keys) and the entity-local `.wtm/config.toml`
+files — via `add`/`set`/`rename`/`delete`/`default` (and `wtm project set`,
+`wtm config base-branch`), using a comment-preserving `tomlkit` round-trip with
+an atomic replace. System config stays hand-edited (those verbs refuse
+system-only names for registry writes).
 
 ## Projects (`wtm project …`)
 
@@ -57,6 +60,9 @@ import  [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; 
 resolve [[WORKSPACE] PROJECT] [-e|--env]   print a project's directory (--env: emit the project-level WTM_* contract)
 enter   [[WORKSPACE] PROJECT]     cd into the project dir, firing project-enter hooks
 leave   [[WORKSPACE] PROJECT] [-C]   fire project-leave hooks (cascading the worktree leave when inside one); cd out unless -C
+set     [[WORKSPACE] PROJECT] [-b BASE] [-d DESC]   annotate a project (empty value clears);
+                                  writes <project>/.wtm/config.toml if the dir exists else the user-file annotation
+show    [[WORKSPACE] PROJECT]     detail (dir, description, base_branch + provenance, worktree count)
 ```
 
 Projects are *discovered* on disk (a `<name>/.git`), never declared; config
@@ -100,7 +106,9 @@ resolve [[[WORKSPACE] PROJECT] NAME]                  print a worktree's path (n
 ## Config (`wtm config …`)
 
 ```
-show [--sources]          the effective merged config (--sources: declaring scope + inert-annotation flags)
+show [--sources]              the effective merged config (--sources: declaring scope + inert-annotation flags)
+base-branch [VALUE] [--clear] get/set/clear the global default base_branch (user config); the getter
+                              shows the effective value and the scope it comes from
 ```
 
 See [configuration.md](configuration.md).

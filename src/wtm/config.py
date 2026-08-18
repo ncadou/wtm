@@ -14,11 +14,13 @@ to most-specific::
     project:   <project>/.wtm/config.toml
     worktree:  <worktree>/.wtm/config.toml
 
-This module only *reads* config. The one place that writes it is
-:mod:`wtm.registry`, and it writes only the user-scope file's ``[workspaces.*]``
-registry entries and top-level ``default_workspace`` key (via the
-``wtm workspace add/set/rename/delete/default`` verbs); system/project/worktree
-config stays hand-edited.
+This module only *reads* config. Writes go through two seams:
+:mod:`wtm.registry` (the user-scope file's ``[workspaces.*]`` entries and
+top-level ``default_workspace`` / ``base_branch``, via the ``wtm workspace
+add/set/rename/delete/default`` and ``wtm config base-branch`` verbs) and
+:mod:`wtm.config_writer` (the entity-local ``<ws>/.wtm/config.toml`` and
+``<project>/.wtm/config.toml`` scalars, via ``wtm workspace set`` /
+``wtm project set``); system and worktree config stays hand-edited.
 
 The **workspace registry** (name -> path) lives at system/user scope. Scalar
 values resolve most-specific-first (``CLI > env > worktree > project >

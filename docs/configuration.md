@@ -16,10 +16,30 @@ workspace > user > system > built-in default`); inline hooks *accumulate* across
 scopes. Workspace **paths** are `~`/`$VAR`-expanded and must be absolute after
 expansion.
 
-Config is hand-edited — except the user-scope registry, which `wtm workspace
-add/set/rename/delete/default` also writes (a comment-preserving `tomlkit`
-round-trip with an atomic replace). `wtm config show [--sources]` prints the
-effective merge.
+Most config is hand-edited; a few defaults have management commands that write
+config for you (a comment-preserving `tomlkit` round-trip with an atomic
+replace). Two seams do the writing: `wtm.registry` owns every write to the
+**user file** (the `[workspaces.*]` registry entries, top-level
+`default_workspace` and `base_branch`), and `wtm.config_writer` owns the
+**entity-local** `.wtm/config.toml` files (workspace and project scope). No
+command writes system or worktree config.
+
+| default | command | writes |
+|---|---|---|
+| global `base_branch` | `wtm config base-branch [VALUE] [--clear]` | user file, top-level |
+| `default_workspace` | `wtm workspace default [NAME] [--clear]` | user file, top-level |
+| workspace `path` | `wtm workspace add` / `set --path` | user file registry entry |
+| workspace `description` / `base_branch` | `wtm workspace set -d/-b` | `<ws>/.wtm/config.toml` if the dir exists, else the registry entry |
+| project `description` / `base_branch` | `wtm project set -d/-b` | `<project>/.wtm/config.toml` if the dir exists, else the user file annotation |
+
+Scalar writes target the **most-local home that already exists**: `workspace
+set`/`project set` write the entity's own `.wtm/config.toml` when its directory
+is present, otherwise they fall back to the user-file registry entry/annotation.
+One consequence: `wtm workspace add -b main` records `base_branch` in the
+registry entry, but a later `wtm workspace set -b develop` (once the dir exists)
+writes the workspace-local file, which *wins* on merge — and clearing it there
+(`set -b ""`) lets the registry value resurface. `wtm config show [--sources]`
+prints the effective merge and where each value comes from.
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its
