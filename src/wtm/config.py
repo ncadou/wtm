@@ -26,10 +26,11 @@ workspace > user > system > default``); inline hooks *accumulate* across scopes
 on top of the builtin file hooks. Env vars ``WTM_NO_SYSTEM`` / ``WTM_NO_CONFIG``
 suppress the system / all config files (test and CI isolation).
 
-The active workspace is resolved ``-w flag > $WTM_WORKSPACE > cwd (longest
-path match) > default_workspace > sole workspace > error`` -- there is no
-built-in default workspace, so with nothing declared and nothing selected the
-tool errors, asking you to declare one.
+The active workspace is resolved ``$WTM_WORKSPACE > cwd (longest path match) >
+default_workspace > sole workspace > error`` -- there is no built-in default
+workspace, so with nothing declared and nothing selected the tool errors,
+asking you to declare one. A WORKSPACE named in a command's positionals
+overrides this per-target (see :mod:`wtm.target`); there is no ``-w`` flag.
 """
 
 from __future__ import annotations
@@ -143,8 +144,8 @@ class Config:
                     "([workspaces.NAME] path = ...)"
                 )
             raise WtmError(
-                "no active workspace; pass -w NAME, set WTM_WORKSPACE, cd into a "
-                "workspace, or set a default_workspace"
+                "no active workspace; pass WORKSPACE PROJECT NAME, set WTM_WORKSPACE, "
+                "cd into a workspace, or set a default_workspace"
             )
 
         return self.workspaces[self.active]
@@ -153,6 +154,21 @@ class Config:
     def projects_root(self) -> Path:
         """The active workspace's path (the projects root commands operate on)."""
         return self.active_workspace.path
+
+    def workspace_root(self, workspace: str | None) -> Path:
+        """Resolve a projects root: the named workspace's, else the active fallback.
+
+        A named *workspace* is looked up in the registry (the leading WORKSPACE
+        token of the target grammar); ``None`` falls back to the active
+        workspace, raising the no-active-workspace error when none is resolved.
+        """
+        if workspace is not None:
+            if workspace not in self.workspaces:
+                raise WtmError(f"unknown workspace: '{workspace}'")
+
+            return self.workspaces[workspace].path
+
+        return self.projects_root
 
     @property
     def system_hooks_dir(self) -> Path:
@@ -229,13 +245,16 @@ class Config:
     # --- loading -------------------------------------------------------------
 
     @classmethod
-    def load(cls, *, workspace: str | None = None, cwd: Path | None = None) -> Config:
+    def load(cls, *, cwd: Path | None = None) -> Config:
         """Load and resolve config from files + env for one invocation.
 
-        :param workspace: the ``-w/--workspace`` flag value (highest-precedence
-            active-workspace selector), or ``None``.
         :param cwd: the current directory for cwd-based workspace inference
             (defaults to the live cwd).
+
+        The active workspace is resolved from ``$WTM_WORKSPACE > cwd >
+        default_workspace > sole workspace``; there is no ``-w`` flag -- a
+        WORKSPACE named in a command's positionals overrides this per-target
+        (see :mod:`wtm.target`).
         """
         cwd = cwd if cwd is not None else abspath(os.getcwd())
         no_config = _flag_env("WTM_NO_CONFIG")
@@ -246,9 +265,7 @@ class Config:
 
         registry = _build_registry(system, user)
         default_workspace = user.get("default_workspace") or system.get("default_workspace")
-        active = _resolve_active(
-            registry, flag=workspace, cwd=cwd, default_workspace=default_workspace
-        )
+        active = _resolve_active(registry, cwd=cwd, default_workspace=default_workspace)
 
         xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
         system_dir = Path(os.environ.get("WTM_SYSTEM_HOOKS_DIR") or "/etc/wtm/hooks")
@@ -266,9 +283,14 @@ class Config:
         )
 
 
-def resolve_project_dir(config: Config, project: str | None) -> Path:
-    """Resolve a project dir in the active workspace (explicit name or cwd)."""
-    root = config.projects_root
+def resolve_project_dir(config: Config, workspace: str | None, project: str | None) -> Path:
+    """Resolve a project dir (explicit WORKSPACE/PROJECT or the cwd fallback).
+
+    A named *workspace* is looked up in the registry; otherwise the active
+    workspace's root is used (mirroring the target grammar's ``<= 2``-token
+    fallback in :mod:`wtm.target`).
+    """
+    root = config.workspace_root(workspace)
     if project:
         valid_project_name(project)
 
@@ -349,16 +371,16 @@ def _apply_workspace_local(ws: Workspace, local: dict) -> Workspace:
 def _resolve_active(
     registry: dict[str, Workspace],
     *,
-    flag: str | None,
     cwd: Path,
     default_workspace: str | None,
 ) -> str | None:
     """Resolve the active workspace name per the documented precedence.
 
-    ``-w flag > $WTM_WORKSPACE > cwd (longest match) > default_workspace >
-    sole workspace > None``.
+    ``$WTM_WORKSPACE > cwd (longest match) > default_workspace > sole workspace
+    > None``. A WORKSPACE named in a command's positionals overrides this
+    per-target (see :mod:`wtm.target`); there is no ``-w`` flag.
     """
-    selector = flag or os.environ.get("WTM_WORKSPACE")
+    selector = os.environ.get("WTM_WORKSPACE")
     if selector:
         if selector not in registry:
             raise WtmError(f"unknown workspace: '{selector}'")
@@ -398,7 +420,10 @@ def _workspace_for_cwd(registry: dict[str, Workspace], cwd: Path) -> str | None:
     if not best:
         return None
     if len(best) > 1:
-        raise WtmError(f"cwd matches multiple workspaces: {', '.join(sorted(best))} (pass -w)")
+        raise WtmError(
+            f"cwd matches multiple workspaces: {', '.join(sorted(best))} "
+            "(name the WORKSPACE, or set WTM_WORKSPACE)"
+        )
 
     return best[0]
 

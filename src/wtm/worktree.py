@@ -32,7 +32,7 @@ from wtm.core import (
     reject_traversal,
 )
 from wtm.hooks import run_hooks
-from wtm.target import TargetMode, looks_like_path, resolve_target, split_project_name
+from wtm.target import TargetMode, looks_like_path, resolve_target, split_target
 
 
 class BranchStrategy(Enum):
@@ -111,12 +111,14 @@ class Worktree:
         the project's configured base branch, else ``origin/HEAD``/``HEAD``.
         """
         if not args:
-            raise WtmError("usage: wtm create [PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]")
+            raise WtmError(
+                "usage: wtm create [[WORKSPACE] PROJECT] NAME [-b BRANCH] [-d DIR] [-c] [-i]"
+            )
 
-        project, name = split_project_name(args)
+        workspace, project, name = split_target(args)
         reject_traversal(name)
 
-        project_dir = resolve_project_dir(self.config, project)
+        project_dir = resolve_project_dir(self.config, workspace, project)
         git_dir = project_dir / ".git"
         if not git_dir.is_dir():
             raise WtmError(f"project git dir not found: {git_dir}")
@@ -221,7 +223,9 @@ class Worktree:
 
         return WorktreeLeft(worktree_dir=context.dir, cd_dir=cd_dir)
 
-    def list(self, project: str | None, *, strict: bool = False) -> list[git.WorktreeEntry]:
+    def list(
+        self, workspace: str | None, project: str | None, *, strict: bool = False
+    ) -> list[git.WorktreeEntry]:
         """Return a project's non-bare worktrees as structured entries.
 
         The single source of truth for worktree enumeration: presentation
@@ -229,14 +233,15 @@ class Worktree:
         from these entries. Only the bare repository is filtered here; an
         out-of-tree ``-d`` destination is a real worktree and stays in the
         list, later recognised by :func:`wtm.core.worktree_name` returning
-        ``None``. Project is explicit or inferred from cwd.
+        ``None``. Project is explicit or inferred from cwd; a named *workspace*
+        is looked up in the registry (else the active fallback).
 
         With *strict*, failures re-raise (``WtmError`` for a missing project git
         dir, :class:`git.GitError` for a failed query); otherwise they collapse
         to an empty list so shell completion never errors.
         """
         try:
-            project_dir = resolve_project_dir(self.config, project)
+            project_dir = resolve_project_dir(self.config, workspace, project)
             git_dir = project_dir / ".git"
             if not git_dir.is_dir():
                 raise WtmError(f"project git dir not found: {git_dir}")

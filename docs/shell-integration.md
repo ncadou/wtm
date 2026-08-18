@@ -45,4 +45,5 @@ The contract follows a **session** model: entering sets it, leaving clears it.
 
 Because `WTM_WORKSPACE` is exported on `enter`, it **pins the active workspace**
 (it beats cwd inference) until you `wtm leave` — the session is deliberately
-sticky.
+sticky. Entering a worktree in another workspace by its leading `WORKSPACE`
+positional (`wtm enter OTHER proj name`) re-pins the session to that workspace.

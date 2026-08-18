@@ -196,7 +196,7 @@ them:
 
 ```sh
 wtm workspace add oss ~/oss
-wtm -w oss clone git@github.com:someone/tool.git
+wtm clone git@github.com:someone/tool.git oss tool   # into workspace 'oss' as project 'tool'
 wtm workspace list                   # '*' marks the active one
 ```
 

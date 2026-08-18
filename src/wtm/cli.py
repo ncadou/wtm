@@ -40,7 +40,7 @@ from wtm.output import (
     worktree_list_lines,
 )
 from wtm.project import Project
-from wtm.target import TargetMode, TokenKind, slot_kind
+from wtm.target import TargetMode, TokenKind, slot_kind, split_workspace_project
 from wtm.workspace import Workspaces
 from wtm.worktree import BranchStrategy, Worktree, WorktreeCreated, WorktreeRenamed
 
@@ -66,12 +66,14 @@ Manage git worktrees over one or more named workspaces (projects roots):
       worktrees/<name>/     worktrees
 
 Workspaces are declared in config; projects are discovered on disk and only
-annotated. The active workspace is picked by -w/--workspace, $WTM_WORKSPACE, the
-cwd, a default_workspace, or the sole declared one. Anything project-specific
-(shared data/tools dirs, direnv, sesh/tmux) is the concern of hooks, not wtm.
+annotated. The active workspace is picked by a leading WORKSPACE positional,
+$WTM_WORKSPACE, the cwd, a default_workspace, or the sole declared one. Anything
+project-specific (shared data/tools dirs, direnv, sesh/tmux) is the concern of
+hooks, not wtm.
 
-Worktree targeting for enter/leave/delete/rename/hook (within the
-active workspace):
+Worktree targeting for enter/leave/delete/rename/hook (a leading WORKSPACE
+reaches another workspace; without it the active one is used):
+  WORKSPACE PROJECT NAME -> <WORKSPACE>/PROJECT/worktrees/NAME
   PROJECT NAME -> <workspace>/PROJECT/worktrees/NAME
   NAME         -> <cwd-project>/worktrees/NAME (project inferred from cwd);
                   NAME may be nested (e.g. feature/x -> worktrees/feature/x)
@@ -110,18 +112,9 @@ app = typer.Typer(
 
 
 @app.callback()
-def _bootstrap(
-    ctx: typer.Context,
-    workspace: str | None = typer.Option(
-        None,
-        "-w",
-        "--workspace",
-        help="Active workspace (name); overrides $WTM_WORKSPACE and cwd inference",
-        autocompletion=lambda: _complete_workspace(""),
-    ),
-) -> None:
+def _bootstrap(ctx: typer.Context) -> None:
     """Load config once and bind the operation objects onto the context."""
-    config = Config.load(workspace=workspace)
+    config = Config.load()
     ctx.obj = _Services(
         config=config,
         project=Project(config),
@@ -143,8 +136,8 @@ def _bootstrap(
 # Typer's autocompletion contract attaches the label via a (value, help) tuple;
 # it does the prefix filtering and CompletionItem wrapping itself.
 
-_TARGET_PRECEDENCE = ("worktree", "project")
-_HOOK_PRECEDENCE = ("event", "worktree", "project")
+_TARGET_PRECEDENCE = ("worktree", "project", "workspace")
+_HOOK_PRECEDENCE = ("event", "worktree", "project", "workspace")
 
 
 def _render_label(kinds: set[str], precedence: tuple[str, ...]) -> str:
@@ -182,56 +175,96 @@ def _complete_workspace(incomplete: str) -> list[str]:
     return [name for name in names if name.startswith(incomplete)]
 
 
-def _complete_project(incomplete: str) -> list[tuple[str, str]]:
-    """Autocompletion: project names under the root, prefix-filtered.
+def _complete_workspace_arg(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete the optional leading WORKSPACE for the ``[WORKSPACE] NAME`` commands.
 
-    Runs during shell completion, where the app callback has not fired, so it
-    builds its own config instead of relying on ``ctx.obj``. Any failure yields
-    an empty list so completion never errors.
+    Used by ``project new`` and ``clone``: only slot 0 completes (a WORKSPACE);
+    the invented project NAME being typed has nothing to offer, so once one
+    positional is present nothing more completes.
     """
+    args = ctx.params.get("args") or []
+    if args:
+        return []
     try:
-        names = Project(Config.load()).list()
+        workspaces = sorted(Config.load().workspaces)
     except Exception:
         return []
 
-    return _labelled({name: {"project"} for name in names}, _TARGET_PRECEDENCE)
+    return _labelled({name: {"workspace"} for name in workspaces}, _TARGET_PRECEDENCE)
+
+
+def _complete_project(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Autocompletion for the project-level ``[[WORKSPACE] PROJECT]`` slot.
+
+    Slot 0 offers declared WORKSPACE names plus the active workspace's projects;
+    slot 1 offers the projects of ``args[0]`` read as a WORKSPACE. Runs during
+    shell completion, where the app callback has not fired, so it builds its own
+    config instead of relying on ``ctx.obj``. Any failure yields an empty list
+    so completion never errors.
+    """
+    args = ctx.params.get("args") or []
+    if len(args) >= 2:
+        return []
+    try:
+        config = Config.load()
+    except Exception:
+        return []
+
+    candidates: dict[str, set[str]] = {}
+    if not args:
+        for name in config.workspaces:
+            candidates.setdefault(name, set()).add("workspace")
+    workspace = args[0] if args else None
+    for name in Project(config).list(workspace):
+        candidates.setdefault(name, set()).add("project")
+
+    return _labelled(candidates, _TARGET_PRECEDENCE)
 
 
 def _complete_project_arg(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete PROJECT for the create-style ('[PROJECT] NAME') commands.
+    """Complete the leading slots for the create-style ('[[WORKSPACE] PROJECT] NAME').
 
-    These use the ``NAME_ONLY`` target mode: only the first slot completes (a
-    PROJECT); the new NAME being invented has nothing to offer. :func:`slot_kind`
-    encodes that rule so this callback no longer counts args by hand.
+    These use the ``NAME_ONLY`` target mode: slot 0 offers a WORKSPACE or a
+    PROJECT, slot 1 offers a PROJECT (reachable only via the WORKSPACE reading);
+    the new NAME being invented has nothing to offer. :func:`slot_kind` encodes
+    that rule so this callback no longer counts args by hand.
     """
-    if TokenKind.PROJECT not in slot_kind(TargetMode.NAME_ONLY, ctx.params.get("args") or []):
-        return []
+    args = ctx.params.get("args") or []
+    config = Config.load()
+    candidates = _target_candidates(slot_kind(TargetMode.NAME_ONLY, args), config, args)
 
-    return _complete_project(incomplete)
+    return _labelled(candidates, _TARGET_PRECEDENCE)
 
 
 def _complete_branch(ctx: typer.Context, incomplete: str) -> list[str]:
     """Complete -b/--branch for create/enter: the project's local + origin branches.
 
-    The project is create's own: two positionals -> ``PROJECT NAME`` (the project
-    is the first); zero or one -> the cwd-inferred project (a lone arg is the
-    NAME). When ``-b`` precedes the positionals none are visible yet, so only the
-    cwd project is offered. Builds its own config (the app callback has not
-    fired) and is lenient (:func:`_branch_names`), so it never errors.
+    The project is create's own: the ``[[WORKSPACE] PROJECT] NAME`` grammar puts
+    PROJECT at ``args[1]`` when a WORKSPACE leads (three positionals) and at
+    ``args[0]`` for two; zero or one positional is the cwd-inferred project (a
+    lone arg is the NAME). When ``-b`` precedes the positionals none are visible
+    yet, so only the cwd project is offered. Builds its own config (the app
+    callback has not fired) and is lenient (:func:`_branch_names`), so it never
+    errors.
     """
     # Completing an option value, click leaves the positionals unparsed in
     # ``ctx.args`` (``ctx.params["args"]`` is empty then); a positional callback
-    # instead finds them in ``ctx.params``. Prefer whichever is populated, then
-    # apply create's grammar: two positionals -> PROJECT NAME (project is the
-    # first); zero or one -> the cwd-inferred project (a lone arg is the NAME).
+    # instead finds them in ``ctx.params``. Prefer whichever is populated.
     args = list(ctx.params.get("args") or ctx.args or [])
-    project = args[0] if len(args) >= 2 else None
-    names = _branch_names(Config.load(), project)
+    if len(args) >= 3:
+        workspace, project = args[0], args[1]
+    elif len(args) == 2:
+        workspace, project = None, args[0]
+    else:
+        workspace, project = None, None
+    names = _branch_names(Config.load(), workspace, project)
 
     return [name for name in names if name.startswith(incomplete)]
 
 
-def _worktree_names(config: Config, project: str | None, *, strict: bool = False) -> list[str]:
+def _worktree_names(
+    config: Config, workspace: str | None, project: str | None, *, strict: bool = False
+) -> list[str]:
     """Return a project's in-tree worktree names, sorted, for completion/tree.
 
     The presentation-side projection of the single source of truth
@@ -241,7 +274,7 @@ def _worktree_names(config: Config, project: str | None, *, strict: bool = False
     tree view mark a project whose git query failed).
     """
     try:
-        worktrees_dir = resolve_project_dir(config, project) / "worktrees"
+        worktrees_dir = resolve_project_dir(config, workspace, project) / "worktrees"
     except Exception:
         if strict:
             raise
@@ -250,14 +283,14 @@ def _worktree_names(config: Config, project: str | None, *, strict: bool = False
 
     names = [
         name
-        for entry in Worktree(config).list(project, strict=strict)
+        for entry in Worktree(config).list(workspace, project, strict=strict)
         if (name := worktree_name(entry.path, worktrees_dir)) is not None
     ]
 
     return sorted(names)
 
 
-def _branch_names(config: Config, project: str | None) -> list[str]:
+def _branch_names(config: Config, workspace: str | None, project: str | None) -> list[str]:
     """Return a project's ``create``-targetable branch names (local + origin), for completion.
 
     The presentation-side wrapper of :func:`wtm.git.list_branches`. Lenient: any
@@ -265,7 +298,7 @@ def _branch_names(config: Config, project: str | None) -> list[str]:
     completion never errors. Mirrors :func:`_worktree_names`.
     """
     try:
-        return git.list_branches(resolve_project_dir(config, project) / ".git")
+        return git.list_branches(resolve_project_dir(config, workspace, project) / ".git")
     except Exception:
         return []
 
@@ -275,18 +308,37 @@ def _target_candidates(
 ) -> dict[str, set[str]]:
     """Map the admissible token kinds at a slot to labelled completion candidates.
 
-    Returns a name -> kind-label set map (a name reachable as both a project and
-    a worktree carries both). ``PROJECT`` -> project names (label ``project``);
-    ``WORKTREE_NAME`` -> the worktree names of the project already named at slot
-    0, or (at slot 0) the cwd-inferred project's (label ``worktree``).
+    Returns a name -> kind-label set map (a name reachable as several roles
+    carries all of them). Because the grammar is count-based and the three
+    namespaces are flat, a slot's candidates are the *union* over how the
+    already-typed ``args`` might be read:
+
+    - ``WORKSPACE`` (slot 0 only) -> declared workspace names.
+    - ``PROJECT`` -> at slot 0, the active workspace's projects; at slot 1, the
+      projects of ``args[0]`` read as a WORKSPACE.
+    - ``WORKTREE_NAME`` -> at slot 0, the cwd-inferred project's worktrees; at
+      slot 1, ``args[0]`` read as a PROJECT (active workspace); at slot 2,
+      ``args[1]`` in workspace ``args[0]`` (the WORKSPACE PROJECT reading).
     """
     candidates: dict[str, set[str]] = {}
+    if TokenKind.WORKSPACE in kinds:
+        for name in config.workspaces:
+            candidates.setdefault(name, set()).add("workspace")
     if TokenKind.PROJECT in kinds:
-        for name in Project(config).list():
+        # slot 0 -> active workspace; slot 1 -> args[0] read as a WORKSPACE.
+        workspace = args[0] if args else None
+        for name in Project(config).list(workspace):
             candidates.setdefault(name, set()).add("project")
     if TokenKind.WORKTREE_NAME in kinds:
-        project = args[0] if args else None
-        for name in _worktree_names(config, project):
+        # slot 0 -> cwd project; slot 1 -> args[0] as PROJECT; slot 2 -> args[0]
+        # WORKSPACE + args[1] PROJECT.
+        if len(args) >= 2:
+            ws_read, proj_read = args[0], args[1]
+        elif len(args) == 1:
+            ws_read, proj_read = None, args[0]
+        else:
+            ws_read, proj_read = None, None
+        for name in _worktree_names(config, ws_read, proj_read):
             candidates.setdefault(name, set()).add("worktree")
 
     return candidates
@@ -318,9 +370,10 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str
 
     HOOK (the event) is the trailing token, so any slot may be it: the target
     candidates admissible at this slot (via ``WORKTREE``-mode :func:`slot_kind`)
-    are merged with the event names (label ``event``). Once ``PROJECT NAME`` is
-    complete (two args) only the event can follow. The event union lives here,
-    not in :mod:`wtm.target`: the hook-prefix grammar is a cli concern.
+    are merged with the event names (label ``event``). Once the target is
+    complete (three args: WORKSPACE PROJECT NAME) only the event can follow. The
+    event union lives here, not in :mod:`wtm.target`: the hook-prefix grammar is
+    a cli concern.
 
     Runs during shell completion (app callback has not fired), so it builds its
     own config; :class:`Project` and :meth:`Worktree.list` are lenient, so this
@@ -330,7 +383,7 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str
     config = Config.load()
     kinds = slot_kind(TargetMode.WORKTREE, args)
     candidates = _target_candidates(kinds, config, args)
-    if len(args) <= 2:
+    if len(args) <= 3:
         for event in EVENTS:
             candidates.setdefault(event, set()).add("event")
 
@@ -347,19 +400,36 @@ project_app = typer.Typer(
 
 
 @project_app.command(name="new")
-def project_new(ctx: typer.Context, name: str = typer.Argument(..., help="Project name")) -> None:
+def project_new(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        ...,
+        metavar="[WORKSPACE] NAME",
+        help="New project name, optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_workspace_arg,
+    ),
+) -> None:
     """Create an empty project (.git/ + worktrees/)."""
-    project_dir = ctx.obj.project.new(name)
+    workspace, name = split_workspace_project(args)
+    if name is None:
+        raise WtmError("usage: wtm project new [WORKSPACE] NAME")
+    project_dir = ctx.obj.project.new(workspace, name)
     log(f"created project '{project_dir.name}' at {project_dir} (.git/ + worktrees/)")
 
 
 def _clone(
     ctx: typer.Context,
     url: str = typer.Argument(..., help="Repository URL"),
-    name: str | None = typer.Argument(None, help="Project name (default: from URL)"),
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[WORKSPACE] NAME]",
+        help="Project name (default: from URL), optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_workspace_arg,
+    ),
 ) -> None:
     """Clone into a new project (bare)."""
-    project_dir = ctx.obj.project.clone(url, name)
+    workspace, name = split_workspace_project(args or [])
+    project_dir = ctx.obj.project.clone(url, workspace, name)
     log(f"cloned '{project_dir.name}' into {project_dir}/.git")
 
 
@@ -373,6 +443,12 @@ project_app.command(name="clone")(_clone)
 @project_app.command(name="list")
 def project_list(
     ctx: typer.Context,
+    workspace: str | None = typer.Argument(
+        None,
+        metavar="[WORKSPACE]",
+        help="Workspace to list (default: the active one)",
+        autocompletion=_complete_workspace,
+    ),
     tree: bool = typer.Option(
         False, "-t", "--tree", help="Show each project's worktrees beneath it"
     ),
@@ -387,7 +463,7 @@ def project_list(
         False, "-a", "--all", help="Span every declared workspace (adds a workspace column)"
     ),
 ) -> None:
-    """List projects in the active workspace (``--all`` spans every workspace).
+    """List a workspace's projects (WORKSPACE, or the active one; ``--all`` spans every workspace).
 
     Default: one project name per line. ``--tree`` nests each project's
     worktrees beneath it. ``--worktrees`` instead flattens to one worktree per
@@ -402,9 +478,18 @@ def project_list(
         raise WtmError("--tree and --worktrees are mutually exclusive")
     if as_json and not worktrees:
         raise WtmError("--json requires --worktrees")
+    if workspace is not None and all_ws:
+        raise WtmError("a WORKSPACE and --all are mutually exclusive")
 
     config = ctx.obj.config
-    names = sorted(config.workspaces) if all_ws else [config.active_workspace.name]
+    if all_ws:
+        names = sorted(config.workspaces)
+    elif workspace is not None:
+        if workspace not in config.workspaces:
+            raise WtmError(f"unknown workspace: '{workspace}'")
+        names = [workspace]
+    else:
+        names = [config.active_workspace.name]
 
     if worktrees:
         _list_worktrees(config, names, with_workspace=all_ws, as_json=as_json)
@@ -424,7 +509,7 @@ def project_list(
 def _print_tree_children(config: Config, name: str, *, indent: str) -> None:
     """Print a project's worktree leaves (tree view), or an error marker."""
     try:
-        children = _worktree_names(config, name, strict=True)
+        children = _worktree_names(config, None, name, strict=True)
     except git.GitError:
         print(f"{indent}└── <error reading worktrees>")
 
@@ -474,9 +559,9 @@ def _flat_worktree_rows(
     """
     rows: list[tuple[str, str, str, str, str]] = []
     for name in projects:
-        worktrees_dir = resolve_project_dir(config, name) / "worktrees"
+        worktrees_dir = resolve_project_dir(config, None, name) / "worktrees"
         try:
-            entries = worktree.list(name, strict=True)
+            entries = worktree.list(None, name, strict=True)
         except git.GitError:
             warn(f"skipping '{name}': could not read worktrees")
             continue
@@ -498,9 +583,10 @@ def _flat_worktree_rows(
 @project_app.command(name="resolve")
 def project_resolve(
     ctx: typer.Context,
-    project: str | None = typer.Argument(
+    args: list[str] = typer.Argument(
         None,
-        help="Project (default: inferred from cwd)",
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
         autocompletion=_complete_project,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the project WTM_* contract"),
@@ -511,11 +597,12 @@ def project_resolve(
     for a not-yet-created project. --env emits only the project-level contract
     (no WTM_WORKTREE_DIR / WTM_BRANCH), likewise by path math.
     """
+    workspace, project = split_workspace_project(args or [])
     if emit_env:
-        for key, value in ctx.obj.project.resolve_env(project).items():
+        for key, value in ctx.obj.project.resolve_env(workspace, project).items():
             print(emit_env_line(key, value))
     else:
-        print(ctx.obj.project.resolve_path(project))
+        print(ctx.obj.project.resolve_path(workspace, project))
 
 
 # --- worktree management -----------------------------------------------------
@@ -544,8 +631,8 @@ def create(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME",
-        help="Target: NAME or PROJECT NAME",
+        metavar="[[WORKSPACE] PROJECT] NAME",
+        help="Target: NAME, PROJECT NAME, or WORKSPACE PROJECT NAME",
         autocompletion=_complete_project_arg,
     ),
     branch: str | None = typer.Option(
@@ -609,7 +696,7 @@ def hook_install(
     source: str = typer.Argument(..., metavar="FILE | DIR", help="Hook source"),
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
         help="Worktree target (unused for --scope system/user/workspace)",
         autocompletion=_complete_target,
     ),
@@ -638,7 +725,7 @@ def hook_run(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR] HOOK",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR] HOOK",
         help="Worktree target followed by the event (HOOK) to run",
         autocompletion=_complete_hook_target,
     ),
@@ -662,7 +749,7 @@ def hook_delete(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR] HOOK",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR] HOOK",
         help="Worktree target followed by the event (or event/entry) to delete "
         "(target unused for --scope system/user/workspace)",
         autocompletion=_complete_hook_target,
@@ -690,7 +777,7 @@ def hook_list(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
         help="Worktree target (default: cwd)",
         autocompletion=_complete_target,
     ),
@@ -732,7 +819,7 @@ def enter(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
         help="Worktree target",
         autocompletion=_complete_target,
     ),
@@ -793,7 +880,7 @@ def leave(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
         help="Worktree target (default: cwd)",
         autocompletion=_complete_target,
     ),
@@ -815,7 +902,7 @@ def delete(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="PROJECT NAME | DIR",
+        metavar="WORKSPACE PROJECT NAME | PROJECT NAME | DIR",
         help="Worktree target (required)",
         autocompletion=_complete_target,
     ),
@@ -841,7 +928,7 @@ def rename(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[PROJECT] [OLDNAME] NEWNAME",
+        metavar="[[WORKSPACE] PROJECT] [OLDNAME] NEWNAME",
         help="Source worktree target followed by the new NAME (the last positional)",
         autocompletion=_complete_target,
     ),
@@ -875,17 +962,19 @@ def _describe_rename(result: WorktreeRenamed) -> str:
 
 def list_(
     ctx: typer.Context,
-    project: str | None = typer.Argument(
+    args: list[str] = typer.Argument(
         None,
-        help="Project (default: inferred from cwd)",
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
         autocompletion=_complete_project,
     ),
 ) -> None:
     """List a project's worktrees (PROJECT explicit or inferred from cwd)."""
     config = ctx.obj.worktree.config
-    worktrees_dir = resolve_project_dir(config, project) / "worktrees"
+    workspace, project = split_workspace_project(args or [])
+    worktrees_dir = resolve_project_dir(config, workspace, project) / "worktrees"
     rows: list[tuple[str, str]] = []
-    for entry in ctx.obj.worktree.list(project, strict=True):
+    for entry in ctx.obj.worktree.list(workspace, project, strict=True):
         name = worktree_name(entry.path, worktrees_dir) or str(entry.path)
         if entry.detached:
             annotation = f"{entry.head[:8]} (detached)"
@@ -902,8 +991,8 @@ def resolve(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[PROJECT] NAME]",
-        help="Target: NAME, PROJECT NAME, or none (the cwd worktree)",
+        metavar="[[[WORKSPACE] PROJECT] NAME]",
+        help="Target: NAME, PROJECT NAME, WORKSPACE PROJECT NAME, or none (the cwd worktree)",
         autocompletion=_complete_target,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the WTM_* contract for eval"),

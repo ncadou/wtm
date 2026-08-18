@@ -15,9 +15,11 @@ only); `enter`/`leave` fire its lifecycle hooks (see **Workspace lifecycle**).
 _Avoid_: root (say "workspace path" or "projects root of the workspace")
 
 **Active workspace**:
-The workspace a command targets, resolved `-w flag > $WTM_WORKSPACE > cwd
-(longest path match) > default_workspace > sole declared workspace > error`.
-There is no built-in default: with nothing declared/selected, `wtm` errors.
+The workspace a command targets, resolved `WORKSPACE positional > $WTM_WORKSPACE
+> cwd (longest path match) > default_workspace > sole declared workspace >
+error`. There is no built-in default and no `-w` flag: with nothing
+declared/selected, `wtm` errors. The leading `WORKSPACE` in a command's
+positionals overrides the rest per-target (see **Target grammar**).
 
 **Project**:
 A bare repository plus its worktrees, living at `<workspace>/<name>`. Projects
@@ -34,17 +36,20 @@ _Avoid_: destination, path (too generic)
 
 **Target grammar**:
 The decoding of a command's positionals into a target:
-`PROJECT NAME | NAME | DIR | cwd`, resolved within the active workspace (the
-workspace is orthogonal to the positionals). Lives in `wtm.target`.
+`WORKSPACE PROJECT NAME | PROJECT NAME | NAME | DIR | cwd`, count-based. The
+leading `WORKSPACE` is optional and reachable only with the full triple; with
+fewer tokens the workspace falls back to the active one. `WORKSPACE`, `PROJECT`,
+and `NAME` share one flat namespace, so a 2-token target is always
+`PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`
 (DIR and cwd-default allowed), `DELETE` (DIR allowed, no cwd-default), or
-`NAME_ONLY` (`PROJECT NAME`/`NAME` only, no DIR, no cwd-default).
+`NAME_ONLY` (`[[WORKSPACE] PROJECT] NAME` only, no DIR, no cwd-default).
 
 **Token kind**:
-What may appear at a given positional slot during completion: a `PROJECT`
-name or a `WORKTREE_NAME`.
+What may appear at a given positional slot during completion: a `WORKSPACE`
+name, a `PROJECT` name, or a `WORKTREE_NAME`.
 
 **Base branch**:
 A project's configured fork point for a *new* branch. Feeds `create`'s

@@ -22,10 +22,10 @@ class Project:
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def new(self, name: str) -> Path:
+    def new(self, workspace: str | None, name: str) -> Path:
         """Create an empty project (.git/ + worktrees/); return its directory."""
         valid_project_name(name)
-        project_dir = self.config.projects_root / name
+        project_dir = self.config.workspace_root(workspace) / name
         if project_dir.exists():
             raise WtmError(f"project already exists: {project_dir}")
         _scaffold_project(project_dir)
@@ -33,14 +33,14 @@ class Project:
 
         return project_dir
 
-    def clone(self, url: str, name: str | None) -> Path:
+    def clone(self, url: str, workspace: str | None, name: str | None) -> Path:
         """Clone *url* into a new project (bare); return its directory."""
         if not name:
             name = Path(url).name
             if name.endswith(".git"):
                 name = name[: -len(".git")]
         valid_project_name(name)
-        project_dir = self.config.projects_root / name
+        project_dir = self.config.workspace_root(workspace) / name
         if project_dir.exists():
             raise WtmError(f"project already exists: {project_dir}")
         _scaffold_project(project_dir)
@@ -48,13 +48,17 @@ class Project:
 
         return project_dir
 
-    def list(self) -> list[str]:
-        """Return sorted project names under the projects root.
+    def list(self, workspace: str | None = None) -> list[str]:
+        """Return sorted project names under a workspace's projects root.
 
-        Lenient by design: a missing projects root yields an empty list so
-        shell completion never errors.
+        A named *workspace* is looked up in the registry; ``None`` uses the
+        active workspace. Lenient by design: a missing projects root yields an
+        empty list so shell completion never errors.
         """
-        root = self.config.projects_root
+        try:
+            root = self.config.workspace_root(workspace)
+        except WtmError:
+            return []
         if not root.is_dir():
             return []
 
@@ -64,15 +68,15 @@ class Project:
             if entry.is_dir() and (entry / ".git").is_dir()
         ]
 
-    def resolve_path(self, project: str | None) -> Path:
+    def resolve_path(self, workspace: str | None, project: str | None) -> Path:
         """Return a project's computed directory (explicit name or cwd-inferred).
 
         Pure path math: it never checks that the project exists, so it works for
         a not-yet-created project (mirroring :meth:`Worktree.resolve_path`).
         """
-        return resolve_project_dir(self.config, project)
+        return resolve_project_dir(self.config, workspace, project)
 
-    def resolve_env(self, project: str | None) -> dict[str, str]:
+    def resolve_env(self, workspace: str | None, project: str | None) -> dict[str, str]:
         """Return the project-level ``WTM_*`` contract (a subset of a worktree's).
 
         Every key is derived by path math from the resolved project dir, so no
@@ -81,7 +85,7 @@ class Project:
         (name + dir) is folded in; the name is empty when the project is not
         under a declared workspace.
         """
-        project_dir = resolve_project_dir(self.config, project)
+        project_dir = resolve_project_dir(self.config, workspace, project)
         ws = self.config.workspace_of(project_dir)
 
         return {

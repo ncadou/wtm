@@ -91,12 +91,6 @@ def test_active_none_when_ambiguous(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         _ = cfg.projects_root
 
 
-def test_flag_beats_env_and_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WTM_WORKSPACE", "B")
-    cfg = _load(monkeypatch, tmp_path, _two(tmp_path), cwd=tmp_path / "B", workspace="A")
-    assert cfg.active == "A"
-
-
 def test_env_beats_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WTM_WORKSPACE", "A")
     cfg = _load(monkeypatch, tmp_path, _two(tmp_path), cwd=tmp_path / "B")
@@ -136,8 +130,9 @@ def test_default_workspace_used_when_cwd_outside(
 def test_unknown_selected_workspace_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("WTM_WORKSPACE", "Z")
     with pytest.raises(WtmError, match="unknown workspace"):
-        _load(monkeypatch, tmp_path, _two(tmp_path), cwd=tmp_path, workspace="Z")
+        _load(monkeypatch, tmp_path, _two(tmp_path), cwd=tmp_path)
 
 
 # --- system + user registry merge --------------------------------------------

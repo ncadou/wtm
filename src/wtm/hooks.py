@@ -83,7 +83,7 @@ from wtm.core import (
     abspath,
     derive_context,
 )
-from wtm.output import log, warn
+from wtm.output import MANAGED_ENV_VARS, log, warn
 from wtm.target import TargetMode, resolve_target
 
 EVENTS = (
@@ -210,7 +210,12 @@ def run_workspace_hooks(
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = tuple(s for s in order if s in _WORKSPACE_SCOPES)
 
+    # Enforce the workspace-only contract: strip any inherited session vars (a
+    # stale WTM_WORKTREE_DIR etc. from the parent wtm session would otherwise
+    # leak into the hook), then set the three workspace-lifecycle vars.
     env = dict(os.environ)
+    for key in MANAGED_ENV_VARS:
+        env.pop(key, None)
     env["WTM_EVENT"] = event
     env["WTM_WORKSPACE"] = name
     env["WTM_WORKSPACE_DIR"] = str(path)
@@ -550,8 +555,16 @@ class Hooks:
         if scope is Scope.WORKSPACE:
             return self.config.workspace_hooks_dir
         if scope is Scope.PROJECT:
-            project = args[0] if len(args) == 2 else None
-            project_dir = resolve_project_dir(self.config, project)
+            # Hook target grammar is [[WORKSPACE] PROJECT] NAME: the trailing
+            # NAME is irrelevant for a project-scope dir, so read the leading
+            # WORKSPACE/PROJECT by count.
+            if len(args) >= 3:
+                workspace, project = args[0], args[1]
+            elif len(args) == 2:
+                workspace, project = None, args[0]
+            else:
+                workspace, project = None, None
+            project_dir = resolve_project_dir(self.config, workspace, project)
             git_dir = project_dir / ".git"
             if not git_dir.is_dir():
                 raise WtmError(f"project git dir not found: {git_dir}")

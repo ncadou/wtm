@@ -473,9 +473,9 @@ def test_worktree_list_strict_raises_on_broken_project(
 
     worktree = Worktree(Config.load())
     # Lenient (default) swallows the failure; strict surfaces it.
-    assert worktree.list("broken") == []
+    assert worktree.list(None, "broken") == []
     with pytest.raises(git.GitError):
-        worktree.list("broken", strict=True)
+        worktree.list(None, "broken", strict=True)
 
 
 # --- list (worktrees) --------------------------------------------------------
@@ -548,11 +548,14 @@ def test_complete_project_names_and_label(root: Path, monkeypatch: pytest.Monkey
     _use_config(monkeypatch, root)
     from wtm.cli import _complete_project
 
-    # The callback returns (value, label) tuples for every project; Typer applies
-    # the prefix filter, so the callback itself is not prefix-scoped.
-    items = _complete_project("")
-    assert [value for value, _ in items] == ["alpha", "alto", "beta"]
-    assert {label for _, label in items} == {"project"}
+    class _C:  # minimal stand-in: only .params is read
+        params = {"args": ()}
+
+    # Slot 0 of [[WORKSPACE] PROJECT]: declared workspaces plus the active
+    # workspace's projects; Typer applies the prefix filter downstream.
+    items = _complete_project(_C(), "")
+    assert [value for value, _ in items] == ["alpha", "alto", "beta", "ws"]
+    assert {label for _, label in items} == {"project", "workspace"}
 
 
 def test_list_completion_emits_projects(root: Path) -> None:
@@ -560,7 +563,8 @@ def test_list_completion_emits_projects(root: Path) -> None:
     _seed_repo(root, "beta")
     (root / "stray").mkdir()  # no .git/, must be excluded
     out = _complete(root, words="wtm list ", cword="2")
-    assert out.split() == ["alpha", "beta"]
+    # Slot 0 unions the declared workspace ('ws') with the active projects.
+    assert out.split() == ["alpha", "beta", "ws"]
 
 
 def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -574,12 +578,13 @@ def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.Mo
         def __init__(self, args: tuple[str, ...]) -> None:
             self.params = {"args": args}
 
-    # First positional slot -> PROJECT completion (labelled). Prefix filtering
-    # is Typer's job, so the callback returns all projects here.
+    # First positional slot -> WORKSPACE or PROJECT completion (labelled). Prefix
+    # filtering is Typer's job, so the callback returns all candidates here.
     items = _complete_project_arg(_Ctx(()), "al")
-    assert [value for value, _ in items] == ["alpha", "alto", "beta"]
-    assert {label for _, label in items} == {"project"}
-    # A positional already given -> NAME/DIR slot, no project completion.
+    assert [value for value, _ in items] == ["alpha", "alto", "beta", "ws"]
+    assert {label for _, label in items} == {"project", "workspace"}
+    # A (non-workspace) PROJECT already given -> the invented NAME slot; the
+    # WORKSPACE reading finds no projects under 'alpha', so nothing completes.
     assert _complete_project_arg(_Ctx(("alpha",)), "") == []
 
 
@@ -589,7 +594,8 @@ def test_first_slot_completes_projects(root: Path, cmd: str) -> None:
     _seed_repo(root, "beta")
     (root / "stray").mkdir()  # no .git/, must be excluded
     out = _complete(root, words=f"wtm {cmd} ", cword="2")
-    assert out.split() == ["alpha", "beta"]
+    # Slot 0 unions the declared workspace ('ws') with the active projects.
+    assert out.split() == ["alpha", "beta", "ws"]
 
 
 def test_second_slot_no_project_completion(root: Path) -> None:
@@ -636,17 +642,18 @@ def test_first_slot_unions_projects_and_cwd_worktrees(root: Path) -> None:
     repo = _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
     run("create", "alpha", "feat", root=root)
-    # From inside project 'alpha': projects (alpha, beta) U alpha's worktrees (feat).
+    # From inside project 'alpha': workspace ('ws') U projects (alpha, beta) U
+    # alpha's worktrees (feat).
     out = _complete(root, words="wtm enter ", cword="2", cwd=repo)
-    assert out.split() == ["alpha", "beta", "feat"]
+    assert out.split() == ["alpha", "beta", "feat", "ws"]
 
 
 def test_first_slot_outside_root_projects_only(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    # cwd not under the projects root: no cwd worktrees, just projects.
+    # cwd not under the projects root: no cwd worktrees, just workspaces + projects.
     out = _complete(root, words="wtm enter ", cword="2", cwd=tmp_path)
-    assert out.split() == ["alpha"]
+    assert out.split() == ["alpha", "ws"]
 
 
 # --- completion kind labels --------------------------------------------------
@@ -672,12 +679,13 @@ def test_target_labels_project_and_worktree(root: Path, monkeypatch: pytest.Monk
     monkeypatch.chdir(repo)  # inside 'alpha' -> its worktrees join the projects
     from wtm.cli import _complete_target
 
-    # Slot 0: projects (alpha, beta) labelled 'project', cwd worktree 'feat'
-    # labelled 'worktree'.
+    # Slot 0: workspaces ('ws') labelled 'workspace', projects (alpha, beta)
+    # labelled 'project', cwd worktree 'feat' labelled 'worktree'.
     assert _labels(_complete_target(_Ctx(()), "")) == {
         "alpha": "project",
         "beta": "project",
         "feat": "worktree",
+        "ws": "workspace",
     }
     # Slot 1: the named project's worktrees only -> homogeneous 'worktree'.
     assert _labels(_complete_target(_Ctx(("alpha",)), "")) == {"feat": "worktree"}
@@ -1105,7 +1113,8 @@ def test_project_resolve_completion_emits_projects(root: Path) -> None:
     _seed_repo(root, "beta")
     (root / "stray").mkdir()  # no .git/, must be excluded
     out = _complete(root, words="wtm project resolve ", cword="3")
-    assert out.split() == ["alpha", "beta"]
+    # Slot 0 of [[WORKSPACE] PROJECT] unions the workspace ('ws') with projects.
+    assert out.split() == ["alpha", "beta", "ws"]
 
 
 # --- delete ------------------------------------------------------------------

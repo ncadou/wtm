@@ -3,14 +3,14 @@
 Every command runs against one **active workspace**, resolved in this order:
 
 ```
--w/--workspace NAME  >  $WTM_WORKSPACE  >  cwd (longest path match)
-                     >  default_workspace  >  the sole declared workspace  >  error
+leading WORKSPACE positional  >  $WTM_WORKSPACE  >  cwd (longest path match)
+                              >  default_workspace  >  the sole declared workspace  >  error
 ```
 
-There is no built-in default: with no workspace declared or selected, `wtm`
-errors and asks you to declare or select one. A global `-w/--workspace NAME`
-(placed *before* the subcommand) selects the active workspace for that
-invocation.
+There is no built-in default and no `-w` flag: with no workspace declared or
+selected, `wtm` errors and asks you to declare or select one. To reach another
+workspace, name it as the leading positional (`wtm enter WORKSPACE PROJECT
+NAME`); `$WTM_WORKSPACE` pins it for a session.
 
 Commands are grouped under `workspace`, `project`, `worktree`, `hook`, and
 `config`. Each worktree-level command also has a top-level alias
@@ -46,22 +46,22 @@ stays hand-edited (those verbs refuse system-only names).
 ## Projects (`wtm project …`)
 
 ```
-new     NAME                      create an empty project (.git/ + worktrees/)
-clone   URL [NAME]                clone into a new project (bare); alias: wtm clone
-list    [-t|--tree] [-w|--worktrees] [-j|--json] [-a|--all]
-                                  list projects in the active workspace (--tree: with their worktrees;
+new     [WORKSPACE] NAME          create an empty project (.git/ + worktrees/)
+clone   URL [[WORKSPACE] NAME]    clone into a new project (bare); alias: wtm clone
+list    [WORKSPACE] [-t|--tree] [-w|--worktrees] [-j|--json] [-a|--all]
+                                  list a workspace's projects (WORKSPACE, or the active one; --tree: with their worktrees;
                                   --worktrees: flat one-worktree-per-line, tab-separated
                                   project/name/path/branch/head; --json: those rows as JSON;
                                   --all: span every declared workspace, prepending a workspace column)
 import  [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm import
-resolve [PROJECT] [-e|--env]      print a project's directory (--env: emit the project-level WTM_* contract)
+resolve [[WORKSPACE] PROJECT] [-e|--env]   print a project's directory (--env: emit the project-level WTM_* contract)
 ```
 
 Projects are *discovered* on disk (a `<name>/.git`), never declared; config
 only *annotates* them (description, base branch, hooks). See
 [import.md](import.md) for `wtm import`.
 
-`wtm project resolve [PROJECT]` prints the project directory
+`wtm project resolve [[WORKSPACE] PROJECT]` prints the project directory
 (`<workspace>/PROJECT`), inferring PROJECT from the cwd when omitted — handy for
 `cd "$(wtm project resolve alpha)"`. It is pure path math (no git, no existence
 check, so it works for an absent project). With `--env` it emits only the
@@ -73,14 +73,14 @@ worktree.
 ## Worktrees (`wtm worktree …`, each also a top-level alias)
 
 ```
-create  [PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
-install ([PROJECT] NAME | DIR)                        run install hooks for a worktree (alias for 'wtm hook run install')
-enter   ([PROJECT] NAME | DIR) [-c] [-b BRANCH] [--base REF] [-i]   cd into a worktree; -c creates it first if absent
-leave   ([PROJECT] NAME | DIR) [-C]                   run leave hooks for a worktree; cds out unless -C (non-destructive)
-delete  (PROJECT NAME | DIR) [-f] [-D]                remove a worktree (-f force, -D delete branch too)
-rename  ([PROJECT] [OLDNAME] | DIR) NEWNAME [-b]      rename/move a worktree; -b renames its branch too
-list    [PROJECT]                                     list a project's worktrees (project inferred from cwd if omitted)
-resolve [[PROJECT] NAME]                              print a worktree's path (no arg: the cwd worktree; --env: emit WTM_* for eval)
+create  [[WORKSPACE] PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
+install ([[WORKSPACE] PROJECT] NAME | DIR)            run install hooks for a worktree (alias for 'wtm hook run install')
+enter   ([[WORKSPACE] PROJECT] NAME | DIR) [-c] [-b BRANCH] [--base REF] [-i]   cd into a worktree; -c creates it first if absent
+leave   ([[WORKSPACE] PROJECT] NAME | DIR) [-C]       run leave hooks for a worktree; cds out unless -C (non-destructive)
+delete  (WORKSPACE PROJECT NAME | PROJECT NAME | DIR) [-f] [-D]   remove a worktree (-f force, -D delete branch too)
+rename  ([[WORKSPACE] PROJECT] [OLDNAME] | DIR) NEWNAME [-b]      rename/move a worktree; -b renames its branch too
+list    [[WORKSPACE] PROJECT]                         list a project's worktrees (project inferred from cwd if omitted)
+resolve [[[WORKSPACE] PROJECT] NAME]                  print a worktree's path (no arg: the cwd worktree; --env: emit WTM_* for eval)
 ```
 
 ## Config (`wtm config …`)
@@ -94,8 +94,13 @@ See [configuration.md](configuration.md).
 ## Targeting a worktree
 
 For `enter` / `leave` / `delete` / `rename` / `hook run` / `hook install` /
-`hook delete`, the positionals decode into a target within the active workspace:
+`hook delete`, the positionals decode into a target. A leading `WORKSPACE`
+reaches another workspace; without it the active workspace is used. Because
+`WORKSPACE`, `PROJECT`, and `NAME` share one flat namespace, the decode is
+count-based — a two-token target is always `PROJECT NAME`, so a non-cwd
+workspace needs the full triple:
 
+- `WORKSPACE PROJECT NAME` → `<WORKSPACE>/PROJECT/worktrees/NAME`
 - `PROJECT NAME` → `<active-workspace>/PROJECT/worktrees/NAME`
 - `NAME` → `<cwd-project>/worktrees/NAME` (project inferred from the current
   directory; `NAME` may be nested, e.g. `feature/x`)
@@ -118,14 +123,15 @@ bootstrapped on a new orphan branch regardless of any configured base.
 `enter -c` makes entering idempotent: if the target worktree is absent it is
 created first (with `create`'s branch resolution, `-b BRANCH` to override the
 branch), then entered; if it already exists `enter` just cds in. With `-c` the
-target is restricted to `PROJECT NAME` or `NAME` (no `DIR`, no cwd default), and
-`-b` outside `-c` (or when the worktree already exists) is rejected/ignored.
+target is restricted to `[[WORKSPACE] PROJECT] NAME` (no `DIR`, no cwd default),
+and `-b` outside `-c` (or when the worktree already exists) is rejected/ignored.
 
 ### `resolve` (read-only path query)
 
-`resolve` is a read-only path query. Given `PROJECT NAME` or `NAME` (no `DIR`)
-it prints the computed worktree path without touching git, so it works for
-not-yet-created targets — handy for `cd "$(wtm resolve PROJECT NAME)"`. Given no
+`resolve` is a read-only path query. Given `[[WORKSPACE] PROJECT] NAME` (no
+`DIR`) it prints the computed worktree path without touching git, so it works
+for not-yet-created targets — handy for `cd "$(wtm resolve PROJECT NAME)"`. Given
+no
 argument it resolves the worktree you are standing in (inspecting git for its
 toplevel), so a bare `wtm resolve` prints the current worktree's root; run
 outside any worktree it errors, asking for a NAME. With `--env` it instead emits
@@ -137,8 +143,8 @@ must already exist.
 
 `rename` moves a worktree to a new name. Its positionals are parsed
 right-to-left: the **last** positional is `NEWNAME`, and everything before it is
-an ordinary source target (`PROJECT NAME | NAME | DIR | cwd`) — so
-`wtm rename NEWNAME` renames the worktree you are standing in,
+an ordinary source target (`WORKSPACE PROJECT NAME | PROJECT NAME | NAME | DIR |
+cwd`) — so `wtm rename NEWNAME` renames the worktree you are standing in,
 `wtm rename OLDNAME NEWNAME` names the source within the cwd project, and
 `wtm rename PROJECT OLDNAME NEWNAME` is fully explicit. `NEWNAME` is validated
 like `create`'s NAME (nesting allowed, `..` rejected, not a path) and always
