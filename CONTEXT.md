@@ -40,7 +40,24 @@ The decoding of a command's positionals into a target:
 leading `WORKSPACE` is optional and reachable only with the full triple; with
 fewer tokens the workspace falls back to the active one. `WORKSPACE`, `PROJECT`,
 and `NAME` share one flat namespace, so a 2-token target is always
-`PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`.
+`PROJECT NAME`, never `WORKSPACE PROJECT`. Lives in `wtm.target`. Every
+target-taking command uses it *except* `enter`, which takes a **Locator**.
+
+**Locator** (experiment):
+The sibling of the **Target grammar**, decoding `enter`'s positionals: a free,
+scope-inferring name query matched across *every* declared workspace, so the
+same token resolves from any active workspace (the shell-history-portability
+motive). Same output as a target (a worktree, project, or workspace); different
+input discipline. The last token is the leaf you land on, leading tokens are
+ancestor qualifiers in top-down order (levels may be skipped). Resolution is a
+**leaf-tier cascade**: try the deepest leaf tier first, falling back only on a
+miss -- worktree named the last token (ancestors matched as a project *or* a
+workspace), else project (a leading token its workspace), else workspace (single
+token only). One match resolves and is entered with that tier's contract,
+several are ambiguous (the qualified choices are printed, non-zero exit), none
+is not-found. Lives in `wtm.locate`: `locate` is the pure cascade over a
+`LocationIndex` snapshot, `build_index` the filesystem-bound (git-free) edge.
+Only `enter` consumes it today; the plumbing is command-agnostic.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`

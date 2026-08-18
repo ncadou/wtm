@@ -9,7 +9,7 @@ leading WORKSPACE positional  >  $WTM_WORKSPACE  >  cwd (longest path match)
 
 There is no built-in default and no `-w` flag: with no workspace declared or
 selected, `wtm` errors and asks you to declare or select one. To reach another
-workspace, name it as the leading positional (`wtm enter WORKSPACE PROJECT
+workspace, name it as the leading positional (`wtm delete WORKSPACE PROJECT
 NAME`); `$WTM_WORKSPACE` pins it for a session.
 
 Commands are grouped under `workspace`, `project`, `worktree`, `hook`, and
@@ -95,7 +95,7 @@ project's worktrees, `leave` cascades the worktree's `leave` first
 ```
 create  [[WORKSPACE] PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
 install ([[WORKSPACE] PROJECT] NAME | DIR)            run install hooks for a worktree (alias for 'wtm hook run install')
-enter   ([[WORKSPACE] PROJECT] NAME | DIR) [-c] [-b BRANCH] [--base REF] [-i]   cd into a worktree; -c creates it first if absent
+enter   (LOCATOR | DIR) [-c] [-b BRANCH] [--base REF] [-i]                      cd into a worktree/project/workspace by name (experiment); -c creates a worktree first
 leave   ([[WORKSPACE] PROJECT] NAME | DIR) [-C]       run leave hooks for a worktree; cds out unless -C (non-destructive)
 delete  (WORKSPACE PROJECT NAME | PROJECT NAME | DIR) [-f] [-D]   remove a worktree (-f force, -D delete branch too)
 rename  ([[WORKSPACE] PROJECT] [OLDNAME] | DIR) NEWNAME [-b]      rename/move a worktree; -b renames its branch too
@@ -115,7 +115,7 @@ See [configuration.md](configuration.md).
 
 ## Targeting a worktree
 
-For `enter` / `leave` / `delete` / `rename` / `hook run` / `hook install` /
+For `leave` / `delete` / `rename` / `hook run` / `hook install` /
 `hook delete`, the positionals decode into a target. A leading `WORKSPACE`
 reaches another workspace; without it the active workspace is used. Because
 `WORKSPACE`, `PROJECT`, and `NAME` share one flat namespace, the decode is
@@ -129,6 +129,33 @@ workspace needs the full triple:
 - `DIR` → an explicit path (a single arg is a path only if it starts with `/`,
   `./`, `../`, or is `.`/`..`)
 - no argument → the current directory (`delete` requires an explicit target)
+
+`enter` is the exception — it takes a **locator** instead (see below).
+
+### `enter`'s locator (experiment)
+
+`enter` resolves its argument as a **locator**: a free, scope-inferring name
+query matched across *every* declared workspace, so the same token works no
+matter which workspace is active (a recalled `wtm enter mywt` finds its worktree
+from anywhere). The last token is the entity you land on; leading tokens are
+ancestor qualifiers in top-down order. Resolution is a leaf-tier cascade — try
+the deepest tier first, fall back only on a miss:
+
+- worktree named the last token (ancestors matched as a project *or* a
+  workspace); else
+- project named the last token (a leading token is its workspace); else
+- workspace named the last token (single token only).
+
+Exactly one match is entered with that tier's `WTM_*` contract; several print
+the fully-qualified `wtm enter …` choices and exit non-zero; none is an error.
+Examples: `enter mywt` (any workspace), `enter proj mywt` / `enter ws mywt`
+(qualified), `enter ws proj mywt` (fully qualified), `enter proj` (a project),
+`enter ws` (a workspace). A single `DIR` (`/`, `./`, `../`, `.`/`..`) or no
+argument (the cwd worktree) keeps the classic worktree-path behavior, and `-c`
+keeps the classic `[[WORKSPACE] PROJECT] NAME` create grammar (there is nothing
+to resolve yet). Shell completion offers the whole worktree/project/workspace
+name universe, labelled by kind (with an `(N)` collision hint where a name spans
+several targets).
 
 ### `create`'s branch resolution
 

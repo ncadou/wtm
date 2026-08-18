@@ -258,6 +258,39 @@ def _seed_repo(root: Path, project: str) -> Path:
     return git_dir
 
 
+def _seed_repo_at(ws_root: Path, project: str) -> Path:
+    """Create a bare project under an arbitrary workspace root (git-only, no wtm config).
+
+    The multi-workspace analog of :func:`_seed_repo`: it scaffolds
+    ``<ws_root>/<project>/{.git,worktrees}`` directly with git, so a
+    :func:`_run_multi` invocation can target it. Returns the project's .git dir.
+    """
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(ws_root / "_gitconfig"),
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    source = ws_root / "_sources" / project
+    source.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True, env=git_env)
+    (source / "file.txt").write_text("hello\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "init"], check=True, env=git_env)
+
+    project_dir = ws_root / project
+    (project_dir / "worktrees").mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(source), str(project_dir / ".git")],
+        check=True,
+        env=git_env,
+    )
+
+    return project_dir / ".git"
+
+
 # --- project new / clone / list ---------------------------------------------
 
 
@@ -588,7 +621,7 @@ def test_complete_project_arg_first_slot_only(root: Path, monkeypatch: pytest.Mo
     assert _complete_project_arg(_Ctx(("alpha",)), "") == []
 
 
-@pytest.mark.parametrize("cmd", ["create", "enter", "delete", "resolve"])
+@pytest.mark.parametrize("cmd", ["create", "delete", "resolve"])
 def test_first_slot_completes_projects(root: Path, cmd: str) -> None:
     _seed_repo(root, "alpha")
     _seed_repo(root, "beta")
@@ -629,7 +662,7 @@ def test_worktree_names_infers_project_from_cwd(root: Path) -> None:
     assert "feat" in out.split()
 
 
-@pytest.mark.parametrize("cmd", ["enter", "delete", "resolve"])
+@pytest.mark.parametrize("cmd", ["delete", "resolve"])
 def test_second_slot_completes_worktrees(root: Path, cmd: str) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
@@ -651,9 +684,11 @@ def test_first_slot_unions_projects_and_cwd_worktrees(root: Path) -> None:
 def test_first_slot_outside_root_projects_only(root: Path, tmp_path: Path) -> None:
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
-    # cwd not under the projects root: no cwd worktrees, just workspaces + projects.
+    # enter's slot 0 is a global locator: the whole worktree/project/workspace
+    # universe, independent of cwd (the history-portability win), so 'feat' is
+    # offered even from outside the projects root.
     out = _complete(root, words="wtm enter ", cword="2", cwd=tmp_path)
-    assert out.split() == ["alpha", "ws"]
+    assert out.split() == ["alpha", "feat", "ws"]
 
 
 # --- completion kind labels --------------------------------------------------
@@ -702,6 +737,51 @@ def test_target_label_collision_worktree_wins(root: Path, monkeypatch: pytest.Mo
     # A lone 'beta' resolves to alpha's worktree, so worktree heads; the project
     # role (reachable only with a second token) is shadowed.
     assert _labels(_complete_target(_Ctx(()), ""))["beta"] == "worktree (also project)"
+
+
+def test_locate_completion_global_union_and_labels(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    monkeypatch.chdir(root)  # the locator is global; cwd does not scope it
+    from wtm.cli import _complete_locate
+
+    # Slot 0 is the whole universe: every worktree, project, and workspace.
+    assert _labels(_complete_locate(_Ctx(()), "")) == {
+        "alpha": "project",
+        "beta": "project",
+        "feat": "worktree",
+        "ws": "workspace",
+    }
+
+
+def test_locate_completion_collision_hint(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "shared", root=root)
+    run("create", "beta", "shared", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_locate
+
+    # 'shared' names two worktrees -> the winning tier's collision count shows.
+    assert _labels(_complete_locate(_Ctx(()), ""))["shared"] == "worktree (2)"
+
+
+def test_locate_completion_narrows_by_qualifier(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "feat", root=root)
+    run("create", "beta", "fix", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli import _complete_locate
+
+    # A leading project qualifier narrows the next slot to that project's worktrees.
+    assert _labels(_complete_locate(_Ctx(("alpha",)), "")) == {"feat": "worktree"}
 
 
 def test_hook_target_labels_event(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -992,6 +1072,105 @@ def test_enter_create_runs_install_hooks(root: Path, tmp_path: Path) -> None:
     res = run("enter", "alpha", "feat", "-c", "-i", root=root, hooks_dir=hooks)
     assert res.returncode == 0, res.stderr
     assert out.read_text().strip() == "install"
+
+
+# --- enter as a locator (experiment) -----------------------------------------
+
+
+def test_enter_single_name_resolves_worktree_globally(root: Path, tmp_path: Path) -> None:
+    # A bare NAME finds its worktree without a PROJECT, from anywhere in the root.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "feat", root=root, cwd=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "alpha" / "worktrees" / "feat")
+
+
+def test_enter_single_name_resolves_project(root: Path, tmp_path: Path) -> None:
+    # No worktree named 'alpha' -> the project tier wins (project-enter contract).
+    _seed_repo(root, "alpha")
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "alpha", root=root, cwd=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "alpha")
+    exports = _shell_exports(shell_file)
+    assert exports["WTM_PROJECT"] == "alpha"
+    assert "WTM_WORKTREE_DIR" not in exports  # project tier, not worktree
+
+
+def test_enter_ambiguous_worktree_lists_choices(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "shared", root=root)
+    run("create", "beta", "shared", root=root)
+    res = run("enter", "shared", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "matches 2 worktrees" in res.stderr
+    assert "wtm enter ws alpha shared" in res.stderr
+    assert "wtm enter ws beta shared" in res.stderr
+
+
+def test_enter_project_qualified_worktree(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "shared", root=root)
+    run("create", "beta", "shared", root=root)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "beta", "shared", root=root, cwd=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "beta" / "worktrees" / "shared")
+
+
+def test_enter_no_match_errors(root: Path) -> None:
+    _seed_repo(root, "alpha")
+    res = run("enter", "ghost", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "no worktree, project, or workspace matches" in res.stderr
+
+
+def test_enter_dir_arg_still_a_path(root: Path, tmp_path: Path) -> None:
+    # A path-looking single arg keeps the classic worktree-path behavior.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("enter", ".", root=root, cwd=wt, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(wt)
+
+
+def test_enter_cross_workspace_worktree(tmp_path: Path) -> None:
+    # The headline: a worktree in another workspace resolves by name alone,
+    # from an unrelated active workspace (the shell-history-portability win).
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    _run_multi("create", "proj", "onlywt", config=config, cwd=alpha, workspace="alpha")
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    # Active workspace is beta, but 'onlywt' lives in alpha -> still found.
+    res = _run_multi(
+        "enter", "onlywt", config=config, cwd=beta, workspace="beta", shell_file=shell_file
+    )
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(alpha / "proj" / "worktrees" / "onlywt")
+
+
+def test_enter_workspace_tier_cross_workspace(tmp_path: Path) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = _run_multi(
+        "enter", "alpha", config=config, cwd=beta, workspace="beta", shell_file=shell_file
+    )
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(alpha)
 
 
 # --- resolve -----------------------------------------------------------------
@@ -2881,7 +3060,13 @@ def _multi_workspace_config(base: Path, names: list[str]) -> tuple[Path, list[Pa
     return config, roots
 
 
-def _run_multi(*args: str, config: Path, cwd: Path, workspace: str | None = None):
+def _run_multi(
+    *args: str,
+    config: Path,
+    cwd: Path,
+    workspace: str | None = None,
+    shell_file: Path | None = None,
+):
     """Run wtm against a hand-written multi-workspace config."""
     env = {
         "WTM_CONFIG": str(config),
@@ -2895,6 +3080,8 @@ def _run_multi(*args: str, config: Path, cwd: Path, workspace: str | None = None
         "GIT_CONFIG_GLOBAL": str(cwd / "_gitconfig"),
         "GIT_CONFIG_SYSTEM": "/dev/null",
     }
+    if shell_file is not None:
+        env["WTM_SHELL_FILE"] = str(shell_file)
     if workspace is not None:
         env["WTM_WORKSPACE"] = workspace
     else:
