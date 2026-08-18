@@ -7,7 +7,7 @@ hooks.
 
 A hook is either a **builtin** discovered file or an **inline** `sh -c` command
 declared in config; explicit inline hooks *add to* the builtins. `wtm` fires
-eleven **events** across five **scopes**.
+thirteen **events** across five **scopes**.
 
 ## Events
 
@@ -22,19 +22,31 @@ state mutation, a bare name is a mutation-free moment.
 | `leave` | `wtm leave` |
 | `pre-delete` / `post-delete` | `wtm delete` |
 | `pre-rename` / `post-rename` | `wtm rename` |
+| `project-enter` | `wtm project enter` |
+| `project-leave` | `wtm project leave` |
 | `workspace-enter` | `wtm workspace enter` |
 | `workspace-leave` | `wtm workspace leave` |
 
 Within a single `wtm create -c -i` the order is `pre-create` → `post-create` →
 `install` → `enter`; within `wtm enter -i` it is `install` → `enter`.
 
-Nine of the events are worktree events. The two `workspace-enter` /
-`workspace-leave` events are workspace-scoped: fired by `wtm workspace
-enter`/`leave`, across the system/user/workspace scopes only, with a
-workspace-only `WTM_*` contract (`WTM_EVENT`, `WTM_WORKSPACE`,
-`WTM_WORKSPACE_DIR`; their `$1` is the projects root). `wtm workspace leave`,
-when run from inside a worktree, fires that worktree's `leave` first, then
-`workspace-leave`.
+Nine of the events are worktree events. The two `project-enter` /
+`project-leave` events are project-scoped: fired by `wtm project enter`/`leave`,
+across the system/user/workspace/project scopes only (never worktree), with the
+project-level `WTM_*` contract (`WTM_EVENT` plus `WTM_PROJECT`,
+`WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
+`WTM_WORKSPACE_DIR`; no `WTM_WORKTREE_DIR`/`WTM_BRANCH`; their `$1` is the project
+dir). The two `workspace-enter` / `workspace-leave` events are workspace-scoped:
+fired by `wtm workspace enter`/`leave`, across the system/user/workspace scopes
+only, with a workspace-only `WTM_*` contract (`WTM_EVENT`, `WTM_WORKSPACE`,
+`WTM_WORKSPACE_DIR`; their `$1` is the projects root).
+
+The teardown side cascades inside-out. `wtm project leave`, run from inside one
+of the project's worktrees, fires that worktree's `leave` first, then
+`project-leave` (worktree → project). `wtm workspace leave`, run from inside a
+worktree, fires the full chain: that worktree's `leave`, then the containing
+project's `project-leave`, then `workspace-leave` (worktree → project →
+workspace).
 
 ## Scopes and discovery
 
@@ -65,9 +77,11 @@ order.
 Across scopes, order depends on the phase:
 
 - **Setup events** (`pre-create`, `post-create`, `install`, `enter`,
-  `pre-rename`, `post-rename`) run most-general first:
+  `pre-rename`, `post-rename`, `project-enter`, `workspace-enter`) run
+  most-general first:
   **system → user → workspace → project → worktree**.
-- **Teardown events** (`leave`, `pre-delete`, `post-delete`) reverse to
+- **Teardown events** (`leave`, `pre-delete`, `post-delete`, `project-leave`,
+  `workspace-leave`) reverse to
   most-specific first: **worktree → project → workspace → user → system**.
 
 ## Timing relative to the state change

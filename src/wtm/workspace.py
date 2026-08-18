@@ -30,8 +30,16 @@ from pathlib import Path
 
 from wtm import git, registry
 from wtm.config import Config, Scope
-from wtm.core import WtmError, abspath, current_dir, expand_path, project_dir_for
-from wtm.hooks import run_workspace_hooks
+from wtm.core import (
+    WtmError,
+    abspath,
+    current_dir,
+    expand_path,
+    leave_landing,
+    project_dir_for,
+    within,
+)
+from wtm.hooks import run_project_hooks, run_workspace_hooks
 from wtm.project import Project
 from wtm.worktree import Worktree
 
@@ -103,7 +111,7 @@ class WorkspaceLeft:
 
     name: str
     cd_dir: Path | None  # None means "stay put"
-    cascaded: bool  # a worktree 'leave' fired first
+    cascaded: bool  # a worktree and/or project 'leave' fired first
 
 
 class Workspaces:
@@ -274,51 +282,42 @@ class Workspaces:
         return WorkspaceEntered(name=ws.name, dir=ws.path)
 
     def leave(self, name: str | None, *, strict: bool) -> WorkspaceLeft:
-        """Fire ``workspace-leave`` hooks; cascade the worktree ``leave`` when inside one.
+        """Fire ``workspace-leave`` hooks; cascade the inner tiers when inside them.
 
-        When cwd is inside a worktree of the target workspace, the worktree's
-        ``leave`` event fires first (worktree->workspace teardown order), then
-        ``workspace-leave``. The single cd-out lands at ``$OLDPWD`` if it is
-        outside the workspace tree, else (having cascaded out of a worktree) the
-        projects-root's parent, else stays put. An explicit NAME you are not
-        standing in fires only ``workspace-leave`` and never cds.
+        When cwd is inside a project of the target workspace, the teardown runs
+        the full chain (worktree->project->workspace): the worktree's ``leave``
+        fires first (when standing in a worktree), then that project's
+        ``project-leave``, then ``workspace-leave``. The single cd-out lands at
+        ``$OLDPWD`` if it is outside the workspace tree, else (having cascaded
+        out of a worktree/project) the projects-root's parent, else stays put.
+        An explicit NAME you are not standing in fires only ``workspace-leave``
+        and never cds.
         """
         explicit = name is not None
         ws = self._require(name)
         cwd = current_dir()
         root = Path(os.path.realpath(ws.path))
-        inside = cwd is not None and _within(cwd, root)
+        inside = cwd is not None and within(cwd, root)
 
         cascaded = False
-        if inside and project_dir_for(root, cwd) is not None and git.is_repo(cwd):
-            try:
-                Worktree(self.config).leave([], strict=strict)
-                cascaded = True
-            except (WtmError, git.GitError):
-                cascaded = False
+        project_dir = project_dir_for(root, cwd) if inside else None
+        if project_dir is not None:
+            # Worktree tier first (only when standing in a live worktree).
+            if git.is_repo(cwd) and within(cwd, project_dir / "worktrees"):
+                try:
+                    Worktree(self.config).leave([], strict=strict)
+                    cascaded = True
+                except (WtmError, git.GitError):
+                    cascaded = False
+            # Project tier next, regardless of the worktree outcome.
+            run_project_hooks("project-leave", project_dir, self.config, strict=strict)
+            cascaded = True
 
         run_workspace_hooks("workspace-leave", ws.name, ws.path, self.config, strict=strict)
 
-        cd_dir = self._leave_landing(root, inside=inside, explicit=explicit, cascaded=cascaded)
+        cd_dir = leave_landing(root, inside=inside, explicit=explicit, cascaded=cascaded)
 
         return WorkspaceLeft(name=ws.name, cd_dir=cd_dir, cascaded=cascaded)
-
-    def _leave_landing(
-        self, root: Path, *, inside: bool, explicit: bool, cascaded: bool
-    ) -> Path | None:
-        """Pick the cd-out target for ``leave`` (``None`` means stay put)."""
-        # You cannot cd out of a workspace you are not standing in.
-        if explicit and not inside:
-            return None
-
-        oldpwd = os.environ.get("OLDPWD")
-        if oldpwd and Path(oldpwd).is_dir() and not _within(Path(os.path.realpath(oldpwd)), root):
-            return Path(oldpwd)
-        if cascaded:
-            # Escape the worktree tree we just tore down.
-            return root.parent
-
-        return None
 
     # --- helpers -------------------------------------------------------------
 
@@ -386,8 +385,3 @@ def _prepare_path(raw: str | None) -> tuple[str, Path]:
         persist = str(abspath(raw))
 
     return persist, expand_path(persist)
-
-
-def _within(child: Path, parent: Path) -> bool:
-    """Return whether *child* is *parent* itself or nested below it."""
-    return child == parent or parent in child.parents

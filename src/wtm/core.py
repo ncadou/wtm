@@ -15,11 +15,13 @@ __all__ = [
     "current_dir",
     "derive_context",
     "expand_path",
+    "leave_landing",
     "project_dir_for",
     "reject_traversal",
     "remap_dir",
     "rescue_dir",
     "valid_project_name",
+    "within",
     "worktree_name",
 ]
 
@@ -141,6 +143,33 @@ def rescue_dir(cwd: Path | None, worktree_dir: Path, project_dir: Path) -> Path 
 def _is_within(child: Path, parent: Path) -> bool:
     """Return whether *child* is *parent* itself or nested below it."""
     return child == parent or parent in child.parents
+
+
+def within(child: Path, parent: Path) -> bool:
+    """Return whether *child* is *parent* itself or nested below it (public alias)."""
+    return _is_within(child, parent)
+
+
+def leave_landing(root: Path, *, inside: bool, explicit: bool, cascaded: bool) -> Path | None:
+    """Pick the cd-out target for a tiered ``leave`` (``None`` means stay put).
+
+    Shared by the project and workspace lifecycles, whose leave-landing rule is
+    identical one tier apart: *root* is the tier's tree (a project dir or a
+    projects root). You cannot cd out of a tree you are not standing in
+    (*explicit* target, not *inside*). Otherwise land at ``$OLDPWD`` when it is
+    still a directory outside *root*, else -- having *cascaded* out of an inner
+    tier -- the tree's parent, else stay put.
+    """
+    if explicit and not inside:
+        return None
+
+    oldpwd = os.environ.get("OLDPWD")
+    if oldpwd and Path(oldpwd).is_dir() and not within(Path(os.path.realpath(oldpwd)), root):
+        return Path(oldpwd)
+    if cascaded:
+        return root.parent
+
+    return None
 
 
 def remap_dir(cwd: Path | None, old_dir: Path, new_dir: Path) -> Path | None:

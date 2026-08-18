@@ -3305,3 +3305,178 @@ def test_workspace_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) 
     assert order.read_text().splitlines() == ["wt:feat", "ws:ws"]
     # OLDPWD unusable -> cascaded out of the worktree tree to the projects-root parent.
     assert _shell_cd(shell_file) == str(root.parent)
+
+
+# --- project enter / leave (cd channel + lifecycle hooks) --------------------
+
+
+def test_project_enter_emits_cd_and_project_contract(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    shell_file = tmp_path / "cd"
+    out = tmp_path / "entered"
+    # project-scope builtin lives under the project's .git/hooks.
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-project-enter",
+        f'printf "%s|%s|%s|%s|%s\\n" "$WTM_EVENT" "$WTM_PROJECT" "$1"'
+        f' "$WTM_WORKSPACE" "$WTM_WORKTREE_DIR" > "{out}"\n',
+    )
+    res = run("project", "enter", "alpha", root=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "alpha")
+    # Project-level session: the six project vars are exported; the two worktree
+    # vars are unset.
+    assert _shell_exports(shell_file) == {
+        "WTM_PROJECT": "alpha",
+        "WTM_PROJECT_DIR": str(root / "alpha"),
+        "WTM_WORKTREES_DIR": str(root / "alpha" / "worktrees"),
+        "WTM_GIT_COMMON_DIR": str(root / "alpha" / ".git"),
+        "WTM_WORKSPACE": "ws",
+        "WTM_WORKSPACE_DIR": str(root),
+    }
+    assert _shell_unsets(shell_file) == {"WTM_WORKTREE_DIR", "WTM_BRANCH"}
+    event, project, arg1, workspace, wtdir = out.read_text().strip().split("|")
+    assert event == "project-enter"
+    assert project == "alpha"
+    assert arg1 == str(root / "alpha")
+    assert workspace == "ws"
+    assert wtdir == ""  # project-only contract: no worktree field
+
+
+def test_project_enter_infers_project_from_cwd(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    shell_file = tmp_path / "cd"
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run("project", "enter", root=root, cwd=wt, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "alpha")
+    assert _shell_exports(shell_file)["WTM_PROJECT"] == "alpha"
+
+
+def test_project_enter_missing_git_errors(root: Path, tmp_path: Path) -> None:
+    # A project dir with no .git is not enterable.
+    (root / "empty" / "worktrees").mkdir(parents=True)
+    shell_file = tmp_path / "cd"
+    res = run("project", "enter", "empty", root=root, shell_file=shell_file)
+    assert res.returncode == 1
+    assert "project git dir not found" in res.stderr
+
+
+def test_project_leave_fires_hook_and_unsets_contract(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    shell_file = tmp_path / "cd"
+    fired = tmp_path / "left"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-project-leave",
+        f'echo "$WTM_PROJECT" > "{fired}"\n',
+    )
+    res = run(
+        "project",
+        "leave",
+        "alpha",
+        root=root,
+        cwd=root / "alpha",
+        shell_file=shell_file,
+        extra_env={"OLDPWD": str(outside)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert fired.read_text().strip() == "alpha"
+    # Leaving ends the session: the whole managed set is unset.
+    assert _shell_exports(shell_file) == {}
+    assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
+    assert _shell_cd(shell_file) == str(outside)  # OLDPWD outside the project tree
+
+
+def test_project_leave_cascades_worktree_teardown(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    shell_file = tmp_path / "cd"
+    order = tmp_path / "order"
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-leave", f'echo "wt:$WTM_BRANCH" >> "{order}"\n'
+    )
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-project-leave",
+        f'echo "proj:$WTM_PROJECT" >> "{order}"\n',
+    )
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run(
+        "project",
+        "leave",
+        root=root,
+        cwd=wt,
+        shell_file=shell_file,
+        extra_env={"OLDPWD": "/nonexistent-oldpwd"},
+    )
+    assert res.returncode == 0, res.stderr
+    # Teardown inside-out: worktree leave first, then project-leave.
+    assert order.read_text().splitlines() == ["wt:feat", "proj:alpha"]
+    # OLDPWD unusable -> cascaded out of the worktree tree to the projects root.
+    assert _shell_cd(shell_file) == str(root)
+
+
+def test_project_leave_explicit_not_inside_no_cd(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    shell_file = tmp_path / "cd"
+    fired = tmp_path / "left"
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-project-leave",
+        f'echo "$WTM_PROJECT" > "{fired}"\n',
+    )
+    # Standing at the projects root, leaving an explicit project we're not in.
+    res = run("project", "leave", "alpha", root=root, cwd=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert fired.read_text().strip() == "alpha"  # hook still fires
+    assert _shell_cd(shell_file) is None  # never cds out of a tree we're not in
+
+
+def test_project_leave_no_cd_flag_stays_but_ends_session(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    shell_file = tmp_path / "cd"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    res = run(
+        "project",
+        "leave",
+        "alpha",
+        "-C",
+        root=root,
+        cwd=root / "alpha",
+        shell_file=shell_file,
+        extra_env={"OLDPWD": str(outside)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) is None  # -C suppresses the cd-out
+    assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)  # session still ends
+
+
+def test_workspace_leave_full_chain_worktree_project_workspace(root: Path, tmp_path: Path) -> None:
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    workspace = tmp_path / "wshooks"
+    shell_file = tmp_path / "cd"
+    order = tmp_path / "order"
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-leave", f'echo "wt:$WTM_BRANCH" >> "{order}"\n'
+    )
+    _write_hook(
+        root / "alpha" / ".git" / "hooks" / "wtm-project-leave",
+        f'echo "proj:$WTM_PROJECT" >> "{order}"\n',
+    )
+    _write_hook(workspace / "wtm-workspace-leave", f'echo "ws:$WTM_WORKSPACE" >> "{order}"\n')
+    wt = root / "alpha" / "worktrees" / "feat"
+    res = run(
+        "workspace",
+        "leave",
+        root=root,
+        cwd=wt,
+        shell_file=shell_file,
+        workspace_hooks_dir=workspace,
+        extra_env={"OLDPWD": "/nonexistent-oldpwd"},
+    )
+    assert res.returncode == 0, res.stderr
+    # Full inside-out chain: worktree -> project -> workspace.
+    assert order.read_text().splitlines() == ["wt:feat", "proj:alpha", "ws:ws"]
+    assert _shell_cd(shell_file) == str(root.parent)

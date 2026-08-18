@@ -39,6 +39,12 @@ The contract follows a **session** model: entering sets it, leaving clears it.
   session regardless of whether you also move).
 - `delete` (when you are standing in the doomed worktree) — rescue-`cd` out and
   unset the contract.
+- `project enter` — `cd` into the project dir and export the project-level
+  contract (`WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`,
+  `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; the two worktree
+  vars `WTM_WORKTREE_DIR`/`WTM_BRANCH` are unset). `project leave` `cd`s out
+  (`$OLDPWD`, the projects root when it cascaded out of a worktree, or stays put)
+  and unsets everything (even with `-C`).
 - `workspace enter` — `cd` into the projects root and export only
   `WTM_WORKSPACE` / `WTM_WORKSPACE_DIR` (the six worktree/project vars are
   unset). `workspace leave` unsets everything (even with `-C`).

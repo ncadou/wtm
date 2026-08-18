@@ -7,13 +7,40 @@ presentation: methods return data (paths, name lists) and never print or log;
 
 from __future__ import annotations
 
-__all__ = ["Project"]
+__all__ = ["Project", "ProjectEntered", "ProjectLeft"]
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from wtm import git
 from wtm.config import Config, resolve_project_dir
-from wtm.core import WtmError, valid_project_name
+from wtm.core import (
+    WtmError,
+    current_dir,
+    leave_landing,
+    valid_project_name,
+    within,
+)
+from wtm.hooks import run_project_hooks
+from wtm.worktree import Worktree
+
+
+@dataclass(frozen=True)
+class ProjectEntered:
+    """Result of :meth:`Project.enter`: the project dir to cd into."""
+
+    name: str
+    dir: Path
+
+
+@dataclass(frozen=True)
+class ProjectLeft:
+    """Result of :meth:`Project.leave`: where to land, and whether a cascade fired."""
+
+    name: str
+    cd_dir: Path | None  # None means "stay put"
+    cascaded: bool  # a worktree 'leave' fired first
 
 
 class Project:
@@ -96,6 +123,56 @@ class Project:
             "WTM_WORKSPACE": ws.name if ws is not None else "",
             "WTM_WORKSPACE_DIR": str(ws.path if ws is not None else project_dir.parent),
         }
+
+    # --- lifecycle -----------------------------------------------------------
+
+    def enter(self, workspace: str | None, project: str | None, *, strict: bool) -> ProjectEntered:
+        """cd into a project's directory, firing ``project-enter`` hooks.
+
+        The middle tier between ``workspace enter`` and ``worktree enter``: it
+        lands in ``<workspace>/<project>`` (beside ``.git`` and ``worktrees/``)
+        and exports the project-level contract, pinning the active workspace.
+        The project must exist on disk (its ``.git`` is where project-scope
+        hooks live).
+        """
+        project_dir = resolve_project_dir(self.config, workspace, project)
+        if not (project_dir / ".git").is_dir():
+            raise WtmError(f"project git dir not found: {project_dir / '.git'}")
+        run_project_hooks("project-enter", project_dir, self.config, strict=strict)
+
+        return ProjectEntered(name=project_dir.name, dir=project_dir)
+
+    def leave(self, workspace: str | None, project: str | None, *, strict: bool) -> ProjectLeft:
+        """Fire ``project-leave`` hooks; cascade the worktree ``leave`` when inside one.
+
+        When cwd is inside a worktree of the target project, the worktree's
+        ``leave`` event fires first (worktree->project teardown order), then
+        ``project-leave``. The single cd-out lands at ``$OLDPWD`` if it is
+        outside the project tree, else (having cascaded out of a worktree) the
+        projects root, else stays put. An explicit PROJECT you are not standing
+        in fires only ``project-leave`` and never cds.
+        """
+        explicit = project is not None or workspace is not None
+        project_dir = resolve_project_dir(self.config, workspace, project)
+        root = Path(os.path.realpath(project_dir))
+        cwd = current_dir()
+        inside = cwd is not None and within(cwd, root)
+
+        # Cascade only when standing in an actual worktree (under worktrees/),
+        # never the bare project dir itself.
+        cascaded = False
+        if inside and within(cwd, root / "worktrees") and git.is_repo(cwd):
+            try:
+                Worktree(self.config).leave([], strict=strict)
+                cascaded = True
+            except (WtmError, git.GitError):
+                cascaded = False
+
+        run_project_hooks("project-leave", project_dir, self.config, strict=strict)
+
+        cd_dir = leave_landing(root, inside=inside, explicit=explicit, cascaded=cascaded)
+
+        return ProjectLeft(name=project_dir.name, cd_dir=cd_dir, cascaded=cascaded)
 
 
 # --- helpers -----------------------------------------------------------------

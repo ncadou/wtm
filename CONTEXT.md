@@ -69,20 +69,35 @@ commands. Both accumulate across scopes.
 **Event**:
 A lifecycle point that fires hooks. Names follow a `pre-`/`post-` convention: a
 prefix marks the side of a state mutation, a bare name is a mutation-free
-moment. The eleven events are `pre-create`, `post-create`, `install`, `enter`,
+moment. The thirteen events are `pre-create`, `post-create`, `install`, `enter`,
 `leave`, `pre-delete`, `post-delete`, `pre-rename`, `post-rename`,
-`workspace-enter`, `workspace-leave`. The two `workspace-*` events are
-workspace-scoped (see **Workspace lifecycle**); the other nine are worktree
-events.
+`project-enter`, `project-leave`, `workspace-enter`, `workspace-leave`. The two
+`workspace-*` events are workspace-scoped and the two `project-*` events are
+project-scoped (see **Workspace lifecycle** / **Project lifecycle**); the other
+nine are worktree events.
 
 **Workspace lifecycle**:
 `wtm workspace enter`/`leave` operate at workspace granularity. `enter` cds into
 the projects root and fires `workspace-enter`; `leave` fires `workspace-leave`
 and cds out. These two events fire only across the `system`/`user`/`workspace`
 scopes with a workspace-only contract (`WTM_EVENT`, `WTM_WORKSPACE`,
-`WTM_WORKSPACE_DIR`) -- there is no worktree/project/branch. `leave` cascades:
-standing inside a worktree of the target, it fires that worktree's `leave`
-first (worktree->workspace teardown order), then `workspace-leave`.
+`WTM_WORKSPACE_DIR`) -- there is no worktree/project/branch. `leave` cascades the
+full teardown chain: standing inside a worktree of the target, it fires that
+worktree's `leave` first, then the containing project's `project-leave`, then
+`workspace-leave` (worktree->project->workspace teardown order).
+
+**Project lifecycle**:
+`wtm project enter`/`leave` operate at project granularity, the middle tier
+between the workspace and worktree lifecycles. `enter` cds into the project dir
+(`<workspace>/<project>`, beside `.git`/`worktrees`) and fires `project-enter`;
+`leave` fires `project-leave` and cds out. These two events fire across the
+`system`/`user`/`workspace`/`project` scopes (never worktree -- there is no live
+worktree) with the project-level contract (the six project vars, no
+`WTM_WORKTREE_DIR`/`WTM_BRANCH`). `leave` cascades: standing inside a worktree of
+the target project, it fires that worktree's `leave` first
+(worktree->project teardown order), then `project-leave`. The enter side does
+not cascade: `project enter` fires `project-enter` across its scopes but never
+`workspace-enter`.
 
 **Registry write seam**:
 `wtm` reads config everywhere but writes only via `wtm.registry`, which mutates
@@ -105,9 +120,11 @@ layout (the *target* project) of the active workspace.
 The `WTM_*` context the shell wrapper carries between an `enter` and a `leave`.
 Movers that cd the shell also emit shell directives (a `cd` plus `export`/`unset`
 of the eight-var contract) out-of-band via the `WTM_SHELL_FILE` temp file, which
-the wrapper *sources*. Set on enter/`create -c`/`import -c` (full contract) and
+the wrapper *sources*. Set on enter/`create -c`/`import -c` (full contract), on
+`project enter` (the six project vars, no `WTM_WORKTREE_DIR`/`WTM_BRANCH`), and
 on `workspace enter` (workspace vars only); *updated* on `rename` when standing
-in the moved worktree; *unset* on `leave`/`delete`-of-current/`workspace leave`
-(even with `-C`, which suppresses only the cd). Because the exported
-`WTM_WORKSPACE` also *selects* the active workspace, entering **pins** it (over
-cwd inference) until leave -- the session is deliberately sticky.
+in the moved worktree; *unset* on `leave`/`delete`-of-current/`project
+leave`/`workspace leave` (even with `-C`, which suppresses only the cd). Because
+the exported `WTM_WORKSPACE` also *selects* the active workspace, entering
+**pins** it (over cwd inference) until leave -- the session is deliberately
+sticky.

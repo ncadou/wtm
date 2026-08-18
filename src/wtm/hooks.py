@@ -66,6 +66,7 @@ __all__ = [
     "Scope",
     "ScopeListing",
     "run_hooks",
+    "run_project_hooks",
     "run_workspace_hooks",
 ]
 
@@ -96,6 +97,8 @@ EVENTS = (
     "post-delete",
     "pre-rename",
     "post-rename",
+    "project-enter",
+    "project-leave",
     "workspace-enter",
     "workspace-leave",
 )
@@ -106,9 +109,10 @@ SETUP_EVENTS = (
     "enter",
     "pre-rename",
     "post-rename",
+    "project-enter",
     "workspace-enter",
 )
-TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete", "workspace-leave")
+TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete", "project-leave", "workspace-leave")
 
 
 # Setup runs general->specific; teardown reverses to specific->general.
@@ -116,6 +120,8 @@ _SETUP_ORDER = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE, Scope.PROJECT, Scope.
 _TEARDOWN_ORDER = tuple(reversed(_SETUP_ORDER))
 # The workspace lifecycle events have no project/worktree; only these apply.
 _WORKSPACE_SCOPES = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE)
+# The project lifecycle events have no live worktree; system..project apply.
+_PROJECT_SCOPES = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE, Scope.PROJECT)
 
 
 # --- firing engine -----------------------------------------------------------
@@ -227,6 +233,77 @@ def run_workspace_hooks(
             _run_hook_source(base, path, path, env, strict=strict)
         for command in spec.on.get(event, []):
             _run_inline_hook(command, path, path, env, strict=strict)
+
+
+def run_project_hooks(
+    event: str,
+    project_dir: Path,
+    config: Config,
+    *,
+    strict: bool,
+) -> None:
+    """Fire a project-lifecycle event (``project-enter`` / ``project-leave``).
+
+    The middle tier between :func:`run_workspace_hooks` and :func:`run_hooks`:
+    there is no live worktree, so the system, user, workspace, and project
+    scopes apply (never worktree). The environment contract is the project-level
+    subset (``WTM_EVENT`` + the six project vars) with no ``WTM_WORKTREE_DIR`` /
+    ``WTM_BRANCH``. *project_dir* is both the subprocess working directory and
+    the hooks' ``$1``; the project-scope builtins live under
+    ``<project>/.git/hooks`` and the workspace scope resolves against the
+    workspace that contains the project (not necessarily the active one).
+    """
+    if _env_flag("WTM_NO_HOOKS"):
+        return
+
+    order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
+    selected = tuple(s for s in order if s in _PROJECT_SCOPES)
+
+    # Enforce the project-only contract: strip any inherited session vars (a
+    # stale WTM_WORKTREE_DIR/WTM_BRANCH from a worktree session would otherwise
+    # leak into the hook), then set WTM_EVENT plus the project-level contract.
+    ws = config.workspace_of(project_dir)
+    env = dict(os.environ)
+    for key in MANAGED_ENV_VARS:
+        env.pop(key, None)
+    env["WTM_EVENT"] = event
+    env["WTM_PROJECT"] = project_dir.name
+    env["WTM_PROJECT_DIR"] = str(project_dir)
+    env["WTM_WORKTREES_DIR"] = str(project_dir / "worktrees")
+    env["WTM_GIT_COMMON_DIR"] = str(project_dir / ".git")
+    env["WTM_WORKSPACE"] = ws.name if ws is not None else ""
+    env["WTM_WORKSPACE_DIR"] = str(ws.path if ws is not None else project_dir.parent)
+
+    for scope in selected:
+        spec = _project_scope_spec(scope, config, project_dir)
+        if spec.run_builtins:
+            base = _project_firing_dir(scope, config, spec, project_dir) / f"wtm-{event}"
+            _run_hook_source(base, project_dir, project_dir, env, strict=strict)
+        for command in spec.on.get(event, []):
+            _run_inline_hook(command, project_dir, project_dir, env, strict=strict)
+
+
+def _project_scope_spec(scope: Scope, config: Config, project_dir: Path) -> HookSpec:
+    """The inline :class:`HookSpec` for a project-lifecycle fire at *scope*."""
+    return config.scope_hook_spec(scope, project_dir, project_dir / "worktrees")
+
+
+def _project_firing_dir(scope: Scope, config: Config, spec: HookSpec, project_dir: Path) -> Path:
+    """The builtin discovery dir for a project-lifecycle fire at *scope*."""
+    if scope is Scope.SYSTEM:
+        return config.system_hooks_dir
+    if scope is Scope.USER:
+        return config.user_hooks_dir
+    if scope is Scope.WORKSPACE:
+        if spec.dir is not None:
+            return spec.dir
+        ws = config.workspace_of(project_dir)
+
+        return (
+            ws.path / ".wtm" / "hooks" if ws is not None else project_dir.parent / ".wtm" / "hooks"
+        )
+
+    return spec.dir or project_dir / ".git" / "hooks"
 
 
 def _workspace_scope_spec(scope: Scope, config: Config, path: Path) -> HookSpec:

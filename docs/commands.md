@@ -55,6 +55,8 @@ list    [WORKSPACE] [-t|--tree] [-w|--worktrees] [-j|--json] [-a|--all]
                                   --all: span every declared workspace, prepending a workspace column)
 import  [SOURCE|PROJECT] [opts]   fold a plain clone into the bare-repo layout; alias: wtm import
 resolve [[WORKSPACE] PROJECT] [-e|--env]   print a project's directory (--env: emit the project-level WTM_* contract)
+enter   [[WORKSPACE] PROJECT]     cd into the project dir, firing project-enter hooks
+leave   [[WORKSPACE] PROJECT] [-C]   fire project-leave hooks (cascading the worktree leave when inside one); cd out unless -C
 ```
 
 Projects are *discovered* on disk (a `<name>/.git`), never declared; config
@@ -70,8 +72,20 @@ project-level slice of the contract (`WTM_PROJECT`, `WTM_PROJECT_DIR`,
 — there is no `WTM_WORKTREE_DIR` or `WTM_BRANCH`, since a project has no single
 worktree.
 
-## Worktrees (`wtm worktree …`, each also a top-level alias)
+`wtm project enter [[WORKSPACE] PROJECT]` cds into the project dir (beside its
+`.git`/`worktrees`, PROJECT inferred from the cwd when omitted), fires
+`project-enter` hooks, and exports that same project-level contract — the middle
+tier between `workspace enter` (the projects root) and `worktree enter` (a
+checkout). Exporting `WTM_WORKSPACE` pins the active workspace for the session
+(the two worktree vars are unset). `wtm project leave [[WORKSPACE] PROJECT] [-C]`
+fires `project-leave` and cds out (to `$OLDPWD` if outside the project tree, else
+the projects root when it cascaded out of a worktree, else stays put); `-C`
+suppresses the cd but still ends the session. Standing inside one of the
+project's worktrees, `leave` cascades the worktree's `leave` first
+(worktree→project teardown order). The project must already exist on disk
+(`<project>/.git` must be present).
 
+## Worktrees (`wtm worktree …`, each also a top-level alias)
 ```
 create  [[WORKSPACE] PROJECT] NAME [-b BRANCH] [--base REF] [-d DIR] [-c] [-i]  add a worktree (+branch); -c to cd, -i to run install hooks
 install ([[WORKSPACE] PROJECT] NAME | DIR)            run install hooks for a worktree (alias for 'wtm hook run install')

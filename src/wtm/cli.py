@@ -391,7 +391,7 @@ def _complete_hook_target(ctx: typer.Context, incomplete: str) -> list[tuple[str
 
 
 project_app = typer.Typer(
-    help="Project-level operations (new, clone, list, resolve).",
+    help="Project-level operations (enter, leave, new, clone, list, resolve).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -603,6 +603,52 @@ def project_resolve(
             print(emit_env_line(key, value))
     else:
         print(ctx.obj.project.resolve_path(workspace, project))
+
+
+@project_app.command(name="enter")
+def project_enter(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_project,
+    ),
+    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
+) -> None:
+    """cd into a project's directory, firing project-enter hooks.
+
+    Lands beside the project's ``.git``/``worktrees`` and exports the
+    project-level WTM_* contract (no WTM_WORKTREE_DIR/WTM_BRANCH), pinning the
+    active workspace until leave.
+    """
+    workspace, project = split_workspace_project(args or [])
+    result = ctx.obj.project.enter(workspace, project, strict=strict)
+    emit_shell(cd=result.dir, env=ctx.obj.project.resolve_env(workspace, project))
+
+
+@project_app.command(name="leave")
+def project_leave(
+    ctx: typer.Context,
+    args: list[str] = typer.Argument(
+        None,
+        metavar="[[WORKSPACE] PROJECT]",
+        help="Project (default: inferred from cwd), optionally prefixed by its WORKSPACE",
+        autocompletion=_complete_project,
+    ),
+    no_cd: bool = typer.Option(False, "-C", "--no-cd", help="Run hooks without cd-ing out"),
+    strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
+) -> None:
+    """Fire project-leave hooks (cascading the worktree leave when inside one); cd out.
+
+    Ends the project session: the WTM_* contract is unset even with -C (which
+    only suppresses the cd-out).
+    """
+    workspace, project = split_workspace_project(args or [])
+    result = ctx.obj.project.leave(workspace, project, strict=strict)
+    log(f"left project '{result.name}'")
+    cd_dir = result.cd_dir if (not no_cd and result.cd_dir is not None) else None
+    emit_shell(cd=cd_dir, env={}, fallback=False)
 
 
 # --- worktree management -----------------------------------------------------
