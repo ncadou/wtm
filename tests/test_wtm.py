@@ -1324,6 +1324,33 @@ def test_enter_workspace_tier_cross_workspace(tmp_path: Path) -> None:
     assert _shell_cd(shell_file) == str(alpha)
 
 
+def test_enter_context_resolves_ambiguous(root: Path, tmp_path: Path) -> None:
+    # 'shared' spans two projects (globally ambiguous), but standing in one of
+    # them the current-context tiebreak enters that project's worktree silently.
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "shared", root=root)
+    run("create", "beta", "shared", root=root)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "shared", root=root, cwd=root / "beta", shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "beta" / "worktrees" / "shared")
+    assert "matches" not in res.stderr
+
+
+def test_enter_ambiguous_still_errors_out_of_context(root: Path) -> None:
+    # Out of any matching project (at the workspace root, one workspace), the
+    # context cannot single out a candidate -> the ambiguity error still fires.
+    _seed_repo(root, "alpha")
+    _seed_repo(root, "beta")
+    run("create", "alpha", "shared", root=root)
+    run("create", "beta", "shared", root=root)
+    res = run("enter", "shared", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "matches 2 worktrees" in res.stderr
+
+
 # --- resolve -----------------------------------------------------------------
 
 

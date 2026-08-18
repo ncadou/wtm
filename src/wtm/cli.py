@@ -21,6 +21,7 @@ from wtm.config import Config, HookSpec, ResolvedConfig, resolve_project_dir
 from wtm.core import (
     WtmError,
     current_dir,
+    project_dir_for,
     remap_dir,
     rescue_dir,
     worktree_name,
@@ -35,6 +36,7 @@ from wtm.locate import (
     Tier,
     build_index,
     locate,
+    narrow_by_context,
 )
 from wtm.output import (
     emit_env_line,
@@ -1175,9 +1177,35 @@ def _enter_via_locator(
     if isinstance(resolution, NotFound):
         raise WtmError(f"no worktree, project, or workspace matches: {' '.join(args)}")
     if isinstance(resolution, Ambiguous):
-        raise WtmError(_ambiguous_message(args, resolution.candidates))
+        picked = _context_pick(ctx, resolution.candidates)
+        if picked is None:
+            raise WtmError(_ambiguous_message(args, resolution.candidates))
+        _enter_location(ctx, picked, do_install=do_install, strict=strict)
+        return
 
     _enter_location(ctx, resolution.location, do_install=do_install, strict=strict)
+
+
+def _context_pick(ctx: typer.Context, candidates: list[Location]) -> Location | None:
+    """Collapse an ambiguous locator by the current context, or ``None`` if it can't.
+
+    The current context is the active workspace and, from the cwd, its project;
+    :func:`narrow_by_context` keeps the sole candidate they name (project first,
+    then workspace alone) so a unique in-context match enters silently instead of
+    erroring. A match never changes an already-unique resolution -- only the
+    ambiguous set is passed in -- so this can only turn a former error into a hit.
+    """
+    config = ctx.obj.config
+    workspace = config.active
+    project: str | None = None
+    if workspace is not None:
+        cwd = current_dir(resolve=False)
+        if cwd is not None:
+            project_dir = project_dir_for(config.workspaces[workspace].path, cwd)
+            if project_dir is not None:
+                project = project_dir.name
+
+    return narrow_by_context(candidates, workspace=workspace, project=project)
 
 
 def _enter_location(

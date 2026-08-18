@@ -55,9 +55,16 @@ miss -- worktree named the last token (ancestors matched as a project *or* a
 workspace), else project (a leading token its workspace), else workspace (single
 token only). One match resolves and is entered with that tier's contract,
 several are ambiguous (the qualified choices are printed, non-zero exit), none
-is not-found. Lives in `wtm.locate`: `locate` is the pure cascade over a
-`LocationIndex` snapshot, `build_index` the filesystem-bound (git-free) edge.
-Only `enter` consumes it today; the plumbing is command-agnostic.
+is not-found. Before reporting an ambiguity, `enter` applies a **current-context
+tiebreak** (`narrow_by_context`): the tied same-tier candidates are narrowed by
+the active workspace *and* its cwd-inferred project, relaxing to the workspace
+alone on a miss; a unique in-context match resolves silently, otherwise the tie
+stands and prints as before. The tiebreak only ever turns a former ambiguity
+error into a hit -- it never touches an already-unique resolution -- and the
+core cascade stays pure and global (it is a CLI-layer post-filter). Lives in
+`wtm.locate`: `locate` is the pure cascade over a `LocationIndex` snapshot,
+`build_index` the filesystem-bound (git-free) edge. Only `enter` consumes it
+today; the plumbing is command-agnostic.
 
 **Target mode**:
 Which shape of the target grammar a command accepts. One of `WORKTREE`

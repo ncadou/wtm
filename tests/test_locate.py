@@ -21,6 +21,7 @@ from wtm.locate import (
     Tier,
     build_index,
     locate,
+    narrow_by_context,
 )
 
 
@@ -137,6 +138,54 @@ def test_three_token_wrong_ancestor_not_found() -> None:
 def test_empty_tokens_rejected() -> None:
     with pytest.raises(ValueError, match="at least one token"):
         locate([], INDEX)
+
+
+# --- narrow_by_context (caller-side ambiguity tiebreak) -----------------------
+
+
+# The tied same-tier candidates 'main' resolves to across the design index.
+MAIN_HITS = [_wt("work", "api", "main"), _wt("work", "web", "main"), _wt("oss", "wtm", "main")]
+
+
+def test_project_context_narrows_worktree_tie() -> None:
+    # Standing in work/api: the workspace+project pair names exactly one 'main'.
+    assert narrow_by_context(MAIN_HITS, workspace="work", project="api") == _wt(
+        "work", "api", "main"
+    )
+
+
+def test_relaxes_to_workspace_when_project_misses() -> None:
+    # Standing in oss/wtm still resolves via the workspace alone (oss has one 'main').
+    assert narrow_by_context(MAIN_HITS, workspace="oss", project="wtm") == _wt(
+        "oss", "wtm", "main"
+    )
+
+
+def test_workspace_only_context_narrows() -> None:
+    # No project (e.g. at the workspace root): oss holds a single 'main'.
+    assert narrow_by_context(MAIN_HITS, workspace="oss", project=None) == _wt("oss", "wtm", "main")
+
+
+def test_none_when_workspace_still_ambiguous() -> None:
+    # work holds two 'main's and no project pins one -> the tie stands.
+    assert narrow_by_context(MAIN_HITS, workspace="work", project=None) is None
+
+
+def test_none_when_context_matches_no_candidate() -> None:
+    # A workspace outside the tied set names nothing.
+    assert narrow_by_context(MAIN_HITS, workspace="other", project=None) is None
+
+
+def test_none_when_no_context() -> None:
+    assert narrow_by_context(MAIN_HITS, workspace=None, project=None) is None
+
+
+def test_project_tier_tie_narrows_by_workspace() -> None:
+    # A project leaf carries no project ancestor; the same filter still fits,
+    # its project field being the leaf name (equal to the current project when in it).
+    api_hits = [_pr("work", "api"), _pr("oss", "api")]
+    assert narrow_by_context(api_hits, workspace="work", project="api") == _pr("work", "api")
+    assert narrow_by_context(api_hits, workspace="work", project="web") == _pr("work", "api")
 
 
 # --- build_index (filesystem edge) --------------------------------------------

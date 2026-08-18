@@ -20,7 +20,10 @@ try the deepest leaf tier first, fall back only when it yields nothing:
 3. else leaf = workspace named ``tk`` (only for a single token).
 
 Within the winning tier: one match resolves, several are ambiguous (the caller
-prints the qualified choices), none across all tiers is not-found.
+prints the qualified choices), none across all tiers is not-found. A caller with
+a current context may first collapse an ambiguity with :func:`narrow_by_context`
+(current project, then current workspace); only a unique in-context match resolves,
+otherwise the tie stands and is reported as before.
 
 :func:`locate` is pure -- it takes a :class:`LocationIndex` snapshot explicitly, so
 the cascade is the test surface without a subprocess or git. :func:`build_index`
@@ -40,6 +43,7 @@ __all__ = [
     "Tier",
     "build_index",
     "locate",
+    "narrow_by_context",
 ]
 
 from dataclasses import dataclass, field
@@ -149,6 +153,43 @@ def locate(tokens: list[str], index: LocationIndex) -> Resolution:
             return _finish(workspace_hits)
 
     return NotFound()
+
+
+def narrow_by_context(
+    candidates: list[Location], *, workspace: str | None, project: str | None
+) -> Location | None:
+    """Break an ambiguous locator by the current context, most-specific first (pure).
+
+    A caller-side tiebreak over the same-tier *candidates* of an :class:`Ambiguous`
+    result: keep the founding cascade pure and global, then let a command that has
+    a current context (its active workspace and, from the cwd, its project) collapse
+    a tie when that context names exactly one candidate. It never widens a result --
+    only :class:`Ambiguous` candidates are passed in.
+
+    :param candidates: the tied same-tier locations from an :class:`Ambiguous`.
+    :param workspace: the current active workspace name, or ``None`` if none.
+    :param project: the current project (from the cwd), or ``None`` if outside one.
+    :returns: the sole candidate matching the current ``workspace`` *and* ``project``,
+        else the sole one matching just the ``workspace``, else ``None`` (still
+        ambiguous -- the caller reports it as before).
+
+    The two stages mirror the tree top-down: the deepest context (workspace +
+    project) is tried first, relaxing to the workspace alone only on a miss. A
+    project leaf carries no project ancestor of its own, but the same filter still
+    fits -- its ``project`` field is the leaf name, which equals the current project
+    exactly when standing in it, so no tier special-casing is needed.
+    """
+    if workspace is not None and project is not None:
+        hits = [c for c in candidates if c.workspace == workspace and c.project == project]
+        if len(hits) == 1:
+            return hits[0]
+
+    if workspace is not None:
+        hits = [c for c in candidates if c.workspace == workspace]
+        if len(hits) == 1:
+            return hits[0]
+
+    return None
 
 
 # --- helpers -----------------------------------------------------------------
