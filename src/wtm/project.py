@@ -233,7 +233,14 @@ class Project:
             if ws is not None
             else ProjectAnnotation()
         )
-        effective, source = self.config.base_branch_provenance(ws, project_dir.name)
+        target = (
+            self.config.resolve_generic_target_for(ws.name, project_dir.name)
+            if ws is not None
+            else self.config.global_generic_target()
+        )
+        rung = self.config.provenance(target, "base_branch")
+        effective = str(rung.value) if rung is not None else None
+        source = rung.tier if rung is not None else "(none)"
 
         return ProjectShown(
             name=project_dir.name,

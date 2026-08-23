@@ -427,8 +427,8 @@ class Config:
         ancestor tiers (:meth:`_ancestor_tiers`) -- then pruned of every rung
         below the key's floor (see :meth:`inheritable_floors`). The builtin
         ``base_branch`` floor (``project``) is what keeps it a project-tier
-        concept with no worktree tier of its own, aligning ``config get
-        base_branch`` with :meth:`base_branch_provenance`.
+        concept with no worktree tier of its own, so ``config get base_branch``
+        resolves the same rung every consumer sees via :meth:`provenance`.
         """
         ancestors = self._ancestor_tiers(ws, project)
         own_rungs = [TierProbe(None, p) for p in own] if own else []
@@ -454,7 +454,7 @@ class Config:
         Concatenates the project cascade (tier ``project``, when a *project* is
         given), the workspace-own cascade (tier ``workspace``), and the global
         top-level default (tier ``global``) -- the shared tail of every
-        inheritable key's chain, matching :meth:`base_branch_provenance` exactly.
+        inheritable key's chain, the rungs :meth:`provenance` labels by tier.
         """
         rungs: list[TierProbe] = []
         if project is not None:
@@ -602,6 +602,20 @@ class Config:
 
         return effective, chain
 
+    def provenance(self, target: GenericTarget, key: Key) -> SourceRung | None:
+        """Resolve where *key*'s effective value comes from over *target*'s cascade.
+
+        The most-local :class:`SourceRung` carrying the key (its ``value`` /
+        ``tier`` / ``scope`` / ``file``), or ``None`` when the key appears
+        nowhere in the cascade. The generic provenance read behind every
+        origin label -- a typed-surface caller takes ``rung.value``, an
+        inheritable-key label maps ``rung.tier``, an entity-local one
+        ``rung.scope``.
+        """
+        _effective, chain = self.resolve_generic_value(target, key)
+
+        return chain[0] if chain else None
+
     def effective_keys(
         self, target: GenericTarget, *, deep: bool = False
     ) -> list[tuple[str, SourceRung]]:
@@ -681,37 +695,6 @@ class Config:
         extra = self._inherited_extra(annotation.extra, workspace, name, own_tier="project")
 
         return replace(annotation, extra=extra)
-
-    def base_branch_for(self, workspace: Workspace, name: str) -> str | None:
-        """Resolve a project's configured base branch (most-specific first)."""
-        return self.base_branch_provenance(workspace, name)[0]
-
-    def base_branch_provenance(
-        self, workspace: Workspace | None, name: str
-    ) -> tuple[str | None, str]:
-        """Resolve a project's effective base branch and the tier it came from.
-
-        An inheritance over the containment chain: the project's own
-        locality-merged ``base_branch`` (tier ``project``, wherever in the
-        project probe table it won) outranks the workspace's own merged
-        ``base_branch`` (tier ``workspace``), which outranks the global top-level
-        default (tier ``global``); ``(none)`` when nothing is set.
-        """
-        if workspace is not None:
-            proj_payload, _ = merge_locality(self._store, self._project_probes(workspace, name))
-            if proj_payload.get("base_branch"):
-                return str(proj_payload["base_branch"]), "project"
-
-            ws_payload, _ = merge_locality(self._store, self._workspace_probes(workspace))
-            if ws_payload.get("base_branch"):
-                return str(ws_payload["base_branch"]), "workspace"
-
-        for address in (ConfigAddress.user(), ConfigAddress.system()):
-            value = self.get_value(address, "base_branch")
-            if value:
-                return value, "global"
-
-        return None, "(none)"
 
     def _project_probes(self, workspace: Workspace, name: str) -> list[Probe]:
         """The project locality cascade, most-local-first."""
@@ -811,34 +794,6 @@ class Config:
             scopes.add(Scope.USER)
 
         return scopes
-
-    def base_branch_source(self) -> Scope | None:
-        """Return the scope declaring the top-level ``base_branch`` (user wins), or ``None``.
-
-        Reads the raw user and system files so a getter can annotate which scope a
-        real command would take the global default from.
-        """
-        if self._store.read(user_config_path()).get("base_branch"):
-            return Scope.USER
-
-        if self._store.read(system_config_path()).get("base_branch"):
-            return Scope.SYSTEM
-
-        return None
-
-    def workspace_base_branch_source(self, workspace: Workspace) -> Scope | None:
-        """Return the scope carrying the workspace's own ``base_branch``, or ``None``.
-
-        Walks the workspace locality cascade (workspace-local file, then the
-        user/system registry entries) most-local-first, mirroring
-        :meth:`base_branch_source` for the global default. Used by ``config show
-        --origin`` to annotate a workspace-tier base_branch.
-        """
-        for probe in self._workspace_probes(workspace):
-            if read_table(self._store, probe).get("base_branch"):
-                return probe.scope
-
-        return None
 
     # --- structural write tier (user file only) ------------------------------
 

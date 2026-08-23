@@ -235,8 +235,8 @@ class TestTypedAccessors:
 
         annotation = proj.annotation()
         assert annotation.base_branch == "trunk"
-        value, source = proj.base_branch_provenance()
-        assert (value, source) == ("trunk", "project")
+        rung = proj.provenance("base_branch")
+        assert (rung.value, rung.tier) == ("trunk", "project")
 
     def test_worktree_annotation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _make_tree(tmp_path)

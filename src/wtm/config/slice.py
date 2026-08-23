@@ -174,7 +174,7 @@ def resolve_slice(
 
     global_payload, global_hooks = merge_locality(cfg._store, global_probes())
     global_extra = {k: v for k, v in global_payload.items() if k != "base_branch"}
-    bb_source = cfg.base_branch_source()
+    global_rung = cfg.provenance(cfg.global_generic_target(), "base_branch")
     # Global extra is locality-only (no ancestor to inherit from): each key's
     # chain is its fold over the user/system top-level probes (tier=None).
     global_tiered = [TierProbe(None, p) for p in global_probes()]
@@ -196,7 +196,7 @@ def resolve_slice(
 
     return ConfigSlice(
         default_base_branch=cfg.default_base_branch,
-        base_branch_source=bb_source.value if bb_source is not None else None,
+        base_branch_source=global_rung.scope.value if global_rung is not None else None,
         global_extra=global_extra,
         global_hooks=global_hooks,
         workspaces=workspaces,
@@ -209,8 +209,10 @@ def _slice_workspace(
     cfg: Config, ws: Workspace, target: SliceTarget | None, recurse: bool, depth_limit: int
 ) -> ResolvedWorkspace:
     """Fill one workspace node with the pruned set of projects for the slice."""
-    bb_source = cfg.workspace_base_branch_source(ws)
-    extra_origins = cfg._extra_origins_for(cfg.resolve_generic_target_for(ws.name), ws.extra)
+    ws_target = cfg.resolve_generic_target_for(ws.name)
+    ws_rung = cfg.provenance(ws_target, "base_branch")
+    bb_source = ws_rung.scope if ws_rung is not None else None
+    extra_origins = cfg._extra_origins_for(ws_target, ws.extra)
     if depth_limit < 2:
         return ResolvedWorkspace(
             entry=ws, projects=(), base_branch_source=bb_source, extra_origins=extra_origins
@@ -249,10 +251,11 @@ def _slice_project(
     """Fill one project node with the pruned set of worktrees for the slice."""
     project_dir = ws.path / pname
     annotation = cfg.project_annotation(ws, pname)
-    effective, source = cfg.base_branch_provenance(ws, pname)
-    extra_origins = cfg._extra_origins_for(
-        cfg.resolve_generic_target_for(ws.name, pname), annotation.extra
-    )
+    proj_target = cfg.resolve_generic_target_for(ws.name, pname)
+    rung = cfg.provenance(proj_target, "base_branch")
+    effective = str(rung.value) if rung is not None else None
+    source = rung.tier if rung is not None else "(none)"
+    extra_origins = cfg._extra_origins_for(proj_target, annotation.extra)
 
     if depth_limit < 3:
         worktrees: tuple[ResolvedWorktree, ...] = ()

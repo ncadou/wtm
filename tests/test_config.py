@@ -280,11 +280,10 @@ def test_base_branch_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         '[workspaces.a.projects.proj]\nbase_branch="projann"\n'
     )
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    workspace = cfg.workspaces["a"]
     # Per-project annotation wins over the workspace default and global default.
-    assert cfg.base_branch_for(workspace, "proj") == "projann"
+    assert cfg.entity("a", "proj").get("base_branch") == "projann"
     # A project with no annotation falls back to the workspace default.
-    assert cfg.base_branch_for(workspace, "other") == "wsdefault"
+    assert cfg.entity("a", "other").get("base_branch") == "wsdefault"
 
 
 def test_project_local_beats_registry_annotation(
@@ -296,7 +295,7 @@ def test_project_local_beats_registry_annotation(
     (proj / ".wtm" / "config.toml").write_text('base_branch="local"\n')
     body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nbase_branch="registry"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    assert cfg.base_branch_for(cfg.workspaces["a"], "proj") == "local"
+    assert cfg.entity("a", "proj").get("base_branch") == "local"
 
 
 def test_workspace_local_project_base_branch_provenance(
@@ -310,10 +309,42 @@ def test_workspace_local_project_base_branch_provenance(
     (ws / ".wtm" / "config.toml").write_text('[projects.proj]\nbase_branch="wslocal"\n')
     body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    workspace = cfg.workspaces["a"]
-    value, tier = cfg.base_branch_provenance(workspace, "proj")
-    assert value == "wslocal"
-    assert tier == "project"
+    rung = cfg.entity("a", "proj").provenance("base_branch")
+    assert rung.value == "wslocal"
+    assert rung.tier == "project"
+
+
+def test_base_branch_empty_string_wins_its_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Presence-based resolution: an empty-string value present at a more-local
+    # tier wins outright instead of falling through to the parent tier.
+    ws = tmp_path / "w"
+    (ws / "proj").mkdir(parents=True)
+    body = (
+        f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch=""\n'
+        '[workspaces.a.projects.proj]\nbase_branch=""\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    rung = cfg.entity("a", "proj").provenance("base_branch")
+    assert (rung.value, rung.tier) == ("", "project")
+
+
+def test_worktree_base_branch_floor_drops_own_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # floor=project: a hand-written worktree-local base_branch is out of band,
+    # and the worktree's provenance resolves straight up the ancestor chain.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('base_branch="stray"\n')
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('base_branch="wsdefault"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    rung = cfg.entity("a", "proj", "feat").provenance("base_branch")
+    assert (rung.value, rung.tier) == ("wsdefault", "workspace")
 
 
 def test_project_arbitrary_key_cascades_into_extra(
@@ -368,7 +399,7 @@ def test_generic_get_base_branch_inherits_from_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # `config get base_branch` from a project reports the inherited workspace-own
-    # value -- matching what `create` uses (base_branch_for), not `(unset)`.
+    # value -- what `create` forks from -- not `(unset)`.
     ws = tmp_path / "w"
     proj = ws / "proj"
     proj.mkdir(parents=True)
@@ -377,7 +408,8 @@ def test_generic_get_base_branch_inherits_from_workspace(
     target = cfg.resolve_generic_target(proj)
     effective, chain = cfg.resolve_generic_value(target, "base_branch")
     assert effective == "wsdefault"
-    assert effective == cfg.base_branch_for(cfg.workspaces["a"], "proj")
+    # The provenance helper reports the same winning rung the fold returns.
+    assert cfg.provenance(target, "base_branch") == chain[0]
     # The winning rung is tagged with its definition tier, not just its scope.
     assert chain[0].tier == "workspace"
 
@@ -555,7 +587,7 @@ def test_base_branch_worktree_local_still_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # base_branch stays a project-tier concept: a worktree-local value is ignored
-    # by `config get`, keeping it aligned with create/base_branch_provenance.
+    # by `config get`, the same chain `create` and every provenance read fold.
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     (wt / ".wtm").mkdir(parents=True)
@@ -957,8 +989,8 @@ def test_workspace_arbitrary_key_populates_extra(
 def test_workspace_base_branch_matches_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The unified engine means Workspace.base_branch equals the workspace tier
-    # base_branch_provenance resolves (no divergence between the two).
+    # The unified engine means Workspace.base_branch equals the provenance read
+    # of a project under it (no divergence between the two views).
     ws = tmp_path / "w"
     (ws / "proj").mkdir(parents=True)
     (ws / ".wtm").mkdir(parents=True)
@@ -967,8 +999,8 @@ def test_workspace_base_branch_matches_provenance(
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     workspace = cfg.workspaces["a"]
     assert workspace.base_branch == "wslocal"  # workspace-local wins
-    value, tier = cfg.base_branch_provenance(workspace, "other")
-    assert (value, tier) == ("wslocal", "workspace")
+    rung = cfg.provenance(cfg.resolve_generic_target_for("a", "other"), "base_branch")
+    assert (rung.value, rung.tier) == ("wslocal", "workspace")
 
 
 def test_global_default_workspace_presence_based(
@@ -1825,22 +1857,29 @@ def test_declaring_scopes(user_cfg: Path, tmp_path: Path, monkeypatch: pytest.Mo
 # --- global base_branch (top-level) ------------------------------------------
 
 
+def _global_base_branch_scope(config: Config) -> Scope | None:
+    """The scope declaring the global top-level ``base_branch``, or ``None``."""
+    rung = config.provenance(config.global_generic_target(), "base_branch")
+
+    return None if rung is None else rung.scope
+
+
 def test_base_branch_set_clear_and_source(user_cfg: Path) -> None:
     _ops().config.set_base_branch("main")
     assert 'base_branch = "main"' in user_cfg.read_text()
-    assert Config.load().base_branch_source() is Scope.USER
+    assert _global_base_branch_scope(Config.load()) is Scope.USER
     _ops().config.clear_base_branch()
     assert "base_branch" not in user_cfg.read_text()
-    assert Config.load().base_branch_source() is None
+    assert _global_base_branch_scope(Config.load()) is None
 
 
 def test_base_branch_source_prefers_user_over_system(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _system(monkeypatch, tmp_path, 'base_branch = "trunk"\n')
-    assert Config.load().base_branch_source() is Scope.SYSTEM
+    assert _global_base_branch_scope(Config.load()) is Scope.SYSTEM
     _ops().config.set_base_branch("main")
-    assert Config.load().base_branch_source() is Scope.USER
+    assert _global_base_branch_scope(Config.load()) is Scope.USER
 
 
 # --- project annotation (registry fallback) ----------------------------------

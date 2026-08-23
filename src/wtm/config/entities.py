@@ -41,6 +41,7 @@ from wtm.config.model import (
     INHERITABLE_KEYS,
     ProjectAnnotation,
     ResolvedWorktree,
+    SourceRung,
 )
 from wtm.config.registry import global_probes
 from wtm.config.targets import GenericTarget
@@ -105,6 +106,16 @@ class EntityHandle:
     def keys(self, *, deep: bool = False) -> list[str]:
         """Every resolvable key for this entity, sorted (dotted paths with *deep*)."""
         return [key for key, _rung in self._config.effective_keys(self._target, deep=deep)]
+
+    def provenance(self, key: str, subkey: str | None = None) -> SourceRung | None:
+        """Where *key*'s effective value comes from (``None`` when unset).
+
+        The most-local :class:`SourceRung` over the entity's cascade: its
+        ``value`` is what :meth:`get` returns, its ``tier`` names an
+        inheritable key's definition level, and its ``scope`` names the
+        config file any other key was read from.
+        """
+        return self._config.provenance(self._target, self._path(key, subkey))
 
     # -- writes ----------------------------------------------------------------
 
@@ -270,12 +281,6 @@ class ProjectEntity(EntityHandle):
         ws = self._config.workspaces[self.workspace_name]
 
         return self._config.project_annotation(ws, self.project_name)
-
-    def base_branch_provenance(self) -> tuple[str | None, str]:
-        """The effective base branch and its definition tier."""
-        ws = self._config.workspaces[self.workspace_name]
-
-        return self._config.base_branch_provenance(ws, self.project_name)
 
 
 class WorktreeEntity(EntityHandle):

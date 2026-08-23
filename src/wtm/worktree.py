@@ -230,7 +230,10 @@ class Worktree:
         if ws is None:
             return None
 
-        return self.config.base_branch_for(ws, project_dir.name)
+        target = self.config.resolve_generic_target_for(ws.name, project_dir.name)
+        rung = self.config.provenance(target, "base_branch")
+
+        return str(rung.value) if rung is not None else None
 
     # --- annotation ----------------------------------------------------------
 

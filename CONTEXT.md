@@ -211,7 +211,8 @@ key resolves by a single **uniform locality merge** -- `merge_locality` folds a
 most-local-first probe table so increased locality always outranks lesser, the
 most-local *present* value wins, `hooks.on` accumulates, and **inheritance**
 climbs the **entity** chain for the few **inheritable keys**, only `base_branch`
-today, via `base_branch_provenance`), and the **structural registry mutations**
+today, via the tier-tagged inherit chains (`Config.provenance` labels the
+winning rung)), and the **structural registry mutations**
 (`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
 `set`/`clear_base_branch`, `set_project_annotation`) that write only the user
 file and own their cross-key fixups (a rename follows a dangling
@@ -304,7 +305,7 @@ _Avoid_: cascade (overloaded), scope inheritance
 **Inheritance** (entity inheritance):
 A value falling from an ancestor **entity** to a descendant that leaves it
 unset -- a worktree from its project, a project from its workspace, a workspace
-from the global default (`base_branch_provenance`). Runs *between* entities (each
+from the global default (`Config.provenance`). Runs *between* entities (each
 ancestor's contribution is itself already **locality-merged**) and only for an
 **inheritable key**. The one thing "inherit" should ever describe here: a
 most-local *file* winning within one entity is a **locality merge**, not
@@ -362,10 +363,10 @@ array that flag may touch, each added element validated by
 `parse_inheritable_element` (a reserved key or a hardcoded-non-inheritable
 builtin -- `NON_INHERITABLE_KEYS`, i.e. `description` -- is refused; so is any
 malformed element, at read time too). A **typed-surface** inheritable key --
-`TYPED_INHERITABLE_KEYS`, i.e. `base_branch` with its provenance method -- never
-also folds into `extra` (that would report one value on two surfaces) and cannot
-take a user-declared **floor** (its resolution is fixed to stay aligned with the
-typed surface).
+`TYPED_INHERITABLE_KEYS`, i.e. `base_branch` with its dedicated command surface
+(`project set --base`/`workspace set --base`) -- never also folds into `extra`
+(that would report one value on two surfaces) and cannot take a user-declared
+**floor** (its resolution is fixed to the generic inherit chain).
 
 **Floor**:
 A per-key attribute naming the deepest **entity tier** a key participates in

@@ -339,8 +339,8 @@ def config_base_branch(
             print("(none set)")
 
             return
-        source = ctx.obj.config.base_branch_source()
-        marker = f" [{source.value}]" if source is not None else ""
+        rung = ctx.obj.config.provenance(ctx.obj.config.global_generic_target(), "base_branch")
+        marker = f" [{rung.scope.value}]" if rung is not None else ""
         print(f"{current}{marker}")
 
         return
