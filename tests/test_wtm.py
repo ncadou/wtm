@@ -1728,6 +1728,33 @@ def test_scope_completion_default_label_zsh(root: Path) -> None:
     assert '"workspace"' in out
 
 
+def test_complete_config_set_global_tier_slots(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(root, "alpha")
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'editor = "nvim"\n[workspaces.ws]\npath = "{root}"\n')
+    monkeypatch.setenv("WTM_CONFIG", str(cfg))
+    from wtm.cli.completions.config import _complete_config_set
+
+    items = dict(_complete_config_set(_ConfigCtx(**{"global": True}), ""))
+    assert items["editor"] == "config in user"
+    # No locator readings under -g: no workspaces/projects/worktrees offered.
+    assert "alpha" not in items
+    assert "ws" not in items
+
+
+def test_complete_scope_global_tier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("")
+    monkeypatch.setenv("WTM_CONFIG", str(cfg))
+    from wtm.cli.completions.config import _complete_scope
+
+    items = dict(_complete_scope(_ConfigCtx(**{"global": True}), ""))
+    assert set(items) == {"user", "system"}
+    assert items["user"] == "default"
+
+
 # --- create ------------------------------------------------------------------
 
 
@@ -5822,6 +5849,114 @@ def test_config_set_rejects_unreachable_scope(root: Path) -> None:
     res = run("config", "set", "editor", "nvim", "-s", "project", root=root, cwd=root)
     assert res.returncode == 1
     assert "project" in res.stderr.lower()
+
+
+# --- global-tier arbitrary keys (-g/--global) --------------------------------
+
+
+def test_config_set_get_unset_global_top_level(root: Path) -> None:
+    # -g writes the user file's top level -- beside [workspaces...], not inside
+    # it; get reads it back; unset removes it again.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert (
+        run("config", "set", "-g", "editor", "nvim", root=root, cwd=root, extra_env=env).returncode
+        == 0
+    )
+    text = cfg.read_text()
+    assert 'editor = "nvim"' in text
+    assert text.index("editor") < text.index("[workspaces.ws]")
+    got = run("config", "get", "-g", "editor", root=root, cwd=root, extra_env=env)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "nvim"
+    unset = run("config", "unset", "-g", "editor", root=root, cwd=root, extra_env=env)
+    assert unset.returncode == 0
+    assert "editor" not in cfg.read_text()
+
+
+def test_config_set_global_system_scope_top_level(root: Path) -> None:
+    # -g -s system lands the key at the top level of the system file instead.
+    sys_cfg = root / "sys.toml"
+    env = {
+        "WTM_CONFIG": str(root / "_absent_user.toml"),
+        "WTM_SYSTEM_CONFIG": str(sys_cfg),
+        "WTM_WORKSPACE": "",
+    }
+    res = run("config", "set", "-g", "-s", "system", "editor", "vi", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert 'editor = "vi"' in sys_cfg.read_text()
+
+
+def test_config_global_flags_reject_locator_args(root: Path) -> None:
+    # Extra positionals beyond the key group are locator tokens; under -g they
+    # are refused, like config show's -g.
+    _seed_repo(root, "alpha")
+    for cmd, group in (("set", ("editor", "nvim")), ("unset", ("editor",))):
+        res = run("config", cmd, "-g", "alpha", *group, root=root)
+        assert res.returncode == 1
+        assert "--global" in res.stderr
+    res = run("config", "get", "-g", "alpha", "editor", root=root)
+    assert res.returncode == 1
+    assert "--global" in res.stderr
+
+
+def test_config_get_global_works_without_active_workspace(root: Path) -> None:
+    # The carve-out: with nothing declared or selected the bare form errors,
+    # while -g still reaches the global tier.
+    cfg = root / "cfg.toml"
+    cfg.write_text('editor = "nvim"\n')
+    env = {"WTM_CONFIG": str(cfg), "WTM_WORKSPACE": ""}
+    bare = run("config", "get", "editor", root=root, extra_env=env)
+    assert bare.returncode == 1
+    got = run("config", "get", "-g", "editor", root=root, extra_env=env)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "nvim"
+
+
+def test_config_get_global_origin_labels_user_scope(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text('editor = "nvim"\n')
+    res = run(
+        "config",
+        "get",
+        "-g",
+        "editor",
+        "--origin",
+        root=root,
+        extra_env={"WTM_CONFIG": str(cfg), "WTM_WORKSPACE": ""},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "[user]" in res.stdout
+
+
+def test_config_global_inheritable_key_cascades_to_project(root: Path) -> None:
+    # The payoff scenario: declare + define a key at the global tier, opt it
+    # into inheritance, and a project resolves it (entity-local until declared).
+    _seed_repo(root, "proj")
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert (
+        run(
+            "config",
+            "set",
+            "-g",
+            "inheritable",
+            "deploy_env",
+            "-a",
+            root=root,
+            extra_env=env,
+        ).returncode
+        == 0
+    )
+    assert (
+        run("config", "set", "-g", "deploy_env", "staging", root=root, extra_env=env).returncode
+        == 0
+    )
+    got = run("config", "get", "deploy_env", root=root, cwd=root / "proj", extra_env=env)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "staging"
 
 
 # --- inline hook writer: hook set / unset (phase 5) --------------------------

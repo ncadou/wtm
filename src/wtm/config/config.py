@@ -303,6 +303,17 @@ class Config:
 
         return self._workspace_generic_target(ws)
 
+    def global_generic_target(self) -> GenericTarget:
+        """Resolve the global-tier :class:`GenericTarget` (top-level user/system keys).
+
+        The entity-less counterpart to :meth:`resolve_generic_target`: the
+        target's write sites are USER/SYSTEM scope with an empty structural
+        prefix -- the top level of the two non-entity files -- so an arbitrary
+        key written through it is a true global default rather than a
+        ``[workspaces...]``-nested annotation.
+        """
+        return build_global_entity(self)._target
+
     def resolve_generic_target_for(
         self, workspace: str, project: str | None = None, name: str | None = None
     ) -> GenericTarget:

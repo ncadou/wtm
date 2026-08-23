@@ -107,6 +107,36 @@ def _resolve_target_for_completion(
     return None
 
 
+def _global_slots(
+    config: Config,
+    args: list[str],
+    incomplete: str,
+    *,
+    array: bool = False,
+    table: bool = False,
+) -> list[tuple[str, str] | str]:
+    """Key-group slots against the global tier (the calling command's ``-g``).
+
+    With ``-g`` there is no locator reading -- the target is the global entity
+    (top-level user/system keys) -- so only the key-group slots are offered:
+    KEY at k=0, then SUBKEY (``-t``) or array VALUE (``-a``) at k=1. Lenient;
+    empty on any failure.
+    """
+    try:
+        target = config.global_generic_target()
+    except Exception:
+        return []
+    if not args:
+        return list(_config_key_items(config, target, array=array, incomplete=incomplete))
+    if len(args) == 1:
+        if table:
+            return _config_subkey_items(config, target, args[0], incomplete)
+        if array:
+            return _config_array_element_items(config, target, args[0], incomplete)
+
+    return []
+
+
 def _merge_union(
     *groups: list[tuple[str, str] | str],
 ) -> list[tuple[str, str] | str]:
@@ -194,6 +224,8 @@ def _complete_config_set(ctx: typer.Context, incomplete: str) -> list[tuple[str,
         index = build_index(config)
     except Exception:
         return []
+    if ctx.params.get("global"):
+        return _global_slots(config, args, incomplete, array=array, table=table)
     multi_ws = len(index.workspaces) > 1
 
     # --- continuation: all typed args are a partial locator ---
@@ -244,6 +276,8 @@ def _complete_config_unset(ctx: typer.Context, incomplete: str) -> list[tuple[st
         index = build_index(config)
     except Exception:
         return []
+    if ctx.params.get("global"):
+        return _global_slots(config, args, incomplete, array=array, table=table)
     multi_ws = len(index.workspaces) > 1
 
     # --- continuation ---
@@ -302,6 +336,8 @@ def _complete_config_get(ctx: typer.Context, incomplete: str) -> list[tuple[str,
         index = build_index(config)
     except Exception:
         return []
+    if ctx.params.get("global"):
+        return _global_slots(config, args, incomplete)
     multi_ws = len(index.workspaces) > 1
 
     # --- continuation ---
@@ -372,20 +408,25 @@ def _complete_floor(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]
 
 
 def _complete_scope(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    """Complete ``-s/--scope``: allowed scopes for the locator-named or cwd entity.
+    """Complete ``-s/--scope``: allowed scopes for the -g/global, locator-named,
+    or cwd entity.
 
     When the calling command has a variadic ``args`` (``config set``/``unset``),
     the locator prefix is extracted and the entity resolved; otherwise the
     cwd-inferred entity is used (``hook set``/``unset``, which stay cwd-bound).
-    On any failure the full enum degrades gracefully -- preserving typer's
-    default behaviour -- rather than the empty list every other completer
-    returns, because ``--scope`` is an enum option whose all-5 default is
-    already visible to users outside a workspace.
+    With the command's ``-g/--global`` set, the global tier answers instead --
+    its allowed set is user/system with user the default. On any failure the
+    full enum degrades gracefully -- preserving typer's default behaviour --
+    rather than the empty list every other completer returns, because
+    ``--scope`` is an enum option whose all-5 default is already visible to
+    users outside a workspace.
     """
     try:
         config = Config.load()
         args = list(ctx.params.get("args") or [])
-        if args:
+        if ctx.params.get("global"):
+            target = config.global_generic_target()
+        elif args:
             index = build_index(config)
             target = _resolve_target_for_completion(config, index, args)
             if target is None:

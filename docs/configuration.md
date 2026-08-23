@@ -68,7 +68,9 @@ value (e.g. the user-file registry annotation) resurface.
 Any arbitrary key cascades too. `wtm config set/get/unset KEY [VALUE]` acts
 on the **cwd-inferred entity** (the deepest one the cwd sits inside — worktree,
 else project, else the active workspace); `-s/--scope` picks the file tier the
-same way annotations do.
+same way annotations do. An optional **locator** prefix names another entity
+instead; `-g/--global` skips entities entirely and targets the global tier
+(see [Global tier](#global-tier--g) below).
 
 - `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key. `KEY` may be a
   dotted path (`ci.runner.image`) naming a nested cell; see [Sections](#sections)
@@ -81,6 +83,16 @@ same way annotations do.
   line per carrying rung for a scalar/array — its scope, or its definition level
   (`project`/`workspace`/`global`) for an inherited key — and the file it lives in.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
+
+### Global tier (`-g`)
+
+`-g/--global` on all three verbs targets the **global tier**: top-level keys of
+the user file (`-s system`: the system file), with no `[workspaces…]` nesting —
+the same slots `config show -g` renders and `config base-branch` writes.
+Mutually exclusive with a locator (and with SUBKEY on `get`; a dotted `KEY`
+still reads a nested cell). A global-tier key is still **entity-local by
+default**: until the key is also named in an `inheritable` array, no descendant
+entity resolves it.
 
 ### Sections (dotted paths and deep-merge)
 
@@ -167,6 +179,7 @@ region = "eu-west"                     # participates at project tier and above 
 
 ```sh
 wtm config set inheritable deploy_env -a                    # opt a key into inheritance
+wtm config set -g inheritable deploy_env -a                 # ... declared at the global tier
 wtm config set inheritable region -a --floor project        # ... with a tier floor
 wtm config unset inheritable region -a                      # opt it back out (by name)
 ```

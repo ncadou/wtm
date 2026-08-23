@@ -352,6 +352,13 @@ def config_set(
         help="Optional locator prefix, then key (plus SUBKEY for -t) and value",
         autocompletion=_complete_config_set,
     ),
+    global_scope: bool = typer.Option(
+        False,
+        "-g",
+        "--global",
+        help="Target the global tier (top-level keys of the user/system file); "
+        "mutually exclusive with a locator",
+    ),
     scope: Scope | None = typer.Option(
         None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
     ),
@@ -379,6 +386,12 @@ def config_set(
     entity's cascade to write, defaulting to the deepest scope whose directory
     exists. Reserved keys (``hooks``/``projects``/``worktrees``/``path``/
     ``default_workspace``) have their own commands and are refused here.
+
+    ``-g``/``--global`` instead targets the global tier -- the top level of the
+    user file (``-s system``: the system file), with no structural prefix, so
+    the key is a true global default rather than a ``[workspaces...]``-nested
+    annotation. It is mutually exclusive with a locator; a global-tier key
+    stays entity-local until opted into ``inheritable`` (see the array form).
 
     The write is scalar by default (``KEY VALUE``). ``-a``/``--array`` (``KEY
     VALUE``) instead adds VALUE to the string array at KEY, idempotently (set
@@ -418,6 +431,8 @@ def config_set(
             f"{'KEY SUBKEY VALUE' if table else 'KEY VALUE'}"
         )
     loc_args = args[:-n]
+    if global_scope and loc_args:
+        raise WtmError("-g/--global cannot be combined with a locator")
     if table:
         key, subkey, value = args[-3:]
     else:
@@ -433,7 +448,9 @@ def config_set(
     else:
         validate_arbitrary_key_path(key)
     config = ctx.obj.config
-    if loc_args:
+    if global_scope:
+        target = config.global_generic_target()
+    elif loc_args:
         location = _locate_one(ctx, loc_args, command="config set")
         target = config.resolve_generic_target_for(
             location.workspace, location.project, location.name
@@ -468,6 +485,13 @@ def config_get(
         help="Optional locator prefix, then an arbitrary key (plus SUBKEY for a table cell)",
         autocompletion=_complete_config_get,
     ),
+    global_scope: bool = typer.Option(
+        False,
+        "-g",
+        "--global",
+        help="Resolve against the global tier (top-level keys of the user/system "
+        "file); mutually exclusive with a locator or SUBKEY",
+    ),
     show_origin: bool = typer.Option(
         False, "-o", "--origin", help="Print the full probe chain, most-local first"
     ),
@@ -484,6 +508,11 @@ def config_get(
     (``project``/``workspace``/``global``) for an inherited key such as
     ``base_branch``, otherwise its scope -- and the file it lives in.
 
+    With ``-g``/``--global`` the KEY resolves against the global tier alone --
+    the top level of the user file (the system file is not probed), exactly one
+    positional, no locator and no SUBKEY; a dotted KEY still reads a nested
+    cell.
+
     KEY may be a dotted path (``ci.runner.image``) naming a nested cell; a
     dotted key is never a locator (entity names have no dots), so the 2-arg
     ``A B`` ambiguity only arises when ``A`` is bare. An optional **locator**
@@ -498,7 +527,13 @@ def config_get(
     """
     if not args:
         raise WtmError("config get requires a KEY")
-    target, path = _resolve_get_target(ctx, args)
+    if global_scope:
+        if len(args) != 1:
+            raise WtmError("-g/--global takes exactly a KEY")
+        target = ctx.obj.config.global_generic_target()
+        path = _key_path(args[0])
+    else:
+        target, path = _resolve_get_target(ctx, args)
     validate_arbitrary_key_path(path)
     config = ctx.obj.config
     effective, chain = config.resolve_generic_value(target, path)
@@ -705,6 +740,13 @@ def config_unset(
         help="Optional locator prefix, then key, plus SUBKEY for -t or VALUE for -a",
         autocompletion=_complete_config_unset,
     ),
+    global_scope: bool = typer.Option(
+        False,
+        "-g",
+        "--global",
+        help="Target the global tier (top-level keys of the user/system file); "
+        "mutually exclusive with a locator",
+    ),
     scope: Scope | None = typer.Option(
         None, "-s", "--scope", help=_GENERIC_SCOPE_HELP, autocompletion=_complete_scope
     ),
@@ -723,6 +765,10 @@ def config_unset(
     SUBKEY``) removes SUBKEY from the table at KEY. The two flags are mutually
     exclusive. A no-op when the target is already absent at that tier.
 
+    ``-g``/``--global`` targets the global tier instead -- the top level of the
+    user file (``-s system``: the system file), mutually exclusive with a
+    locator.
+
     KEY may be a dotted path (``ci.runner.image``); see :func:`config_set` for
     the head-segment reservation rule. The locator prefix is ``args[:-N]`` (N
     flag-decided: 2 for ``-a``/``-t``, else 1); it is absent when ``len(args) ==
@@ -738,6 +784,8 @@ def config_unset(
             f"{'KEY VALUE' if array else 'KEY SUBKEY' if table else 'KEY'}"
         )
     loc_args = args[:-n]
+    if global_scope and loc_args:
+        raise WtmError("-g/--global cannot be combined with a locator")
     if array:
         key, value = args[-2:]
     elif table:
@@ -748,7 +796,9 @@ def config_unset(
     if not (key == "inheritable" and array):
         validate_arbitrary_key_path(key)
     config = ctx.obj.config
-    if loc_args:
+    if global_scope:
+        target = config.global_generic_target()
+    elif loc_args:
         location = _locate_one(ctx, loc_args, command="config unset")
         target = config.resolve_generic_target_for(
             location.workspace, location.project, location.name
