@@ -2,6 +2,9 @@
 name = "wtm"
 version = "0.1.0"
 description = "Git worktree manager over multiple named workspaces (projects roots)"
+authors = [{ name = "Nicolas Cadou", email = "nicolas@cadou.ca" }]
+license = "LGPL-2.1-or-later"
+license-files = ["COPYING*",]
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",

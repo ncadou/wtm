@@ -240,3 +240,12 @@ wraps the common tasks:
 - `make tests` — run the test suite (`pytest`)
 
 Ruff config lives in `pyproject.toml` (line length 99, target Python 3.11).
+
+## License
+
+`wtm` is licensed under the [GNU Lesser General Public License v2.1 or
+later](COPYING.LESSER) — you may use, modify, and redistribute it under
+the terms of LGPL-2.1 or, at your option, any later version published by
+the Free Software Foundation. The incorporated GPLv2 text ships as
+[COPYING](COPYING). There is no warranty; see the license texts for
+details.
