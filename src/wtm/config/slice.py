@@ -35,7 +35,15 @@ from wtm.config.model import (
 )
 from wtm.config.registry import global_probes
 from wtm.config.values import json_leaf_default
-from wtm.core import abspath, current_dir, project_dir_for, within, worktree_name
+from wtm.core import (
+    abspath,
+    current_dir,
+    project_dir_for,
+    within,
+    worktree_name,
+    worktree_names_under,
+    worktree_root_within,
+)
 
 if TYPE_CHECKING:
     from wtm.config.config import Config
@@ -128,14 +136,18 @@ def cwd_location(cfg: Config, *, cwd: Path | None = None) -> SliceTarget | None:
     if project_dir is None:
         return SliceTarget(tier="workspace", workspace=active_ws.name)
 
+    # The nearest ``.git``-rooted ancestor is the worktree the cwd sits in -- a
+    # nested name like ``release/1.12`` comes back whole. Under ``worktrees/``
+    # but inside no worktree root (a stray or container dir) falls through to
+    # the project tier.
     worktrees_dir = project_dir / "worktrees"
-    if within(acwd, worktrees_dir) and acwd != worktrees_dir:
-        rel = acwd.relative_to(worktrees_dir)
-        wt_dir = worktrees_dir / rel.parts[0]
-        name = worktree_name(wt_dir, worktrees_dir) or wt_dir.name
-
+    wt_dir = worktree_root_within(acwd, worktrees_dir)
+    if wt_dir is not None:
         return SliceTarget(
-            tier="worktree", workspace=active_ws.name, project=project_dir.name, name=name
+            tier="worktree",
+            workspace=active_ws.name,
+            project=project_dir.name,
+            name=worktree_name(wt_dir, worktrees_dir) or wt_dir.name,
         )
 
     return SliceTarget(tier="project", workspace=active_ws.name, project=project_dir.name)
@@ -341,12 +353,13 @@ def declared_worktree_names(cfg: Config, ws: Workspace, project: str) -> set[str
 
 
 def _worktree_names(cfg: Config, project_dir: Path, name: str, ws: Workspace) -> set[str]:
-    """Worktrees under a project: on-disk ``worktrees/*`` dirs unioned with declared."""
-    worktrees_dir = project_dir / "worktrees"
-    on_disk = {
-        entry.name
-        for entry in (worktrees_dir.iterdir() if worktrees_dir.is_dir() else [])
-        if entry.is_dir()
-    }
+    """Worktrees under a project: on-disk ``.git``-rooted dirs unioned with declared.
 
-    return on_disk | declared_worktree_names(cfg, ws, name)
+    The on-disk side is the shared discovery walk
+    (:func:`wtm.core.worktree_names_under`), so a nested name like
+    ``release/1.12`` is found whole and a bare container dir (no ``.git``) is
+    never mistaken for a worktree.
+    """
+    worktrees_dir = project_dir / "worktrees"
+
+    return set(worktree_names_under(worktrees_dir)) | declared_worktree_names(cfg, ws, name)

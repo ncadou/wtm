@@ -23,6 +23,7 @@ from wtm.config import (
     ConfigAddress,
     Scope,
     SliceTarget,
+    config_slice_json,
     json_leaf_default,
     parse_toml_value,
     parse_typed_value,
@@ -637,6 +638,7 @@ def test_worktree_extra_reflects_inherited_key(
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").touch()
     body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
     target = cfg.cwd_location(cwd=wt)
@@ -890,6 +892,7 @@ def test_worktree_description_deep_cascade(
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").touch()
     (ws / "proj" / ".wtm").mkdir(parents=True)
     (ws / "proj" / ".wtm" / "config.toml").write_text(
         '[worktrees.feat]\ndescription = "from-project"\nowner = "team"\n'
@@ -2013,6 +2016,7 @@ def test_worktree_set_roundtrips_through_read_cascade(user_cfg: Path, tmp_path: 
     ws = tmp_path / "w"
     wt = ws / "api" / "worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").touch()
     _seed_user(user_cfg, "w", ws)
     _wt_ops().set(["api", "feat"], description="round", scope=None)
     cfg = Config.load(cwd=wt)
@@ -2045,10 +2049,13 @@ def _slice_setup(
     """Build a two-workspace, two-project, two-worktree config for slice tests."""
     ws = tmp_path / "w"
     (ws / "api" / ".git").mkdir(parents=True)
-    (ws / "api" / "worktrees" / "main").mkdir(parents=True)
-    (ws / "api" / "worktrees" / "feat").mkdir(parents=True)
+    for name in ("main", "feat"):
+        (ws / "api" / "worktrees" / name).mkdir(parents=True)
+        # A linked worktree's .git is a file; discovery keys on it.
+        (ws / "api" / "worktrees" / name / ".git").touch()
     (ws / "web" / ".git").mkdir(parents=True)
     (ws / "web" / "worktrees" / "draft").mkdir(parents=True)
+    (ws / "web" / "worktrees" / "draft" / ".git").touch()
     body = (
         f'base_branch = "main"\n'
         f'[workspaces.w]\npath = "{ws}"\n'
@@ -2222,6 +2229,62 @@ def test_resolve_slice_cwd_outside_workspace_is_global(tmp_path, monkeypatch) ->
     cfg = _slice_setup(tmp_path, monkeypatch, cwd=tmp_path)
     target = cfg.cwd_location(cwd=tmp_path)
     assert target is None
+
+
+def _nested_worktree_fixture(tmp_path: Path) -> Path:
+    """Add a nested-name worktree plus its bare container dir to the api project."""
+    ws = tmp_path / "w"
+    nested = ws / "api" / "worktrees" / "release" / "1.12"
+    nested.mkdir(parents=True)
+    (nested / ".git").touch()  # a linked worktree's .git is a file
+
+    return ws
+
+
+def test_resolve_slice_discovers_nested_name_excludes_container(tmp_path, monkeypatch) -> None:
+    """A slash-named worktree is listed whole; its bare container dir never is."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    ws = _nested_worktree_fixture(tmp_path)
+    s = cfg.resolve_slice(target=SliceTarget(tier="workspace", workspace="w"), recurse=True)
+    (ws_node,) = s.workspaces
+    (proj,) = (p for p in ws_node.projects if p.name == "api")
+    names = {w.name for w in proj.worktrees}
+    assert "release/1.12" in names
+    assert "release" not in names  # the container dir holds no .git: not a worktree
+    assert ws.is_dir()  # fixture sanity
+
+
+def test_resolve_slice_json_contract_lists_nested_name(tmp_path, monkeypatch) -> None:
+    """The JSON contract carries the nested name and drops the phantom container."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    _nested_worktree_fixture(tmp_path)
+    s = cfg.resolve_slice(target=SliceTarget(tier="workspace", workspace="w"), recurse=True)
+    payload = json.loads(config_slice_json(s))
+    names = set(payload["workspaces"]["w"]["projects"]["api"]["worktrees"])
+    assert "release/1.12" in names
+    assert "release" not in names
+
+
+def test_resolve_slice_cwd_inference_nested_name(tmp_path, monkeypatch) -> None:
+    """Standing inside a nested worktree infers its whole name, not the first part."""
+    wt_dir = tmp_path / "w" / "api" / "worktrees" / "release" / "1.12" / "docs"
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    _nested_worktree_fixture(tmp_path)
+    target = cfg.cwd_location(cwd=wt_dir)
+    assert target is not None
+    assert target.tier == "worktree"
+    assert target.name == "release/1.12"
+
+
+def test_resolve_slice_cwd_inference_container_dir_falls_to_project(tmp_path, monkeypatch) -> None:
+    """A cwd under worktrees/ but inside no .git-rooted dir targets the project."""
+    container = tmp_path / "w" / "api" / "worktrees" / "release"
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    _nested_worktree_fixture(tmp_path)
+    target = cfg.cwd_location(cwd=container)
+    assert target is not None
+    assert target.tier == "project"
+    assert target.project == "api"
 
 
 def test_resolve_slice_global_extra_and_hooks(tmp_path, monkeypatch) -> None:

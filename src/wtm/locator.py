@@ -58,6 +58,7 @@ from enum import Enum
 from pathlib import Path
 
 from wtm.config import Config
+from wtm.core import child_dirs, worktree_names_under
 
 
 class Tier(Enum):
@@ -295,7 +296,7 @@ def build_index(config: Config, *, include_config_only: bool = False) -> Locatio
         roots[ws_name] = ws.path
         on_disk_projects: set[str] = set()
         on_disk_worktrees: dict[str, set[str]] = {}
-        for project_dir in _child_dirs(ws.path):
+        for project_dir in child_dirs(ws.path):
             if not (project_dir / ".git").is_dir():
                 continue
             pname = project_dir.name
@@ -336,34 +337,11 @@ def build_index(config: Config, *, include_config_only: bool = False) -> Locatio
     )
 
 
-def _child_dirs(directory: Path) -> list[Path]:
-    """Return *directory*'s immediate sub-directories, sorted; empty if unreadable."""
-    try:
-        return sorted(
-            (entry for entry in directory.iterdir() if entry.is_dir()), key=lambda p: p.name
-        )
-    except OSError:
-        return []
-
-
 def _worktree_names(worktrees_dir: Path) -> list[str]:
     """Return the ``worktrees/``-relative names of every worktree under *worktrees_dir*.
 
-    A worktree is any dir holding a ``.git`` (a linked worktree's ``.git`` is a
-    file, a nested-name worktree the same). Recurses so a nested name like
-    ``feature/x`` is found and returned whole; the recursion stops at a worktree
-    root (a worktree never contains another).
+    The presentation-side projection of the shared discovery walk
+    (:func:`wtm.core.worktree_names_under`): a worktree is any dir holding a
+    ``.git``, recursed so nested names like ``feature/x`` come back whole.
     """
-    names: list[str] = []
-    _collect_worktrees(worktrees_dir, worktrees_dir, names)
-
-    return sorted(names)
-
-
-def _collect_worktrees(directory: Path, worktrees_dir: Path, out: list[str]) -> None:
-    """Walk *directory* for worktree roots, appending each's relative name to *out*."""
-    for entry in _child_dirs(directory):
-        if (entry / ".git").exists():
-            out.append(entry.relative_to(worktrees_dir).as_posix())
-            continue
-        _collect_worktrees(entry, worktrees_dir, out)
+    return worktree_names_under(worktrees_dir)

@@ -12,6 +12,7 @@ __all__ = [
     "WtmError",
     "Context",
     "abspath",
+    "child_dirs",
     "current_dir",
     "derive_context",
     "expand_path",
@@ -23,6 +24,7 @@ __all__ = [
     "valid_project_name",
     "within",
     "worktree_name",
+    "worktree_names_under",
 ]
 
 import os
@@ -217,6 +219,66 @@ def worktree_name(path: Path, worktrees_dir: Path) -> str | None:
         return path.relative_to(worktrees_dir).as_posix()
     except ValueError:
         return None
+
+
+# --- worktree discovery ------------------------------------------------------
+
+
+def child_dirs(directory: Path) -> list[Path]:
+    """Return *directory*'s immediate sub-directories, sorted; empty if unreadable."""
+    try:
+        return sorted(
+            (entry for entry in directory.iterdir() if entry.is_dir()), key=lambda p: p.name
+        )
+    except OSError:
+        return []
+
+
+def worktree_names_under(worktrees_dir: Path) -> list[str]:
+    """Return the ``worktrees/``-relative names of every worktree under *worktrees_dir*.
+
+    A worktree is any dir holding a ``.git`` (a linked worktree's ``.git`` is a
+    file, a nested-name worktree the same). Recurses so a nested name like
+    ``feature/x`` is found and returned whole; the recursion stops at a worktree
+    root (a worktree never contains another). Lenient: an unreadable or absent
+    *worktrees_dir* yields ``[]``.
+    """
+    names: list[str] = []
+    _collect_worktree_names(worktrees_dir, worktrees_dir, names)
+
+    return sorted(names)
+
+
+def _collect_worktree_names(directory: Path, worktrees_dir: Path, out: list[str]) -> None:
+    """Walk *directory* for worktree roots, appending each's relative name to *out*."""
+    for entry in child_dirs(directory):
+        if (entry / ".git").exists():
+            out.append(entry.relative_to(worktrees_dir).as_posix())
+            continue
+        _collect_worktree_names(entry, worktrees_dir, out)
+
+
+def worktree_root_within(path: Path, worktrees_dir: Path) -> Path | None:
+    """Return the nearest ancestor of *path* (inclusive) holding a ``.git``.
+
+    The cwd-to-worktree inference rule: walk up from *path* until a dir holds
+    a ``.git`` -- that is the worktree root the path sits in, possibly a
+    nested-name one. ``None`` when *path* is not strictly under
+    *worktrees_dir*, or no ancestor before *worktrees_dir* holds a ``.git``.
+    """
+    try:
+        rel = path.relative_to(worktrees_dir)
+    except ValueError:
+        return None
+
+    node = path
+    for _ in rel.parts:
+        if (node / ".git").exists():
+            return node
+
+        node = node.parent
+
+    return None
 
 
 # --- context derivation ------------------------------------------------------

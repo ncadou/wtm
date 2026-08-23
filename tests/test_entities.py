@@ -23,6 +23,7 @@ def _make_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     project = ws / "alpha"
     wt = project / "worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").touch()  # a linked worktree's .git is a file
 
     return ws, project, wt
 
