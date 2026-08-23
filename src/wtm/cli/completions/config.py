@@ -18,7 +18,7 @@ import typer
 
 from wtm.cli.common import _rung_label
 from wtm.cli.completions.locator import _labelled_locations, _locate_candidates
-from wtm.config import Config, GenericTarget, validate_arbitrary_key
+from wtm.config import FLOOR_TIERS, Config, GenericTarget, validate_arbitrary_key
 from wtm.core import current_dir
 from wtm.hooks import Scope
 from wtm.locator import LocationIndex, Resolved, build_index, locate
@@ -360,6 +360,15 @@ def _complete_config_show(ctx: typer.Context, incomplete: str) -> list[tuple[str
 
 
 # --- locator-aware scope completion ----------------------------------------
+
+
+def _complete_floor(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete ``--floor``: the four entity tiers, deepest-participation first."""
+    return [
+        (tier, f"key participates at {tier} tier and above")
+        for tier in FLOOR_TIERS
+        if tier.startswith(incomplete)
+    ]
 
 
 def _complete_scope(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:

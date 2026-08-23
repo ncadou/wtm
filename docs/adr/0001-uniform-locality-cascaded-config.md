@@ -299,3 +299,53 @@ unchanged: for an inheritable key it still labels each rung by definition tier
 (`project` / `workspace` / `global`) and otherwise by scope, and always names the
 file. Provenance output remains whole-value oriented; it does not render
 per-element or per-cell origins for arrays and tables.
+
+## Addendum (2026-08-23): per-key tier floors
+
+The `base_branch` carve-outs are generalized into a **floor**: a per-key
+attribute naming the deepest entity tier the key participates in (`worktree <
+project < workspace < global`). What used to be two hardcoded name-checks —
+`_inherit_map`'s ancestors-only chain and the `extra` folds' typed-surface skip
+— becomes data: `INHERIT_FLOORS = {"base_branch": "project"}` plus the shared
+tier-pruning every inheritable key now gets. Behaviour for `base_branch` is
+unchanged (all pre-existing tests pass untouched); the point is that the
+*mechanism* stopped being a special case.
+
+**The knob is user-reachable.** An `inheritable` element may be an inline table:
+
+```toml
+inheritable = ["deploy_env", { key = "region", floor = "workspace" }]
+```
+
+A bare string stays the no-floor form (participates everywhere, including a
+worktree's own rung). A floored key's chains — `_inherit_map` for `config get`,
+the ancestor folds feeding `config show` / the resolved view / the registry —
+drop every rung below the floor; an entity-local value sitting below its own
+key's floor is dropped from `extra` outright (mirroring how `config get`
+prunes the same rung), not merely unfolded. Conflicting floor declarations
+across scopes resolve most-local-wins, matching the locality philosophy.
+Declaring a floor on a *typed-surface* builtin (`base_branch`) is refused: its
+resolution is fixed so `config get` cannot drift from `create` again.
+
+**Writes below the floor are refused**, not silently ignored: the landing tier
+is derived by `tier_of_write_site(scope, key_parts)` — local scopes map
+directly; the user/system files derive it from their registry nesting
+(`(workspaces, W)` → workspace, `(…projects, P)` → project,
+`(…worktrees, N)` → worktree) — and compared against the floor in
+`check_key_floor`, raising `WriteProhibitedError`. The guard lives at the two
+surfaces that know the entity context (the CLI's `config set` and the
+`EntityHandle` write ops, via a new `GenericTarget.floors` field), not in the
+raw `Config.set_value` substrate, which stays policy-free. Removals never
+guard: unsetting a stray below-floor value is cleanup, not placement.
+
+**Why refuse rather than ignore on writes too:** a silent no-op write is the
+exact divergence class this ADR exists to kill — a value that resolves to
+nothing while looking set. The read side ignores (a hand-edited file must keep
+loading); the command surface refuses (the user is present and can be told).
+
+Syntax choice: extending the existing array (rather than adding a parallel
+reserved table) keeps one declaration site per key, lets the accumulation rule
+carry over unchanged, and needs no new reserved name. The cost is a
+mixed-type array, paid once in `parse_inheritable_element` — which also makes a
+malformed stored element a hard read-time error, the same treatment a kind
+clash gets.

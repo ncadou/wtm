@@ -48,10 +48,14 @@ from wtm.config.entities import (
     WorktreeEntity,
     build_global_entity,
 )
+from wtm.config.generic import parse_inheritable_element
 from wtm.config.model import (
+    FLOOR_TIERS,
+    INHERIT_FLOORS,
     INHERITABLE_DECL_KEY,
     INHERITABLE_KEYS,
     RESERVED_KEYS,
+    TYPED_INHERITABLE_KEYS,
     ConfigSlice,
     HookSpec,
     ProjectAnnotation,
@@ -358,6 +362,7 @@ class Config:
             inherit=self._inherit_map(
                 ws, project_dir.name, own=self._worktree_probes(project_dir, name)
             ),
+            floors=self.inheritable_floors(ws, project_dir.name),
         )
 
     def _project_generic_target(self, ws: Workspace, project_dir: Path) -> GenericTarget:
@@ -371,6 +376,7 @@ class Config:
             allowed_scopes=(Scope.PROJECT, Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
             default_scope=default,
             inherit=self._inherit_map(ws, project_dir.name, own=None),
+            floors=self.inheritable_floors(ws, project_dir.name),
         )
 
     def _workspace_generic_target(self, ws: Workspace) -> GenericTarget:
@@ -384,6 +390,7 @@ class Config:
             allowed_scopes=(Scope.WORKSPACE, Scope.USER, Scope.SYSTEM),
             default_scope=default,
             inherit=self._inherit_map(ws, None, own=None),
+            floors=self.inheritable_floors(ws, None),
         )
 
     def _inherit_map(
@@ -392,19 +399,29 @@ class Config:
         """The tier-tagged inherit chain for every inheritable key of an entity.
 
         Maps each effective inheritable key (see :meth:`inheritable_keys`) to its
-        most-local-first chain. ``base_branch`` uses the project-anchored chain
-        (:meth:`_ancestor_tiers`); every other (user-declared) key prepends the
-        entity's own cascade *own* (tier ``None``, so its most-local value can win
-        wholesale) before the same ancestor tiers. A worktree's own cascade is
-        thus honoured for a user key, but ``base_branch`` stays a project-tier
-        concept with no worktree tier of its own -- keeping ``config get
-        base_branch`` aligned with :meth:`base_branch_provenance`.
+        most-local-first chain: the entity's *own* cascade rungs (tier ``None``,
+        so its most-local value can win wholesale) followed by the shared
+        ancestor tiers (:meth:`_ancestor_tiers`) -- then pruned of every rung
+        below the key's floor (see :meth:`inheritable_floors`). The builtin
+        ``base_branch`` floor (``project``) is what keeps it a project-tier
+        concept with no worktree tier of its own, aligning ``config get
+        base_branch`` with :meth:`base_branch_provenance`.
         """
         ancestors = self._ancestor_tiers(ws, project)
         own_rungs = [TierProbe(None, p) for p in own] if own else []
+        floors = self.inheritable_floors(ws, project)
+
         mapping: dict[str, list[TierProbe]] = {}
         for key in self.inheritable_keys(ws, project):
-            mapping[key] = ancestors if key == "base_branch" else own_rungs + ancestors
+            chain: tuple[TierProbe, ...] = (*own_rungs, *ancestors)
+            floor = floors.get(key)
+            if floor is not None:
+                # An own rung's tier is None only on a worktree target -- its
+                # implicit tier there is exactly "worktree".
+                limit = FLOOR_TIERS[floor]
+                chain = tuple(tp for tp in chain if FLOOR_TIERS[tp.tier or "worktree"] >= limit)
+
+            mapping[key] = list(chain)
 
         return mapping
 
@@ -434,7 +451,21 @@ class Config:
         (a workspace may opt a key in for all its projects), so a key is
         inheritable for an entity if any relevant scope names it.
         """
-        keys: set[str] = set(INHERITABLE_KEYS)
+        return frozenset(self.inheritable_decls(ws, project))
+
+    def inheritable_decls(
+        self, ws: Workspace | None, project: str | None
+    ) -> dict[str, str | None]:
+        """The effective inheritable keys mapped to their floors (``None`` = none).
+
+        Same accumulation as :meth:`inheritable_keys`, but each element may
+        carry a floor (an ``{ key = ..., floor = ... }`` entry). A malformed or
+        refused element raises at read time (the same hard-error treatment a
+        kind clash gets). When several scopes declare floors for the same key,
+        the most-local declaration wins -- the probes are scanned
+        most-local-first, so the first sighting sticks.
+        """
+        decls: dict[str, str | None] = {k: INHERIT_FLOORS.get(k) for k in INHERITABLE_KEYS}
         probes: list[Probe] = []
         if ws is not None:
             if project is not None:
@@ -443,46 +474,77 @@ class Config:
         probes += global_probes()
         for probe in probes:
             declared = read_table(self._store, probe).get(INHERITABLE_DECL_KEY)
-            if isinstance(declared, (list, tuple)):
-                keys.update(str(k) for k in declared)
+            if not isinstance(declared, (list, tuple)):
+                continue
 
-        return frozenset(keys)
+            for element in declared:
+                decl = parse_inheritable_element(element, file=probe.file)
+                if decl.key not in decls:
+                    decls[decl.key] = decl.floor
+
+        return decls
+
+    def inheritable_floors(self, ws: Workspace | None, project: str | None) -> dict[str, str]:
+        """The effective floors only: inheritable keys that declare one."""
+        return {
+            key: floor
+            for key, floor in self.inheritable_decls(ws, project).items()
+            if floor is not None
+        }
 
     def _inherited_extra(
         self,
         local: dict[str, object],
         ws: Workspace | None,
         project: str | None,
+        *,
+        own_tier: str,
     ) -> dict[str, object]:
         """Fold inherited ancestor values into an entity's own ``extra`` payload.
 
-        Starts from *local* (the entity's locality-merged arbitrary keys); for
-        every user-declared inheritable key (see :meth:`inheritable_keys`,
-        excluding the builtin ``base_branch`` which owns its typed
-        :meth:`base_branch_provenance` surface) folds the ancestor chain and
-        merges it in. A *scalar* key already present entity-locally wins
-        wholesale (it is the most-local rung), so it is skipped -- but a *table*
-        key deep-merges ancestor cells into the local table (local cells win,
-        absent cells fall through), so a section inherits cell-by-cell rather
-        than being overridden as a whole -- keeping ``config show`` and the
-        resolved view in step with ``config get``.
+        Starts from *local* (the entity's locality-merged arbitrary keys);
+        *own_tier* names the calling entity's tier (``project`` / ``worktree``).
+        For every user-declared inheritable key (see :meth:`inheritable_keys`,
+        excluding the typed-surface :data:`TYPED_INHERITABLE_KEYS` --
+        ``base_branch`` owns its provenance method) folds the ancestor chain,
+        pruned of every rung below the key's floor (see
+        :meth:`inheritable_floors`), and merges it in. A key whose floor sits
+        above *own_tier* is out of band entirely: an entity-local value is
+        dropped (mirroring how ``config get`` prunes the same rung), not just
+        unfolded. Otherwise a *scalar* key present entity-locally wins
+        wholesale (it is the most-local rung) -- but a *table* key deep-merges
+        ancestor cells into the local table (local cells win, absent cells fall
+        through), so a section inherits cell-by-cell -- keeping ``config show``
+        and the resolved view in step with ``config get``.
         """
         if ws is None:
             return local
 
         ancestors = self._ancestor_tiers(ws, project)
+        floors = self.inheritable_floors(ws, project)
         merged = dict(local)
         for key in self.inheritable_keys(ws, project):
-            if key == "base_branch" or key in local and not isinstance(local[key], dict):
+            if key in TYPED_INHERITABLE_KEYS:
                 continue
 
-            effective, chain = fold_tiers(self._store, ancestors, key)
-            if not chain:
+            floor = floors.get(key)
+            below_floor = floor is not None and FLOOR_TIERS[own_tier] < FLOOR_TIERS[floor]
+            if not below_floor and key in local and not isinstance(local[key], dict):
                 continue
-            if key in local:
-                merged[key] = deep_merge(effective, local[key])
-            else:
-                merged[key] = effective
+
+            rungs: list[TierProbe] = ancestors
+            if floor is not None:
+                limit = FLOOR_TIERS[floor]
+                rungs = [tp for tp in ancestors if FLOOR_TIERS[tp.tier] >= limit]
+
+            effective, chain = fold_tiers(self._store, rungs, key)
+            if not chain:
+                if below_floor:
+                    merged.pop(key, None)
+                continue
+
+            keep_table = not below_floor and key in local and isinstance(local[key], dict)
+            merged[key] = deep_merge(effective, local[key]) if keep_table else effective
 
         return merged
 
@@ -593,7 +655,7 @@ class Config:
         """
         payload, hooks = merge_locality(self._store, self._project_probes(workspace, name))
         annotation = annotation_from_payload(payload, hooks)
-        extra = self._inherited_extra(annotation.extra, workspace, name)
+        extra = self._inherited_extra(annotation.extra, workspace, name, own_tier="project")
 
         return replace(annotation, extra=extra)
 
@@ -931,7 +993,9 @@ class Config:
         wt_dir = project_dir / "worktrees" / name
         payload, hooks = merge_locality(self._store, self._worktree_probes(project_dir, name))
         local = {k: v for k, v in payload.items() if k != "description"}
-        extra = self._inherited_extra(local, self.workspace_of(project_dir), project_dir.name)
+        extra = self._inherited_extra(
+            local, self.workspace_of(project_dir), project_dir.name, own_tier="worktree"
+        )
 
         return ResolvedWorktree(
             name=name,

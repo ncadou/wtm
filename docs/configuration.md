@@ -160,24 +160,46 @@ inheritance, name it in a top-level `inheritable` array — maintained through t
 same array flags (the one reserved key those flags may touch):
 
 ```toml
-inheritable = ["deploy_env", "team"]   # these arbitrary keys inherit like base_branch
+inheritable = ["deploy_env", { key = "region", floor = "project" }]
 deploy_env = "staging"                 # a global default every entity may inherit
+region = "eu-west"                     # participates at project tier and above only
 ```
 
 ```sh
-wtm config set inheritable deploy_env -a     # opt a key into inheritance
-wtm config unset inheritable deploy_env -a   # opt it back out
+wtm config set inheritable deploy_env -a                    # opt a key into inheritance
+wtm config set inheritable region -a --floor project        # ... with a tier floor
+wtm config unset inheritable region -a                      # opt it back out (by name)
 ```
 
 Each element is validated: a reserved key or a hardcoded-non-inheritable builtin
-(`description`) is refused (opting it in would contradict the hardcoded rule).
-The `inheritable` declaration **accumulates** (unions) across scopes like
+(`description`) is refused (opting it in would contradict the hardcoded rule),
+and so is any other shape than a key name or a `{ key = ..., floor = ... }`
+table — a malformed hand-edited array is a hard error at read time, like a kind
+clash. The `inheritable` declaration **accumulates** (unions) across scopes like
 `hooks.on`: a workspace may name a key to opt it in for all its projects, even
-if the global file does not. Membership is always a curated decision — hardcoded
-(builtins) or declared by you — never inferred from a key's name, type, or
-value. `base_branch` stays a project-tier concept with no worktree tier of its
-own, so a worktree-local `base_branch` is ignored (keeping `config get` aligned
-with `create`); a user-declared inheritable key set worktree-local *is* honoured.
+if the global file does not. When several scopes declare floors for the same
+key, the most-local declaration wins. Membership is always a curated decision —
+hardcoded (builtins) or declared by you — never inferred from a key's name,
+type, or value.
+
+### Floors
+
+A **floor** is a per-key attribute naming the *deepest entity tier the key
+participates in* (`worktree < project < workspace < global`). A floored key's
+resolution chain drops every rung below its floor, and a write that would land
+below it (`-s/--scope` deeper than the floor, including through an ancestor
+registry table) is refused with `WriteProhibitedError`. Removing such a value
+is never refused — unsetting a stray below-floor value is cleanup, not
+placement.
+
+`base_branch` is the builtin example: its floor is `project`, because a fork
+point for new branches is a property of a project subtree, never of one
+checkout — a worktree-local `base_branch` neither resolves nor writes, keeping
+`config get` aligned with what `create` forks from. User-declared floors give
+your own keys the same shape: `{ key = "region", floor = "workspace" }` makes
+`region` a workspace-and-above default that no project or worktree can override.
+A floor on `base_branch` itself is refused — it owns a typed surface whose
+resolution is fixed.
 
 Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default_workspace`,
 `inheritable`) have their own surfaces and are refused as arbitrary keys.

@@ -11,9 +11,11 @@ from __future__ import annotations
 __all__ = [
     "CONTAINER_KEYS",
     "ConfigSlice",
+    "FLOOR_TIERS",
     "HookSpec",
     "INHERITABLE_DECL_KEY",
     "INHERITABLE_KEYS",
+    "INHERIT_FLOORS",
     "NON_INHERITABLE_KEYS",
     "ProjectAnnotation",
     "RESERVED_KEYS",
@@ -23,6 +25,7 @@ __all__ = [
     "SliceTarget",
     "SourceRung",
     "SUPER_TABLE_KEYS",
+    "TYPED_INHERITABLE_KEYS",
     "Workspace",
 ]
 
@@ -48,6 +51,18 @@ SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
 # hardcoded here or opted in by the user -- never inferred from its name,
 # type, or value.
 INHERITABLE_KEYS = frozenset({"base_branch"})
+# Builtin floors: the deepest entity tier an inheritable key participates in.
+# Chains drop every rung below the floor and writes landing deeper are
+# refused. ``base_branch`` is a project-tier concept (the fork point for a
+# project's new branches), so a worktree-local value neither resolves nor
+# writes -- the generalization of what used to be two hardcoded name-checks.
+FLOOR_TIERS = {"worktree": 0, "project": 1, "workspace": 2, "global": 3}
+INHERIT_FLOORS = {"base_branch": "project"}
+# The inheritable keys that own a dedicated typed read surface (a provenance
+# method), so they never also fold into an entity's ``extra`` payload -- that
+# would report the same value on two surfaces -- and never take a user-declared
+# floor (their resolution is fixed to keep it aligned with the typed surface).
+TYPED_INHERITABLE_KEYS = frozenset({"base_branch"})
 # Builtin entity-specific keys whose non-inheritance is hardcoded: a shared
 # default they can never be. They must be refused as elements of a user's
 # `inheritable` array (opting them in would contradict the hardcoded rule).

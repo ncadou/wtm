@@ -22,6 +22,8 @@ class GenericTarget:
     exists). *inherit* maps each inheritable key to its extended, tier-tagged
     probe list -- the entity's own cascade followed by its ancestors' -- so
     reads report the same effective value a real command would take.
+    *floors* maps each floored inheritable key to that floor: writes landing
+    on a deeper tier are refused (see ``writes.check_key_floor``).
     """
 
     label: str
@@ -30,3 +32,4 @@ class GenericTarget:
     allowed_scopes: tuple[Scope, ...]
     default_scope: Scope
     inherit: dict[str, list[TierProbe]] = field(default_factory=dict)
+    floors: dict[str, str] = field(default_factory=dict)

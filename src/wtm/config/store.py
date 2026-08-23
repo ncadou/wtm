@@ -20,7 +20,7 @@ import fcntl
 import os
 import tempfile
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -41,6 +41,43 @@ def _unwrap_scalar(node: object) -> object:
     unwrap = getattr(node, "unwrap", None)
 
     return unwrap() if callable(unwrap) else node
+
+
+def _array_element(value: str | Mapping):
+    """Normalise an array-add *value* into a TOML element (scalar or inline table)."""
+    if isinstance(value, str):
+        return value
+
+    table = tomlkit.inline_table()
+    for field, entry in value.items():
+        table[field] = entry
+
+    return table
+
+
+def _element_id(item: object) -> object:
+    """The identity an array element is deduplicated by.
+
+    A scalar matches itself; a table element (an ``inheritable`` floor form)
+    matches by its ``key`` field, so re-adding ``{ key = "region", floor =
+    ... }`` in any shape never duplicates the declaration.
+    """
+    unwrapped = _unwrap_scalar(item)
+    if isinstance(unwrapped, Mapping):
+        return ("table", unwrapped.get("key"))
+
+    return ("scalar", unwrapped)
+
+
+def _matches_element(item: object, value: str) -> bool:
+    """Whether array *item* matches a remove request for *value*.
+
+    Both identity forms reduce to the bare name: a scalar equals it directly;
+    a table element matches by its ``key`` field.
+    """
+    _, ident = _element_id(item)
+
+    return ident == value
 
 
 def _descend_for_write(doc: tomlkit.TOMLDocument, parts: Sequence[str]):
@@ -242,26 +279,34 @@ class Store:
             if isinstance(node, dict):
                 node.pop(parts[-1], None)
 
-    def array_add(self, path: Path, key: str | tuple[str, ...], value: str) -> None:
-        """Add *value* (a string) to the array at *key* in *path* (set semantics).
+    def array_add(self, path: Path, key: str | tuple[str, ...], value: str | Mapping) -> None:
+        """Add *value* to the array at *key* in *path* (set semantics).
 
-        Creates an empty array on first add; the add is idempotent (a value
-        already present is a no-op). A non-array value already at *key* is a kind
-        clash (hard error), matching :func:`wtm.config.model.check_kind`.
+        A string *value* appends a scalar element; a mapping appends an inline
+        table (the ``inheritable`` floor form ``{ key = ..., floor = ... }``).
+        Creates an empty array on first add; the add is idempotent (an element
+        already present is a no-op -- matched by the scalar itself, or by its
+        ``key`` field for a table element). A non-array value already at *key*
+        is a kind clash (hard error), matching
+        :func:`wtm.config.model.check_kind`.
         """
         with self._transaction(path) as doc:
             parts = key_parts(key)
             table = _descend_for_write(doc, parts[:-1])
             container = table if parts[:-1] else doc
             array = _writable_array(container, parts[-1], key)
-            if value not in [_unwrap_scalar(item) for item in array]:
-                array.append(value)
+            element = _array_element(value)
+            if _element_id(element) not in [_element_id(item) for item in array]:
+                array.append(element)
 
     def array_remove(self, path: Path, key: str | tuple[str, ...], value: str) -> None:
         """Strip every occurrence of *value* from the array at *key* in *path*.
 
         The mirror of :meth:`array_add`: a no-op when the key or the value is
-        absent. A non-array value at *key* is a kind clash (hard error).
+        absent. A scalar element matches by equality; a table element matches
+        by its ``key`` field (so ``{ key = "region", floor = ... }`` is removed
+        by the bare name). A non-array value at *key* is a kind clash (hard
+        error).
         """
         with self._transaction(path) as doc:
             parts = key_parts(key)
@@ -275,7 +320,7 @@ class Store:
                 return
 
             array = _writable_array(node, parts[-1], key)
-            for item in [i for i in array if _unwrap_scalar(i) == value]:
+            for item in [i for i in array if _matches_element(i, value)]:
                 array.remove(item)
 
     def table_set(self, path: Path, key: str | tuple[str, ...], subkey: str, value: str) -> None:

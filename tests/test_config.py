@@ -634,6 +634,201 @@ def test_worktree_extra_reflects_inherited_key(
     assert worktree.extra["deploy_env"] == "staging"
 
 
+# --- floors (a key's deepest participating tier) --------------------------------
+
+
+def test_floored_key_prunes_deeper_rungs_like_base_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A user-declared floor=project mirrors the base_branch carve-out: from a
+    # worktree, a worktree-local value is ignored while the project chain folds.
+    ws = tmp_path / "w"
+    wt = ws / "proj" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text('region="wt-local"\n')
+    body = (
+        'inheritable = [{ key = "region", floor = "project" }]\n'
+        f'[workspaces.a]\npath="{ws}"\n'
+        '[workspaces.a.projects.proj]\nregion="proj-tier"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
+    target = cfg.resolve_generic_target(wt)
+    effective, chain = cfg.resolve_generic_value(target, "region")
+    assert effective == "proj-tier"
+    assert [r.tier for r in chain] == ["project"]
+    # The target carries the floor for write-site enforcement.
+    assert target.floors == {"base_branch": "project", "region": "project"}
+
+
+def test_floor_workspace_drops_project_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # floor=workspace means project-tier values are out of band too: from a
+    # project entity, only workspace-and-above rungs participate.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('region="local"\n')
+    body = (
+        'inheritable = [{ key = "region", floor = "workspace" }]\n'
+        f'[workspaces.a]\npath="{ws}"\nregion="ws-tier"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    effective, chain = cfg.resolve_generic_value(target, "region")
+    assert effective == "ws-tier"
+    assert [r.tier for r in chain] == ["workspace"]
+
+
+def test_floored_key_extra_fold_respects_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The resolved view's extra fold prunes by floor too: a floor=workspace key
+    # does not surface a project-local value in project_annotation.extra.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('region="local"\n')
+    body = (
+        'inheritable = [{ key = "region", floor = "workspace" }]\n'
+        f'[workspaces.a]\npath="{ws}"\nregion="ws-tier"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    annotation = cfg.project_annotation(cfg.workspaces["a"], "proj")
+    assert annotation.extra["region"] == "ws-tier"
+
+
+def test_floor_declaration_conflict_most_local_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two scopes declaring floors for one key resolve most-local-first: the
+    # project-scope declaration wins over the global one.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text('inheritable = ["region"]\nregion="p"\n')
+    body = (
+        'inheritable = [{ key = "region", floor = "global" }]\n'
+        f'region="global-val"\n[workspaces.a]\npath="{ws}"\n'
+    )
+    cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
+    target = cfg.resolve_generic_target(proj)
+    # No pruning happened: the most-local declaration has no floor.
+    effective, chain = cfg.resolve_generic_value(target, "region")
+    assert effective == "p"
+    assert [(r.tier, r.value) for r in chain] == [("project", "p"), ("global", "global-val")]
+
+
+def test_malformed_inheritable_element_is_a_hard_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A malformed stored element errors at read time (the kind-clash treatment),
+    # annotated with its file.
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'inheritable = [{{ key = "region", typo = "x" }}]\n[workspaces.a]\npath="{ws}"\n'
+    with pytest.raises(WtmError, match="unknown field"):
+        _ = _load(monkeypatch, tmp_path, body, cwd=proj)
+
+
+def test_bad_floor_tier_is_rejected_at_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    body = f'inheritable = [{{ key = "region", floor = "cellar" }}]\n[workspaces.a]\npath="{ws}"\n'
+    with pytest.raises(WtmError, match="'floor' must be one of"):
+        _ = _load(monkeypatch, tmp_path, body, cwd=proj)
+
+
+def test_floor_on_base_branch_refused() -> None:
+    # base_branch owns a typed surface with fixed resolution; re-flooring it
+    # would split `config get` from `create` again.
+    from wtm.config import parse_inheritable_element
+
+    with pytest.raises(WtmError, match="cannot take a floor"):
+        parse_inheritable_element({"key": "base_branch", "floor": "global"})
+    parse_inheritable_element("base_branch")  # bare opt-in stays harmless
+    parse_inheritable_element({"key": "deploy_env"})  # no floor: fine
+
+
+def test_write_below_floor_refused_by_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wtm.exceptions import WriteProhibitedError
+
+    ws = tmp_path / "w"
+    project = ws / "alpha"
+    wt = project / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    config = _load(monkeypatch, tmp_path, f'[workspaces.a]\npath="{ws}"\n', cwd=tmp_path)
+
+    # Declare region inheritable WITH a project floor via the handle API
+    # (the workspace-local declaration is itself never floor-blocked).
+    config.entity("a").inheritable_add("region", floor="project")
+
+    config = config.reload()
+    svc = config.entity("a", "alpha", "feat")
+
+    with pytest.raises(WriteProhibitedError, match="has floor 'project'"):
+        svc.set("region", "v", scope=Scope.WORKTREE)
+    with pytest.raises(WriteProhibitedError):
+        svc.table_set("region", "sub", "v", scope=Scope.WORKTREE)
+    with pytest.raises(WriteProhibitedError):
+        svc.array_add("region", "v", scope=Scope.WORKTREE)
+    # At the floor tier (and above), the write goes through.
+    address = svc.set("region", "v", scope=Scope.PROJECT)
+    assert address.file == project / ".wtm" / "config.toml"
+    # Removal below the floor is cleanup, never refused.
+    (wt / ".wtm").mkdir(exist_ok=True)
+    stray = wt / ".wtm" / "config.toml"
+    stray.write_text('region="stray"\n')
+    assert svc.unset("region", scope=Scope.WORKTREE).file == stray
+
+
+def test_inline_table_inheritable_element_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The floored element is a real TOML inline table; adding twice is a no-op;
+    # removing by bare name strips it.
+    import tomllib
+
+    ws = tmp_path / "w"
+    ws.mkdir()
+    config = _load(monkeypatch, tmp_path, f'[workspaces.a]\npath="{ws}"\n', cwd=tmp_path)
+
+    handle = config.entity("a")
+    handle.inheritable_add("region", floor="project")
+    handle.inheritable_add("region", floor="project")  # idempotent
+
+    ws_file = ws / ".wtm" / "config.toml"
+    decls = tomllib.loads(ws_file.read_text())["inheritable"]
+    assert decls == [{"key": "region", "floor": "project"}]
+
+    Config.load(cwd=tmp_path).entity("a").inheritable_remove("region")
+    assert tomllib.loads(ws_file.read_text())["inheritable"] == []
+
+
+def test_tier_of_write_site_matrix() -> None:
+    # The pure tier derivation behind floor enforcement.
+    from wtm.config import tier_of_write_site
+
+    assert tier_of_write_site(Scope.WORKTREE, ()) == "worktree"
+    assert tier_of_write_site(Scope.PROJECT, ("k",)) == "project"
+    assert tier_of_write_site(Scope.WORKSPACE, ("projects", "p")) == "workspace"
+    assert tier_of_write_site(Scope.USER, ("k",)) == "global"
+    assert tier_of_write_site(Scope.USER, ("ci", "runner")) == "global"
+    assert tier_of_write_site(Scope.USER, ("workspaces", "a", "k")) == "workspace"
+    assert tier_of_write_site(Scope.SYSTEM, ("workspaces", "a", "projects", "p")) == "project"
+    assert tier_of_write_site(Scope.USER, ("workspaces", "a", "projects", "p", "k")) == "project"
+    assert (
+        tier_of_write_site(Scope.USER, ("workspaces", "a", "projects", "p", "worktrees", "f"))
+        == "worktree"
+    )
+
+
 def test_workspace_extra_reflects_inherited_global_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

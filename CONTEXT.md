@@ -345,7 +345,8 @@ down the containment chain), as opposed to an *entity-specific* key describing a
 single node (`description`, `path`), which must never inherit. The two framings
 are one axis. The effective set is the builtin `INHERITABLE_KEYS` allowlist
 (`base_branch` only today) unioned with the user's `inheritable` array -- a
-top-level TOML array of key names that *accumulates* across scopes (like
+top-level TOML array of elements (a key name, or an inline
+`{ key = ..., floor = ... }` table) that *accumulates* across scopes (like
 `hooks.on`), so a workspace may opt a key in for all its projects
 (`Config.inheritable_keys`). Every other key is entity-local (resolved by
 **locality merge** alone, never falling to a descendant entity). Opt-in is
@@ -354,14 +355,30 @@ classifications are fixed. Membership is always a curated decision -- hardcoded
 or user-declared -- never inferred from a key's name, type, or value.
 `inheritable` is itself a **reserved key** (refused as an arbitrary key, never
 leaked into `extra`), maintained via the array flag -- `config set inheritable
-KEY -a` / `config unset inheritable KEY -a` is the one reserved array that flag
-may touch,
-each added element validated by `validate_inheritable_element` (a reserved key or a
-hardcoded-non-inheritable builtin -- `NON_INHERITABLE_KEYS`, i.e. `description`
--- is refused). One builtin carve-out: `base_branch` has no worktree tier,
-so a worktree-local `base_branch` is ignored (aligning `config get` with
-`create`), whereas a user-declared inheritable key set worktree-local *is*
-honoured.
+KEY -a [--floor TIER]` / `config unset inheritable KEY -a` is the one reserved
+array that flag may touch, each added element validated by
+`parse_inheritable_element` (a reserved key or a hardcoded-non-inheritable
+builtin -- `NON_INHERITABLE_KEYS`, i.e. `description` -- is refused; so is any
+malformed element, at read time too). A **typed-surface** inheritable key --
+`TYPED_INHERITABLE_KEYS`, i.e. `base_branch` with its provenance method -- never
+also folds into `extra` (that would report one value on two surfaces) and cannot
+take a user-declared **floor** (its resolution is fixed to stay aligned with the
+typed surface).
+
+**Floor**:
+A per-key attribute naming the deepest **entity tier** a key participates in
+(`worktree < project < workspace < global`) -- "key has no X tier below Y".
+Every chain drops rungs below the floor (`_inherit_map`, and the ancestor folds
+feeding `extra`), an entity-local value sitting below its own key's floor is out
+of band entirely (dropped from `extra`, pruned from `config get`), and a write
+landing below it is refused with `WriteProhibitedError`
+(`check_key_floor` over `tier_of_write_site`; removals never guard -- unsetting
+a stray below-floor value is cleanup). Builtin floors live in
+`INHERIT_FLOORS` (`base_branch`: `project` -- a fork point is a property of a
+project subtree, never of one checkout); user floors ride the `inheritable`
+element's `floor` field (conflicting declarations resolve most-local-wins).
+This generalizes what used to be two hardcoded name-checks; `base_branch` is
+now just the one builtin instance of the mechanism.
 
 **Source / Target** (import):
 `wtm import` folds a legacy plain clone (the *source*) into the bare-repo

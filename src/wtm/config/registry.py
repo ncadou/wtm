@@ -28,7 +28,16 @@ from wtm.config.engine import (
     merge_locality,
     read_table,
 )
-from wtm.config.model import INHERITABLE_DECL_KEY, INHERITABLE_KEYS, Workspace, str_or_none
+from wtm.config.generic import parse_inheritable_element
+from wtm.config.model import (
+    FLOOR_TIERS,
+    INHERIT_FLOORS,
+    INHERITABLE_DECL_KEY,
+    INHERITABLE_KEYS,
+    TYPED_INHERITABLE_KEYS,
+    Workspace,
+    str_or_none,
+)
 from wtm.core import expand_path
 from wtm.exceptions import WtmError
 
@@ -84,29 +93,44 @@ def _workspace_inherited_extra(
     A workspace's only ancestor is the global top-level default, so a
     user-declared inheritable key absent workspace-locally falls back to the
     global value. Mirrors ``Config._inherited_extra`` for the registry build,
-    which runs before any :class:`Config` exists. ``base_branch`` is excluded
-    (it owns the typed base_branch-provenance surface).
+    which runs before any :class:`Config` exists. Typed-surface keys
+    (:data:`TYPED_INHERITABLE_KEYS`, i.e. ``base_branch``) are excluded (they
+    own the typed base_branch-provenance surface), and a key's floor prunes
+    the fold's rungs like everywhere else.
     """
-    keys: set[str] = set(INHERITABLE_KEYS)
+    floors: dict[str, str | None] = {k: INHERIT_FLOORS.get(k) for k in INHERITABLE_KEYS}
     for probe in (*ws_probes, *global_probes()):
         declared = read_table(store, probe).get(INHERITABLE_DECL_KEY)
-        if isinstance(declared, (list, tuple)):
-            keys.update(str(k) for k in declared)
+        if not isinstance(declared, (list, tuple)):
+            continue
 
+        for element in declared:
+            decl = parse_inheritable_element(element, file=probe.file)
+            if decl.key not in floors:
+                floors[decl.key] = decl.floor
+
+    own_tier = "workspace"
     merged = dict(local)
-    for key in keys:
-        if key == "base_branch" or key in local and not isinstance(local[key], dict):
+    for key, floor in floors.items():
+        if key in TYPED_INHERITABLE_KEYS:
             continue
 
-        effective, chain = fold_tiers(
-            store, [TierProbe("global", p) for p in global_probes()], key
-        )
-        if not chain:
+        below_floor = floor is not None and FLOOR_TIERS[own_tier] < FLOOR_TIERS[floor]
+        if not below_floor and key in local and not isinstance(local[key], dict):
             continue
-        if key in local:
-            merged[key] = deep_merge(effective, local[key])
-        else:
-            merged[key] = effective
+
+        rungs = [TierProbe("global", p) for p in global_probes()]
+        if floor is not None:
+            rungs = [tp for tp in rungs if FLOOR_TIERS[tp.tier] >= FLOOR_TIERS[floor]]
+
+        effective, chain = fold_tiers(store, rungs, key)
+        if not chain:
+            if below_floor:
+                merged.pop(key, None)
+            continue
+
+        keep_table = not below_floor and key in local and isinstance(local[key], dict)
+        merged[key] = deep_merge(effective, local[key]) if keep_table else effective
 
     return merged
 

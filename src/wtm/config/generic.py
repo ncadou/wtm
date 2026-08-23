@@ -1,18 +1,31 @@
 """Arbitrary-key validation: reserved-name refusal at the write/read sites.
 
 The arbitrary-key facility must not shadow the reserved structural keys; these
-validators are the single gate every writer funnels through.
+validators are the single gate every writer funnels through. This module also
+parses ``inheritable`` array elements (a key name or ``{ key = ..., floor = ... }``
+inline table) into their declaration form.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "InheritableDecl",
+    "parse_inheritable_element",
     "validate_arbitrary_key",
     "validate_arbitrary_key_path",
     "validate_inheritable_element",
 ]
 
-from wtm.config.model import NON_INHERITABLE_KEYS, RESERVED_KEYS
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from wtm.config.model import (
+    FLOOR_TIERS,
+    NON_INHERITABLE_KEYS,
+    RESERVED_KEYS,
+    TYPED_INHERITABLE_KEYS,
+)
 from wtm.exceptions import ReservedKeyError, WtmError
 
 
@@ -63,3 +76,65 @@ def validate_inheritable_element(key: str) -> None:
             f"'{key}' is never inheritable (it describes a single entity); "
             f"it cannot be added to the inheritable allowlist"
         )
+
+
+@dataclass(frozen=True)
+class InheritableDecl:
+    """One parsed element of an ``inheritable`` array.
+
+    :param key: the arbitrary key being opted into inheritance.
+    :param floor: the deepest entity tier the key participates in, or ``None``
+        for no floor (participates everywhere, including a worktree's own rung).
+    """
+
+    key: str
+    floor: str | None = None
+
+
+def parse_inheritable_element(element: object, file: Path | None = None) -> InheritableDecl:
+    """Parse one ``inheritable`` array element into an :class:`InheritableDecl`.
+
+    An element is either a bare key name (``"deploy_env"``, no floor) or a
+    one-level inline table (``{ key = "region", floor = "project" }``); any
+    other shape, unknown field, bad tier value, non-inheritable key, or a floor
+    on a typed-surface builtin (:data:`TYPED_INHERITABLE_KEYS`, whose resolution
+    is fixed to stay aligned with its typed read surface) raises ``WtmError``
+    -- at declaration time via the CLI/handles, at read time for a malformed
+    hand-edited array (the same hard-error treatment a kind clash gets).
+    *file* only annotates error messages.
+    """
+    where = f" in {file}" if file is not None else ""
+    if isinstance(element, str):
+        decl = InheritableDecl(element)
+    elif isinstance(element, Mapping):
+        extra = set(element.keys()) - {"key", "floor"}
+        if extra:
+            raise WtmError(
+                f"invalid inheritable element{where}: unknown field(s) "
+                f"{', '.join(sorted(str(f) for f in extra))} (only 'key' and 'floor')"
+            )
+        if not isinstance(element.get("key"), str):
+            raise WtmError(f"invalid inheritable element{where}: 'key' must be a string")
+
+        floor = element.get("floor")
+        if floor is not None and (not isinstance(floor, str) or floor not in FLOOR_TIERS):
+            raise WtmError(
+                f"invalid inheritable element{where}: 'floor' must be one of "
+                f"{', '.join(FLOOR_TIERS)}"
+            )
+
+        decl = InheritableDecl(element["key"], floor)
+    else:
+        raise WtmError(
+            f"invalid inheritable element{where}: expected a key name or "
+            f"{{ key = ..., floor = ... }} table"
+        )
+
+    validate_inheritable_element(decl.key)
+    if decl.floor is not None and decl.key in TYPED_INHERITABLE_KEYS:
+        raise WtmError(
+            f"'{decl.key}' owns a typed surface with fixed resolution; "
+            f"it cannot take a floor{where}"
+        )
+
+    return decl

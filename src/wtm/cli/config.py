@@ -13,6 +13,7 @@ from wtm.cli.completions.config import (
     _complete_config_set,
     _complete_config_show,
     _complete_config_unset,
+    _complete_floor,
     _complete_scope,
 )
 from wtm.cli.locator import _locate_one, _locate_optional
@@ -26,8 +27,9 @@ from wtm.config import (
     ResolvedWorktree,
     SliceTarget,
     SourceRung,
+    check_key_floor,
+    parse_inheritable_element,
     validate_arbitrary_key_path,
-    validate_inheritable_element,
 )
 from wtm.core import WtmError, current_dir
 from wtm.hooks import HookSpec, Scope
@@ -359,6 +361,14 @@ def config_set(
     table: bool = typer.Option(
         False, "-t", "--table", help="Set SUBKEY = VALUE in the table at KEY"
     ),
+    floor: str | None = typer.Option(
+        None,
+        "-f",
+        "--floor",
+        autocompletion=_complete_floor,
+        help="With -a on KEY 'inheritable': declare the element with a tier floor "
+        "(worktree/project/workspace/global)",
+    ),
 ) -> None:
     """Set an arbitrary config KEY on the cwd-inferred or locator-named entity.
 
@@ -377,7 +387,14 @@ def config_set(
     are mutually exclusive. The one reserved array a user may mutate via ``-a``
     is ``inheritable`` (the opt-in allowlist of extra inheritable keys); each
     element it takes is validated (a reserved or hardcoded-non-inheritable key
-    such as ``description`` is refused).
+    such as ``description`` is refused). With ``--floor``, an ``inheritable``
+    element is stored as ``{ key = VALUE, floor = FLOOR }``: the key then only
+    participates at FLOOR and above (worktree < project < workspace < global),
+    so deeper values neither resolve nor write -- the same rule the builtin
+    ``base_branch`` (floor ``project``) always had.
+
+    A floored inheritable key refuses any write landing below its floor
+    (`WriteProhibitedError`); removing one is never refused.
 
     KEY may be a dotted path (``ci.runner.image``) naming a cell inside a
     section; ``-t`` is the one-level shorthand for the same thing (``ci.runner
@@ -391,6 +408,8 @@ def config_set(
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
+    if floor is not None and not array:
+        raise WtmError("--floor requires -a/--array")
 
     n = 3 if table else 2
     if len(args) < n:
@@ -404,8 +423,13 @@ def config_set(
     else:
         key, value = args[-2:]
 
+    element: str | dict[str, str] = value
     if key == "inheritable" and array:
-        validate_inheritable_element(value)
+        if floor is not None:
+            element = {"key": value, "floor": floor}
+        parse_inheritable_element(element)
+    elif floor is not None:
+        raise WtmError("--floor applies only to KEY 'inheritable' with -a/--array")
     else:
         validate_arbitrary_key_path(key)
     config = ctx.obj.config
@@ -419,8 +443,10 @@ def config_set(
     scope = _generic_scope(target, scope)
     address, prefix = target.write_target(scope)
     full_key = _join_key(prefix, key)
+    head = key.split(".", 1)[0]
+    check_key_floor(target.floors.get(head), head, scope, (*prefix, *key.split(".")))
     if array:
-        config.add_to_array(address, full_key, value)
+        config.add_to_array(address, full_key, element)
         log(f"{target.label}: {key} += {value} [{scope.value}] ({address.file})")
 
         return

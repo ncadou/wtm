@@ -29,12 +29,14 @@ __all__ = [
     "WorktreeEntity",
 ]
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from wtm.config.addressing import ConfigAddress, Key, Scope, global_address
 from wtm.config.engine import TierProbe
-from wtm.config.generic import validate_inheritable_element
+from wtm.config.generic import parse_inheritable_element, validate_inheritable_element
 from wtm.config.model import (
+    INHERIT_FLOORS,
     INHERITABLE_DECL_KEY,
     INHERITABLE_KEYS,
     ProjectAnnotation,
@@ -42,7 +44,7 @@ from wtm.config.model import (
 )
 from wtm.config.registry import global_probes
 from wtm.config.targets import GenericTarget
-from wtm.config.writes import GLOBAL_WRITE_SCOPES, check_write_scope
+from wtm.config.writes import GLOBAL_WRITE_SCOPES, check_key_floor, check_write_scope
 from wtm.exceptions import WtmError
 
 if TYPE_CHECKING:
@@ -108,30 +110,44 @@ class EntityHandle:
     def set(self, key: str, value: str, *, scope: Scope | None = None) -> ConfigAddress:
         """Set scalar *key* = *value* at *scope* (default: the placement policy).
 
-        Returns the address of the file that received the write.
+        Returns the address of the file that received the write. A floored key
+        (see ``GenericTarget.floors``) refuses a write landing deeper than its
+        floor.
         """
-        address, prefix = self._write_site(scope)
+        resolved, address, prefix = self._write_site(scope)
+        self._refuse_below_floor(key, resolved, prefix)
         self._config.set_value(address, self._join(prefix, key), value)
 
         return address
 
     def unset(self, key: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Remove *key* at *scope* (a whole table included; no-op when absent)."""
-        address, prefix = self._write_site(scope)
+        """Remove *key* at *scope* (a whole table included; no-op when absent).
+
+        Not floor-guarded: removing a stray below-floor value is cleanup.
+        """
+        _resolved, address, prefix = self._write_site(scope)
         self._config.unset_value(address, self._join(prefix, key))
 
         return address
 
-    def array_add(self, key: str, value: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Add *value* to the string array at *key* (idempotent set semantics)."""
-        address, prefix = self._write_site(scope)
+    def array_add(
+        self, key: str, value: str | Mapping, *, scope: Scope | None = None
+    ) -> ConfigAddress:
+        """Add *value* to the array at *key* (idempotent set semantics).
+
+        A mapping *value* appends an inline-table element (the ``inheritable``
+        floor form). A floored key refuses a write landing deeper than its
+        floor.
+        """
+        resolved, address, prefix = self._write_site(scope)
+        self._refuse_below_floor(key, resolved, prefix)
         self._config.add_to_array(address, self._join(prefix, key), value)
 
         return address
 
     def array_remove(self, key: str, value: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Strip every occurrence of *value* from the array at *key*."""
-        address, prefix = self._write_site(scope)
+        """Strip every occurrence of *value* from the array at *key* (not floor-guarded)."""
+        _resolved, address, prefix = self._write_site(scope)
         self._config.remove_from_array(address, self._join(prefix, key), value)
 
         return address
@@ -139,41 +155,69 @@ class EntityHandle:
     def table_set(
         self, key: str, subkey: str, value: str, *, scope: Scope | None = None
     ) -> ConfigAddress:
-        """Set *subkey* = *value* inside the section at *key*."""
-        address, prefix = self._write_site(scope)
+        """Set *subkey* = *value* inside the section at *key*.
+
+        A floored key refuses a write landing deeper than its floor.
+        """
+        resolved, address, prefix = self._write_site(scope)
+        self._refuse_below_floor(key, resolved, prefix)
         self._config.set_table_value(address, self._join(prefix, key), subkey, value)
 
         return address
 
     def table_unset(self, key: str, subkey: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Remove *subkey* from the section at *key* (a no-op when absent)."""
-        address, prefix = self._write_site(scope)
+        """Remove *subkey* from the section at *key* (a no-op when absent; not floor-guarded)."""
+        _resolved, address, prefix = self._write_site(scope)
         self._config.unset_table_value(address, self._join(prefix, key), subkey)
 
         return address
 
-    def inheritable_add(self, key: str, *, scope: Scope | None = None) -> ConfigAddress:
+    def inheritable_add(
+        self, key: str, *, floor: str | None = None, scope: Scope | None = None
+    ) -> ConfigAddress:
         """Opt *key* into the entity's ``inheritable`` allowlist (validated).
 
-        The declaration accumulates across scopes like ``hooks.on``; each
-        element is checked (:func:`validate_inheritable_element`) so reserved or
-        hardcoded-non-inheritable names are refused.
+        The declaration accumulates across scopes like ``hooks.on``; the
+        element is checked (:func:`parse_inheritable_element`) so reserved or
+        hardcoded-non-inheritable names, unknown tiers, and floors on
+        typed-surface builtins are refused. With *floor*, the element stored
+        is the inline-table form ``{ key = ..., floor = ... }``.
         """
-        validate_inheritable_element(key)
-        address, prefix = self._write_site(scope)
-        self._config.add_to_array(address, self._join(prefix, INHERITABLE_DECL_KEY), key)
+        element: str | Mapping = {"key": key, "floor": floor} if floor is not None else key
+        parse_inheritable_element(element)
+        _resolved_scope, address, prefix = self._write_site(scope)
+        self._config.add_to_array(address, self._join(prefix, INHERITABLE_DECL_KEY), element)
 
         return address
 
     def inheritable_remove(self, key: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Remove *key* from the entity's ``inheritable`` allowlist at *scope*."""
+        """Remove *key* from the entity's ``inheritable`` allowlist at *scope*.
+
+        Matches the bare name, so a floored inline-table element is removed by
+        it too.
+        """
         validate_inheritable_element(key)
-        address, prefix = self._write_site(scope)
+        _resolved_scope, address, prefix = self._write_site(scope)
         self._config.remove_from_array(address, self._join(prefix, INHERITABLE_DECL_KEY), key)
 
         return address
 
     # -- internals ---------------------------------------------------------------
+
+    def _refuse_below_floor(self, key: str, scope: Scope, prefix: tuple[str, ...]) -> None:
+        """Raise unless writing *key* at *scope* respects its floor.
+
+        The key head is looked up in the bound target's ``floors``; the landing
+        tier comes from the scope plus the structural prefix. Removals
+        (``unset`` / ``array_remove`` / ``table_unset``) never guard -- taking
+        a stray below-floor value out is cleanup, not placement.
+        """
+        check_key_floor(
+            self._target.floors.get(key.split(".", 1)[0]),
+            key.split(".", 1)[0],
+            scope,
+            (*prefix, *key.split(".")),
+        )
 
     def _path(self, key: str, subkey: str | None) -> Key:
         """Build an entity-relative dotted path from *key* plus optional *subkey*."""
@@ -187,12 +231,12 @@ class EntityHandle:
 
         return parts[0] if len(parts) == 1 else parts
 
-    def _write_site(self, scope: Scope | None) -> tuple[ConfigAddress, tuple[str, ...]]:
-        """Validate/apply *scope*, returning ``(address, structural prefix)``."""
+    def _write_site(self, scope: Scope | None) -> tuple[Scope, ConfigAddress, tuple[str, ...]]:
+        """Validate/apply *scope*, returning ``(scope, address, structural prefix)``."""
         resolved = scope if scope is not None else self._target.default_scope
         check_write_scope(resolved, self._target.allowed_scopes, self.kind)
 
-        return self._target.write_target(resolved)
+        return (resolved, *self._target.write_target(resolved))
 
 
 class GlobalEntity(EntityHandle):
@@ -250,6 +294,7 @@ def build_global_entity(config: Config) -> GlobalEntity:
             key: [TierProbe("global", probe) for probe in global_probes()]
             for key in INHERITABLE_KEYS
         },
+        floors=dict(INHERIT_FLOORS),
     )
 
     return GlobalEntity(config, target)

@@ -138,6 +138,38 @@ class TestHandleOps:
             proj.set("k", "v", scope=Scope.WORKTREE)
 
 
+# --- floors --------------------------------------------------------------------
+
+
+class TestFloors:
+    def test_base_branch_cannot_take_a_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _make_tree(tmp_path)
+        _use_config(monkeypatch, tmp_path)
+        svc = Config.load().entity("ws", "alpha", "feat")
+
+        with pytest.raises(WtmError, match="cannot take a floor"):
+            svc.inheritable_add("base_branch", floor="global")
+
+    def test_floored_key_refuses_deeper_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from wtm.exceptions import WriteProhibitedError
+
+        _make_tree(tmp_path)
+        _use_config(monkeypatch, tmp_path)
+        config = Config.load()
+        config.entity("ws").inheritable_add("region", floor="workspace")
+
+        proj = config.reload().entity("ws", "alpha")
+        with pytest.raises(WriteProhibitedError, match="has floor 'workspace'"):
+            proj.set("region", "v", scope=Scope.PROJECT)
+        # At the floor tier the write goes through.
+        address = proj.set("region", "v", scope=Scope.WORKSPACE)
+        assert address.file.name == "config.toml"
+
+
 # --- inheritance and inheritable ----------------------------------------------
 
 

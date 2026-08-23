@@ -5690,6 +5690,92 @@ def test_config_set_inheritable_rejects_hardcoded_non_inheritable(root: Path) ->
     assert "never inheritable" in res.stderr.lower()
 
 
+def test_config_set_inheritable_floor_declares_and_enforces(root: Path) -> None:
+    # `--floor` stores { key = ..., floor = ... }; the floored key then refuses
+    # writes landing below its floor and resolves only from the floor up.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\nregion = "ws-val"\n')
+    wt = root / "proj" / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    add = run(
+        "config",
+        "set",
+        "inheritable",
+        "region",
+        "-a",
+        "--floor",
+        "project",
+        "-s",
+        "user",
+        root=root,
+        cwd=root,
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert add.returncode == 0, add.stderr
+    assert (
+        '{ key = "region", floor = "project" }' in cfg.read_text().replace("{key =", "{ key =")
+        or 'floor = "project"' in cfg.read_text()
+    )
+
+    # From the worktree, the resolved value comes from the workspace tier
+    # (the floor prunes nothing here -- but a worktree-local write refuses).
+    refused = run(
+        "config",
+        "set",
+        "region",
+        "x",
+        "-s",
+        "worktree",
+        root=root,
+        cwd=wt,
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert refused.returncode == 1
+    assert "has floor 'project'" in refused.stderr
+
+    # At the floor tier the same write goes through.
+    allowed = run(
+        "config",
+        "set",
+        "region",
+        "x",
+        "-s",
+        "project",
+        root=root,
+        cwd=wt,
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+
+def test_config_set_floor_flag_misuse(root: Path) -> None:
+    # --floor belongs to `-a` on KEY 'inheritable' alone.
+    _seed_repo(root, "proj")
+    scalar = run("config", "set", "region", "x", "--floor", "project", root=root, cwd=root)
+    assert scalar.returncode == 1
+    assert "--floor requires" in scalar.stderr
+
+    array_other_key = run(
+        "config", "set", "tags", "x", "-a", "--floor", "project", root=root, cwd=root
+    )
+    assert array_other_key.returncode == 1
+    assert "only to KEY 'inheritable'" in array_other_key.stderr
+
+    bad_tier = run(
+        "config",
+        "set",
+        "inheritable",
+        "region",
+        "-a",
+        "--floor",
+        "cellar",
+        root=root,
+        cwd=root,
+    )
+    assert bad_tier.returncode == 1
+    assert "'floor' must be one of" in bad_tier.stderr
+
+
 def test_config_set_workspace_entity_from_root_cwd(root: Path) -> None:
     # Standing at the workspace root (no project), the entity floor is the
     # active workspace; the key lands workspace-local top-level.
