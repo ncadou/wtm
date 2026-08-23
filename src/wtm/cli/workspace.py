@@ -65,7 +65,7 @@ def workspace_show(
         None, help="Workspace (default: the active workspace)", autocompletion=_complete_workspace
     ),
 ) -> None:
-    """Show a workspace's detail (path, description, base_branch, scope, project count)."""
+    """Show a workspace's detail (path, description, base-branch, scope, project count)."""
     result = ctx.obj.workspaces.show(name)
     exists = "" if result.exists else "  (missing)"
     print(f"name: {result.name}")
@@ -73,7 +73,7 @@ def workspace_show(
     if result.description:
         print(f"description: {result.description}")
     if result.base_branch:
-        print(f"base_branch: {result.base_branch}")
+        print(f"base-branch: {result.base_branch}")
     print(f"scope: {result.scope.value}")
     print(f"projects: {result.project_count}")
 
@@ -152,7 +152,7 @@ def workspace_rename(
     result = ctx.obj.workspaces.rename(old, new)
     log(f"renamed workspace '{result.old}' -> '{result.new}'")
     if result.fixed_default:
-        log(f"default_workspace updated to '{result.new}'")
+        log(f"default-workspace updated to '{result.new}'")
 
 
 @workspace_app.command(name="delete")
@@ -164,7 +164,7 @@ def workspace_delete(
     result = ctx.obj.workspaces.delete(name)
     log(f"unregistered '{result.name}'")
     if result.cleared_default:
-        log("cleared default_workspace (it pointed here)")
+        log("cleared default-workspace (it pointed here)")
     if result.remains_at_system:
         warn(f"'{result.name}' is still declared at system scope; it remains resolvable")
 
@@ -175,14 +175,14 @@ def workspace_default(
     name: str | None = typer.Argument(
         None, help="Workspace to make default (omit to show)", autocompletion=_complete_workspace
     ),
-    clear: bool = typer.Option(False, "--clear", help="Remove the default_workspace key"),
+    clear: bool = typer.Option(False, "--clear", help="Remove the default-workspace key"),
 ) -> None:
-    """Get, set, or clear the default_workspace (user config)."""
+    """Get, set, or clear the default-workspace (user config)."""
     if clear:
         if name is not None:
             raise WtmError("--clear takes no NAME")
         ctx.obj.workspaces.default_clear()
-        log("cleared default_workspace")
+        log("cleared default-workspace")
 
         return
     if name is None:
@@ -191,7 +191,7 @@ def workspace_default(
 
         return
     ctx.obj.workspaces.default_set(name)
-    log(f"default_workspace set to '{name}'")
+    log(f"default-workspace set to '{name}'")
 
 
 @workspace_app.command(name="enter")

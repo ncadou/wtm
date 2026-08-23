@@ -151,7 +151,7 @@ class TestFloors:
         svc = Config.load().entity("ws", "alpha", "feat")
 
         with pytest.raises(WtmError, match="cannot take a floor"):
-            svc.inheritable_add("base_branch", floor="global")
+            svc.inheritable_add("base-branch", floor="global")
 
     def test_floored_key_refuses_deeper_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -182,12 +182,12 @@ class TestInheritance:
         _use_config(monkeypatch, tmp_path)
         config_path = tmp_path / "_wtm_config.toml"
         with config_path.open("a") as handle:
-            handle.write('base_branch = "mainline"\n')
+            handle.write('base-branch = "mainline"\n')
         config = Config.load()
         feat = config.entity("ws", "alpha", "feat")
 
-        assert feat.get("base_branch") == "mainline"
-        assert "base_branch" in feat.keys()
+        assert feat.get("base-branch") == "mainline"
+        assert "base-branch" in feat.keys()
 
     def test_inheritable_add_refuses_non_inheritable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -231,11 +231,11 @@ class TestTypedAccessors:
         _use_config(monkeypatch, tmp_path)
         config = Config.load()
         proj = config.entity("ws", "alpha")
-        proj.set("base_branch", "trunk")
+        proj.set("base-branch", "trunk")
 
         annotation = proj.annotation()
         assert annotation.base_branch == "trunk"
-        rung = proj.provenance("base_branch")
+        rung = proj.provenance("base-branch")
         assert (rung.value, rung.tier) == ("trunk", "project")
 
     def test_worktree_annotation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1280,7 +1280,7 @@ def _seed_config_keys(root: Path, project: str) -> Path:
 
     Project *project* gets ``owner`` (scalar), ``ports`` (array), ``labels``
     (table), and an ``inheritable`` allowlist naming ``deploy_env`` at project
-    scope; the workspace gets ``base_branch`` at workspace scope (inheritable, so
+    scope; the workspace gets ``base-branch`` at workspace scope (inheritable, so
     it resolves for the project even though the project does not set it).
     """
     proj_dir = root / project
@@ -1290,7 +1290,7 @@ def _seed_config_keys(root: Path, project: str) -> Path:
         'inheritable = ["deploy_env"]\n[labels]\nenv = "prod"\ntier = "web"\n'
     )
     (root / ".wtm").mkdir(parents=True, exist_ok=True)
-    (root / ".wtm" / "config.toml").write_text('base_branch = "main"\n')
+    (root / ".wtm" / "config.toml").write_text('base-branch = "main"\n')
 
     return proj_dir
 
@@ -1306,11 +1306,11 @@ def test_complete_config_key_effective_set(root: Path, monkeypatch: pytest.Monke
         params = {}
 
     items = dict(_complete_config_key(_C(), ""))
-    # base_branch inherits from the workspace tier; owner + labels are project-local.
+    # base-branch inherits from the workspace tier; owner + labels are project-local.
     # Key provenance labels are prefixed ``config in <level>`` to avoid colliding
     # with the locator kind labels (``workspace``/``project``/...) they share a
     # column with in the union completion.
-    assert items["base_branch"] == "config in workspace"
+    assert items["base-branch"] == "config in workspace"
     assert items["owner"] == "config in project"
     assert items["labels"] == "config in project"
     # Reserved keys never appear (they own typed surfaces, not the arbitrary-key get).
@@ -1349,7 +1349,7 @@ def test_config_get_key_completion_e2e(root: Path) -> None:
     proj_dir = _seed_config_keys(root, "alpha")
     out = _complete(root, words="wtm config get ", cword="3", cwd=proj_dir)
     names = out.split()
-    assert "base_branch" in names
+    assert "base-branch" in names
     assert "owner" in names
     assert "labels" in names
 
@@ -1395,9 +1395,9 @@ def test_config_get_key_completion_labels_zsh(root: Path) -> None:
     proj_dir = _seed_config_keys(root, "alpha")
     out = _complete_zsh(root, args="wtm config get ", cwd=proj_dir)
     # zsh renders (value, help) as "value":"help"; the definition-tier label
-    # surfaces (base_branch from workspace, owner from project), prefixed
+    # surfaces (base-branch from workspace, owner from project), prefixed
     # ``config in <level>`` to avoid colliding with locator kind labels.
-    assert '"base_branch":"config in workspace"' in out
+    assert '"base-branch":"config in workspace"' in out
     assert '"owner":"config in project"' in out
 
 
@@ -1430,7 +1430,7 @@ def test_complete_config_set_key_effective(root: Path, monkeypatch: pytest.Monke
     assert items["owner"] == "config in project"
     assert items["labels"] == "config in project"
     assert items["ports"] == "config in project"
-    assert items["base_branch"] == "config in workspace"
+    assert items["base-branch"] == "config in workspace"
     # No -a: inheritable is reserved, not offered.
     assert "inheritable" not in items
 
@@ -1673,7 +1673,7 @@ def test_config_set_key_completion_e2e(root: Path) -> None:
     assert "owner" in names
     assert "ports" in names
     assert "labels" in names
-    assert "base_branch" in names
+    assert "base-branch" in names
 
 
 def test_config_set_inheritable_key_completion_e2e(root: Path) -> None:
@@ -4298,7 +4298,7 @@ def test_config_show_lists_project_local_only_annotation(tmp_path: Path) -> None
     proj = ws / "api"
     (proj / ".git").mkdir(parents=True)
     (proj / ".wtm").mkdir(parents=True)
-    (proj / ".wtm" / "config.toml").write_text('base_branch = "develop"\n')
+    (proj / ".wtm" / "config.toml").write_text('base-branch = "develop"\n')
     config = tmp_path / "c.toml"
     config.write_text(f'[workspaces.alpha]\npath = "{ws}"\n')
     res = _run_multi("config", "show", "-g", "-r", config=config, cwd=tmp_path, workspace="alpha")
@@ -4403,7 +4403,7 @@ def test_configured_base_branch_used_for_new_branch(root: Path, tmp_path: Path) 
     config = root / "_custom.toml"
     config.write_text(
         f'[workspaces.ws]\npath = "{root}"\n'
-        '[workspaces.ws.projects.alpha]\nbase_branch = "develop"\n'
+        '[workspaces.ws.projects.alpha]\nbase-branch = "develop"\n'
     )
     res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
     assert res.returncode == 0, res.stderr
@@ -4414,7 +4414,7 @@ def test_base_flag_overrides_configured(root: Path) -> None:
     _seed_repo(root, "alpha")
     config = root / "_custom.toml"
     config.write_text(
-        f'[workspaces.ws]\npath = "{root}"\n[workspaces.ws.projects.alpha]\nbase_branch = "nope"\n'
+        f'[workspaces.ws]\npath = "{root}"\n[workspaces.ws.projects.alpha]\nbase-branch = "nope"\n'
     )
     res = run(
         "create",
@@ -4435,7 +4435,7 @@ def test_unresolvable_configured_base_errors(root: Path) -> None:
     config = root / "_custom.toml"
     config.write_text(
         f'[workspaces.ws]\npath = "{root}"\n'
-        '[workspaces.ws.projects.alpha]\nbase_branch = "ghost"\n'
+        '[workspaces.ws.projects.alpha]\nbase-branch = "ghost"\n'
     )
     res = run("create", "alpha", "feat", root=root, extra_env={"WTM_CONFIG": str(config)})
     assert res.returncode == 1
@@ -4535,10 +4535,10 @@ def test_config_base_branch_set_show_clear(root: Path) -> None:
     env = {"WTM_CONFIG": str(cfg)}
     assert "(none set)" in run("config", "base-branch", root=root, extra_env=env).stdout
     assert run("config", "base-branch", "main", root=root, extra_env=env).returncode == 0
-    assert 'base_branch = "main"' in cfg.read_text()
+    assert 'base-branch = "main"' in cfg.read_text()
     assert "main [user]" in run("config", "base-branch", root=root, extra_env=env).stdout
     assert run("config", "base-branch", "--clear", root=root, extra_env=env).returncode == 0
-    assert "base_branch =" not in cfg.read_text()
+    assert "base-branch =" not in cfg.read_text()
 
 
 # --- config set/get typed values (opt-in scalar writes) -----------------------
@@ -4664,14 +4664,14 @@ def test_config_set_typed_table_cell(root: Path) -> None:
 
 def test_config_show_reports_base_branch_source(root: Path) -> None:
     cfg = root / "cfg.toml"
-    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    cfg.write_text(f'base-branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
     res = run("config", "show", "--origin", root=root, extra_env={"WTM_CONFIG": str(cfg)})
     assert res.returncode == 0, res.stderr
-    assert "default base_branch: main  [user]" in res.stdout
+    assert "default base-branch: main  [user]" in res.stdout
 
 
 def test_config_show_workspace_base_branch_origin(root: Path) -> None:
-    # A workspace-tier base_branch is annotated with its declaring scope under
+    # A workspace-tier base-branch is annotated with its declaring scope under
     # --origin, mirroring the global and project tiers (Q6: ungated). The
     # workspace-local file is a different scope from the workspace's declaration
     # scope (user), so this also guards against regressing to ws.entry.scope.
@@ -4681,18 +4681,18 @@ def test_config_show_workspace_base_branch_origin(root: Path) -> None:
     assert run("workspace", "set", "ws", "-b", "develop", root=root, extra_env=env).returncode == 0
     res = run("config", "show", "--origin", root=root, extra_env=env)
     assert res.returncode == 0, res.stderr
-    assert "base_branch: develop  [workspace]" in res.stdout
+    assert "base-branch: develop  [workspace]" in res.stdout
 
 
 def test_config_show_surfaces_cwd_project_local_base_branch(root: Path) -> None:
-    # A project-local base_branch is invisible in the workspace listing but must
+    # A project-local base-branch is invisible in the workspace listing but must
     # surface (with a [project] source) when the cwd is inside that project.
     _seed_repo(root, "proj")
     run("project", "set", "proj", "-b", "develop", root=root)
     res = run("config", "show", "--origin", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
     assert "project proj:" in res.stdout
-    assert "base_branch: develop  [project]" in res.stdout
+    assert "base-branch: develop  [project]" in res.stdout
 
 
 def test_config_show_no_descent_from_workspace_root(root: Path) -> None:
@@ -4742,7 +4742,7 @@ def test_config_show_arbitrary_keys_shown_in_cwd_descent(root: Path) -> None:
 
 def test_config_show_origin_scalar_extra(root: Path) -> None:
     # `config show --origin` annotates a scalar arbitrary key with its source
-    # tier, like it already does for base_branch/headers (terse [label]).
+    # tier, like it already does for base-branch/headers (terse [label]).
     _seed_repo(root, "proj")
     cwd = root / "proj"
     (cwd / ".wtm").mkdir(parents=True, exist_ok=True)
@@ -4828,7 +4828,7 @@ def test_config_show_hooks_flag_gates_hook_output(root: Path) -> None:
     _seed_repo(root, "proj")
     run("project", "set", "proj", "-b", "develop", root=root)
     (root / "proj" / ".wtm" / "config.toml").write_text(
-        'base_branch = "develop"\n[hooks.on]\ninstall = "make deps"\n'
+        'base-branch = "develop"\n[hooks.on]\ninstall = "make deps"\n'
     )
     without = run("config", "show", root=root, cwd=root / "proj")
     assert "hook install" not in without.stdout
@@ -4846,7 +4846,7 @@ def test_config_show_all_descends_every_project_and_worktree(root: Path) -> None
     assert res.returncode == 0, res.stderr
     assert "workspace" in res.stdout
     assert "project proj:" in res.stdout
-    assert "base_branch: develop" in res.stdout
+    assert "base-branch: develop" in res.stdout
     assert "worktree feat:" in res.stdout
     assert "worktree main:" not in res.stdout
 
@@ -4869,7 +4869,7 @@ def test_config_show_all_surfaces_inert_and_declared_worktree(root: Path) -> Non
 
 def test_config_show_project_from_cwd_and_worktree_base_branch_carveout(root: Path) -> None:
     # Bare config show roots at the cwd's project and (with -r) descends its
-    # worktrees; the base_branch carve-out means no base_branch line ever prints
+    # worktrees; the base-branch carve-out means no base-branch line ever prints
     # on a worktree.
     _seed_repo(root, "proj")
     run("create", "proj", "feat", root=root)
@@ -4877,10 +4877,10 @@ def test_config_show_project_from_cwd_and_worktree_base_branch_carveout(root: Pa
     res = run("config", "show", "-r", root=root, cwd=root / "proj")
     assert res.returncode == 0, res.stderr
     assert "project proj:" in res.stdout
-    assert "base_branch: develop" in res.stdout
-    # The worktree block carries no base_branch line.
+    assert "base-branch: develop" in res.stdout
+    # The worktree block carries no base-branch line.
     wt_block = res.stdout.split("worktree feat:", 1)[1]
-    assert "base_branch" not in wt_block
+    assert "base-branch" not in wt_block
 
 
 def test_config_show_worktree_by_name(root: Path) -> None:
@@ -4901,10 +4901,10 @@ def test_config_show_all_json_is_nested_tree(root: Path) -> None:
     # The single seeded workspace holds proj -> feat.
     (ws_node,) = payload["workspaces"].values()
     proj_node = ws_node["projects"]["proj"]
-    assert proj_node["base_branch"] == "develop"
+    assert proj_node["base-branch"] == "develop"
     assert set(proj_node["worktrees"]) == {"feat"}
-    # base_branch carve-out: worktree nodes never carry base_branch.
-    assert "base_branch" not in proj_node["worktrees"]["feat"]
+    # base-branch carve-out: worktree nodes never carry base-branch.
+    assert "base-branch" not in proj_node["worktrees"]["feat"]
 
 
 def test_config_show_project_json_extra_nested(root: Path) -> None:
@@ -4985,17 +4985,17 @@ def test_config_show_json_no_workspaces_in_extra(root: Path) -> None:
 
 
 def test_config_show_json_no_base_branch_source(root: Path) -> None:
-    # --json is effective-values-only (per Q13): the global default base_branch
-    # ships as ``default_base_branch``, but its provenance (``base_branch_source``)
+    # --json is effective-values-only (per Q13): the global default base-branch
+    # ships as ``default-base-branch``, but its provenance (``base-branch-source``)
     # is text-only (``--origin``) and never appears in JSON.
     cfg = root / "cfg.toml"
-    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    cfg.write_text(f'base-branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
     _seed_repo(root, "proj")
     res = run("config", "show", "--json", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
     assert res.returncode == 0, res.stderr
     payload = json.loads(res.stdout)
-    assert payload["default_base_branch"] == "main"
-    assert "base_branch_source" not in payload
+    assert payload["default-base-branch"] == "main"
+    assert "base-branch-source" not in payload
 
 
 def test_config_set_workspaces_refused(root: Path) -> None:
@@ -5011,11 +5011,11 @@ def test_config_show_global_alone_is_global_tier_only(root: Path) -> None:
     # -g with no locator targets the global tier; depth caps at 0, so no
     # workspace block is rendered even when a project exists on disk.
     cfg = root / "cfg.toml"
-    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    cfg.write_text(f'base-branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
     _seed_repo(root, "proj")
     res = run("config", "show", "-g", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
     assert res.returncode == 0, res.stderr
-    assert "default base_branch: main" in res.stdout
+    assert "default base-branch: main" in res.stdout
     assert "workspace ws:" not in res.stdout
     assert "project proj:" not in res.stdout
 
@@ -5038,7 +5038,7 @@ def test_config_show_depth_global_caps_at_global(root: Path) -> None:
     # -d global (0) from a project cwd prunes the workspace and project tiers,
     # leaving only the global tier (the target itself is capped when shallower).
     cfg = root / "cfg.toml"
-    cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
+    cfg.write_text(f'base-branch = "main"\n[workspaces.ws]\npath = "{root}"\n')
     _seed_repo(root, "proj")
     res = run(
         "config",
@@ -5050,7 +5050,7 @@ def test_config_show_depth_global_caps_at_global(root: Path) -> None:
         extra_env={"WTM_CONFIG": str(cfg)},
     )
     assert res.returncode == 0, res.stderr
-    assert "default base_branch: main" in res.stdout
+    assert "default base-branch: main" in res.stdout
     assert "workspace ws:" not in res.stdout
     assert "project proj:" not in res.stdout
 
@@ -5107,7 +5107,7 @@ def test_project_set_writes_local_config(root: Path) -> None:
     res = run("project", "set", "proj", "-b", "develop", "-d", "the proj", root=root)
     assert res.returncode == 0, res.stderr
     local = (root / "proj" / ".wtm" / "config.toml").read_text()
-    assert 'base_branch = "develop"' in local
+    assert 'base-branch = "develop"' in local
     assert 'description = "the proj"' in local
 
 
@@ -5119,7 +5119,7 @@ def test_project_set_scope_workspace_writes_ws_local(root: Path) -> None:
     assert "[workspace]" in res.stderr
     text = (root / ".wtm" / "config.toml").read_text()
     assert "[projects.proj]" in text
-    assert 'base_branch = "develop"' in text
+    assert 'base-branch = "develop"' in text
     assert not (root / "proj" / ".wtm" / "config.toml").exists()
 
 
@@ -5144,7 +5144,7 @@ def test_project_show_outputs_detail(root: Path) -> None:
     res = run("project", "show", "proj", root=root)
     assert res.returncode == 0, res.stderr
     assert "name: proj" in res.stdout
-    assert "effective base_branch: develop [project]" in res.stdout
+    assert "effective base-branch: develop [project]" in res.stdout
 
 
 def test_worktree_set_writes_local_config(root: Path) -> None:
@@ -5244,15 +5244,15 @@ def test_config_get_sources_shows_full_chain(root: Path) -> None:
 
 
 def test_config_get_base_branch_reports_inherited_value(root: Path) -> None:
-    # `config get base_branch` from a project reports the inherited workspace-own
+    # `config get base-branch` from a project reports the inherited workspace-own
     # default a real `create` would use -- not `(unset)`.
     cfg = root / "cfg.toml"
-    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\nbase_branch = "develop"\n')
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\nbase-branch = "develop"\n')
     _seed_repo(root, "proj")
     res = run(
         "config",
         "get",
-        "base_branch",
+        "base-branch",
         root=root,
         cwd=root / "proj",
         extra_env={"WTM_CONFIG": str(cfg)},
@@ -5266,15 +5266,15 @@ def test_config_get_base_branch_sources_lists_inheritance_tiers(root: Path) -> N
     # global), most-local-first, so the two `user`-file rungs read distinctly.
     cfg = root / "cfg.toml"
     cfg.write_text(
-        f'base_branch = "main"\n'
-        f'[workspaces.ws]\npath = "{root}"\nbase_branch = "develop"\n'
-        f'[workspaces.ws.projects.proj]\nbase_branch = "feature"\n'
+        f'base-branch = "main"\n'
+        f'[workspaces.ws]\npath = "{root}"\nbase-branch = "develop"\n'
+        f'[workspaces.ws.projects.proj]\nbase-branch = "feature"\n'
     )
     _seed_repo(root, "proj")
     res = run(
         "config",
         "get",
-        "base_branch",
+        "base-branch",
         "--origin",
         root=root,
         cwd=root / "proj",
@@ -5335,21 +5335,21 @@ def test_config_show_reflects_inherited_user_key(root: Path) -> None:
 
 
 def test_config_show_suppresses_inherited_base_branch_at_project(root: Path) -> None:
-    # The headline case: a workspace-wide base_branch is shown at the workspace
+    # The headline case: a workspace-wide base-branch is shown at the workspace
     # tier only, not echoed under every project. The global default and the
     # workspace value each appear once, at their definition sites.
     cfg = root / "cfg.toml"
     cfg.write_text(
-        f'base_branch = "master"\n[workspaces.ws]\npath = "{root}"\nbase_branch = "main"\n'
+        f'base-branch = "master"\n[workspaces.ws]\npath = "{root}"\nbase-branch = "main"\n'
     )
     _seed_repo(root, "proj")
     res = run("config", "show", "-r", root=root, cwd=root, extra_env={"WTM_CONFIG": str(cfg)})
     assert res.returncode == 0, res.stderr
-    assert "default base_branch: master" in res.stdout
+    assert "default base-branch: master" in res.stdout
     ws_block = res.stdout.split("workspace ws:", 1)[1].split("project proj:", 1)[0]
-    assert "base_branch: main" in ws_block
+    assert "base-branch: main" in ws_block
     proj_block = res.stdout.split("project proj:", 1)[1]
-    assert "base_branch" not in proj_block
+    assert "base-branch" not in proj_block
 
 
 def test_config_show_suppresses_inherited_arbitrary_scalar_at_project(root: Path) -> None:
@@ -6177,7 +6177,7 @@ def test_workspace_delete_unregisters(root: Path) -> None:
 def test_workspace_default_set_and_show(root: Path) -> None:
     res = run("workspace", "default", "ws", root=root)
     assert res.returncode == 0, res.stderr
-    assert 'default_workspace = "ws"' in _config_text(root)
+    assert 'default-workspace = "ws"' in _config_text(root)
 
 
 def test_workspace_show_outputs_detail(root: Path) -> None:

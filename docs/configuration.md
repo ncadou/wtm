@@ -22,7 +22,7 @@ be absolute after expansion.
 
 An entity stores its *own* config at the **top level** of its own file; a
 containing file nests a child under `<child-plural>.<name>`. So the same key —
-say a project's `base_branch` — is writable (and correctly resolved) at every
+say a project's `base-branch` — is writable (and correctly resolved) at every
 scope above the project:
 
 | where written | table in that file |
@@ -39,9 +39,9 @@ comment-preserving `tomlkit` round-trip with an atomic replace). All reads and
 writes go through one authority — `wtm.config` — the only module that touches a
 `.wtm/config.toml` file. It offers an arbitrary-key facility (read/write any
 scalar at any named scope), a typed read view, and named structural registry
-mutations (`add`/`set`/`rename`/`delete` workspace, `default_workspace`, global
-`base_branch`) that write the **user file** and own their cross-key fixups (a
-rename follows a dangling `default_workspace`).
+mutations (`add`/`set`/`rename`/`delete` workspace, `default-workspace`, global
+`base-branch`) that write the **user file** and own their cross-key fixups (a
+rename follows a dangling `default-workspace`).
 
 ## Write placement (`-s/--scope`)
 
@@ -51,11 +51,11 @@ directory exists**. The allowed scopes narrow by entity:
 
 | command | writes | allowed `--scope` |
 |---|---|---|
-| `wtm workspace set -d/-b` | workspace `description` / `base_branch` | workspace, user, system |
-| `wtm project set -d/-b` | project `description` / `base_branch` | project, workspace, user, system |
+| `wtm workspace set -d/-b` | workspace `description` / `base-branch` | workspace, user, system |
+| `wtm project set -d/-b` | project `description` / `base-branch` | project, workspace, user, system |
 | `wtm worktree set -d` | worktree `description` | worktree, project, workspace, user, system |
-| `wtm config base-branch [VALUE] [--clear]` | global `base_branch` (user file, top-level) | — |
-| `wtm workspace default [NAME] [--clear]` | `default_workspace` (user file, top-level) | — |
+| `wtm config base-branch [VALUE] [--clear]` | global `base-branch` (user file, top-level) | — |
+| `wtm workspace default [NAME] [--clear]` | `default-workspace` (user file, top-level) | — |
 | `wtm workspace add` / `set --path` | workspace `path` (user file registry entry) | — user-file only |
 
 Workspace **declarations** (`add`/`set --path`/`rename`/`default`) stay
@@ -107,7 +107,7 @@ section — a TOML table. `config set ci.runner.image ubuntu` writes
 identical to `config set ci.runner.image ubuntu`. A bare `KEY` keeps its
 top-level meaning. Only the **head** segment of a dotted path is checked against
 the reserved names (`hooks` / `projects` / `worktrees` / `workspaces` / `path` /
-`default_workspace` / `inheritable`) — deeper segments are harmless cells, so
+`default-workspace` / `inheritable`) — deeper segments are harmless cells, so
 `ci.workspaces` is allowed (a cell named `workspaces` inside your `ci` section),
 but `hooks.on.x` is refused.
 
@@ -176,7 +176,7 @@ Reads were always native-typed (a hand-written `port = 8080` resolves as an
 integer); text output renders non-strings TOML-faithfully so what `config get`
 prints round-trips back through `--toml`, and `config_slice_json`
 (`config show --json`, `config get --json`) encodes dates as ISO-8601 strings.
-The structural tier (`base_branch`, `path`, descriptions, hook commands) stays
+The structural tier (`base-branch`, `path`, descriptions, hook commands) stays
 string-only by nature.
 
 ```sh
@@ -197,14 +197,14 @@ an existing one.
 
 An **inheritable** key resolves up the containment chain rather than staying
 entity-local — it is a *non-entity-specific* key: a shared default describing a
-whole subtree (like `base_branch`), not a property of one node (like
+whole subtree (like `base-branch`), not a property of one node (like
 `description`). `config get` on such a key folds the entity's own cascade plus
 its ancestors' (project → workspace → global default), so it reports the same
 effective value a real command would use; for it `--origin` labels each rung by
 its definition level (`project` / `workspace` / `global`) — matching
 `config show` — rather than its raw scope, and still names the file.
 
-Two builtin keys are classified in code: `base_branch` inherits, `description`
+Two builtin keys are classified in code: `base-branch` inherits, `description`
 does not. Every arbitrary key is **entity-local by default**. To opt one into
 inheritance, name it in a top-level `inheritable` array — maintained through the
 same array flags (the one reserved key those flags may touch):
@@ -243,16 +243,16 @@ registry table) is refused with `WriteProhibitedError`. Removing such a value
 is never refused — unsetting a stray below-floor value is cleanup, not
 placement.
 
-`base_branch` is the builtin example: its floor is `project`, because a fork
+`base-branch` is the builtin example: its floor is `project`, because a fork
 point for new branches is a property of a project subtree, never of one
-checkout — a worktree-local `base_branch` neither resolves nor writes, keeping
+checkout — a worktree-local `base-branch` neither resolves nor writes, keeping
 `config get` aligned with what `create` forks from. User-declared floors give
 your own keys the same shape: `{ key = "region", floor = "workspace" }` makes
 `region` a workspace-and-above default that no project or worktree can override.
-A floor on `base_branch` itself is refused — it owns a typed surface whose
+A floor on `base-branch` itself is refused — it owns a typed surface whose
 resolution is fixed.
 
-Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default_workspace`,
+Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default-workspace`,
 `inheritable`) have their own surfaces and are refused as arbitrary keys.
 
 ## Inline hooks (`hook set/unset`)
@@ -324,7 +324,7 @@ hooks per scope. Both are **ungated** — they apply in every mode, with or
 without `-r` or `-g` (the former subtree-only restriction is gone).
 
 `-j`/`--json` emits the result as a nested JSON object instead of text, always
-rooted at global (`default_base_branch`, `base_branch_source`, `extra`, then
+rooted at global (`default-base-branch`, `base-branch-source`, `extra`, then
 `workspaces` → `projects` → `worktrees`, pruned exactly as the text form).
 Effective values only — `--json` combined with `--origin` or `--hooks` is an
 error (use `config get KEY --origin` for structured provenance).
@@ -332,14 +332,14 @@ error (use `config get KEY --origin` for structured provenance).
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its
 `<workspace>/.wtm/config.toml`. Projects are discovered on disk and only
-annotated (by name) with a description, a `base_branch`, and hooks.
+annotated (by name) with a description, a `base-branch`, and hooks.
 
 ## Example
 
 ```toml
 # ~/.config/wtm/config.toml
-default_workspace = "work"          # active fallback when cwd matches none
-base_branch = "main"                # global default fork point for new branches
+default-workspace = "work"          # active fallback when cwd matches none
+base-branch = "main"                # global default fork point for new branches
 
 [workspaces.work]
 path = "~/work"
@@ -348,7 +348,7 @@ description = "day job"
 post-create = "direnv allow"
 enter = ["tmux new-window", "echo entered $WTM_PROJECT"]
 [workspaces.work.projects.api]      # annotate a discovered project
-base_branch = "develop"
+base-branch = "develop"
 [workspaces.work.projects.api.hooks.on]
 install = "make deps"
 

@@ -242,7 +242,7 @@ def _print_config_slice(slice: ConfigSlice, show_origin: bool, hooks: bool) -> N
         origin = (
             f"  [{slice.base_branch_source}]" if show_origin and slice.base_branch_source else ""
         )
-        print(f"default base_branch: {slice.default_base_branch}{origin}")
+        print(f"default base-branch: {slice.default_base_branch}{origin}")
     _print_extra("", slice.global_extra, slice.global_extra_origins, "global", show_origin)
     if hooks:
         _print_scope_hooks("", slice.global_hooks, show_origin, "global")
@@ -260,7 +260,7 @@ def _print_slice_workspace(
         print(f"{indent}  description: {ws.entry.description}")
     if ws.entry.base_branch:
         bb_origin = f"  [{ws.base_branch_source}]" if show_origin and ws.base_branch_source else ""
-        print(f"{indent}  base_branch: {ws.entry.base_branch}{bb_origin}")
+        print(f"{indent}  base-branch: {ws.entry.base_branch}{bb_origin}")
     _print_extra(f"{indent}  ", ws.entry.extra, ws.extra_origins, "workspace", show_origin)
     if hooks:
         _print_scope_hooks(f"{indent}  ", ws.entry.hooks, show_origin, "workspace")
@@ -273,7 +273,7 @@ def _print_slice_project(
 ) -> None:
     """Render one project node with origin/hooks, descending its pruned worktrees.
 
-    ``base_branch`` is shown only when defined at the project tier (not
+    ``base-branch`` is shown only when defined at the project tier (not
     inherited from the workspace or global default); the defining ancestor
     carries it above. Inherited arbitrary keys are likewise suppressed (see
     :func:`_print_extra`).
@@ -284,7 +284,7 @@ def _print_slice_project(
         print(f"{indent}  description: {project.description}")
     if project.effective_base_branch and project.base_branch_source == "project":
         origin = f"  [{project.base_branch_source}]" if show_origin else ""
-        print(f"{indent}  base_branch: {project.effective_base_branch}{origin}")
+        print(f"{indent}  base-branch: {project.effective_base_branch}{origin}")
     _print_extra(f"{indent}  ", project.extra, project.extra_origins, "project", show_origin)
     if hooks:
         _print_scope_hooks(f"{indent}  ", project.hooks, show_origin, "project")
@@ -295,7 +295,7 @@ def _print_slice_project(
 def _print_slice_worktree(
     worktree: ResolvedWorktree, indent: str, show_origin: bool, hooks: bool
 ) -> None:
-    """Render one worktree leaf with origin/hooks (no base_branch tier)."""
+    """Render one worktree leaf with origin/hooks (no base-branch tier)."""
     print(f"{indent}worktree {worktree.name}: {worktree.dir}")
     if worktree.description:
         print(f"{indent}  description: {worktree.description}")
@@ -316,21 +316,21 @@ def _tilde(path: Path) -> str:
 def config_base_branch(
     ctx: typer.Context,
     value: str | None = typer.Argument(
-        None, metavar="[VALUE]", help="New global base_branch (omit to show)"
+        None, metavar="[VALUE]", help="New global base-branch (omit to show)"
     ),
-    clear: bool = typer.Option(False, "--clear", help="Remove the top-level base_branch key"),
+    clear: bool = typer.Option(False, "--clear", help="Remove the top-level base-branch key"),
 ) -> None:
-    """Get, set, or clear the global default base_branch (user config).
+    """Get, set, or clear the global default base-branch (user config).
 
     With no VALUE it prints the effective global default a real command would
     take, annotated with the scope it comes from; setting or clearing writes the
-    user-scope top-level ``base_branch``.
+    user-scope top-level ``base-branch``.
     """
     if clear:
         if value is not None:
             raise WtmError("--clear takes no VALUE")
         ctx.obj.config.clear_base_branch()
-        log("cleared base_branch")
+        log("cleared base-branch")
 
         return
     if value is None:
@@ -339,13 +339,13 @@ def config_base_branch(
             print("(none set)")
 
             return
-        rung = ctx.obj.config.provenance(ctx.obj.config.global_generic_target(), "base_branch")
+        rung = ctx.obj.config.provenance(ctx.obj.config.global_generic_target(), "base-branch")
         marker = f" [{rung.scope.value}]" if rung is not None else ""
         print(f"{current}{marker}")
 
         return
     ctx.obj.config.set_base_branch(value)
-    log(f"base_branch set to '{value}'")
+    log(f"base-branch set to '{value}'")
 
 
 # --- arbitrary-key surface (cwd-inferred entity) -------------------------------
@@ -406,7 +406,7 @@ def config_set(
     every declared workspace. ``--scope`` picks which file tier of that
     entity's cascade to write, defaulting to the deepest scope whose directory
     exists. Reserved keys (``hooks``/``projects``/``worktrees``/``path``/
-    ``default_workspace``) have their own commands and are refused here.
+    ``default-workspace``) have their own commands and are refused here.
 
     ``-g``/``--global`` instead targets the global tier -- the top level of the
     user file (``-s system``: the system file), with no structural prefix, so
@@ -430,7 +430,7 @@ def config_set(
     ``--floor``, an ``inheritable`` element is stored as ``{ key = VALUE,
     floor = FLOOR }``: the key then only participates at FLOOR and above
     (worktree < project < workspace < global), so deeper values neither
-    resolve nor write -- the same rule the builtin ``base_branch`` (floor
+    resolve nor write -- the same rule the builtin ``base-branch`` (floor
     ``project``) always had.
 
     A floored inheritable key refuses any write landing below its floor
@@ -558,7 +558,7 @@ def config_get(
     defined: per-cell for a table (each leaf ``path = value`` annotated with
     its source) or one line per carrying rung for a scalar/array -- the
     definition level (``project``/``workspace``/``global``) for an inherited
-    key such as ``base_branch``, otherwise its scope -- and the file it lives
+    key such as ``base-branch``, otherwise its scope -- and the file it lives
     in. ``--json`` emits the effective value as bare JSON (``8080``, ``true``,
     ``[1, 2]``, a nested object; ``null`` when unset), machine-readable with
     no provenance; it cannot be combined with ``--origin``.

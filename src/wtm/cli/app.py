@@ -65,7 +65,7 @@ Manage git worktrees over one or more named workspaces (projects roots):
 
 Workspaces are declared in config; projects are discovered on disk and only
 annotated. The active workspace is picked by a leading WORKSPACE positional,
-$WTM_WORKSPACE, the cwd, a default_workspace, or the sole declared one. Anything
+$WTM_WORKSPACE, the cwd, a default-workspace, or the sole declared one. Anything
 project-specific (shared data/tools dirs, direnv, sesh/tmux) is the concern of
 hooks, not wtm.
 

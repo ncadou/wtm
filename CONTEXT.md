@@ -16,7 +16,7 @@ _Avoid_: root (say "workspace path" or "projects root of the workspace")
 
 **Active workspace**:
 The workspace a command targets, resolved `WORKSPACE positional > $WTM_WORKSPACE
-> cwd (longest path match) > default_workspace > sole declared workspace >
+> cwd (longest path match) > default-workspace > sole declared workspace >
 error`. There is no built-in default and no `-w` flag: with nothing
 declared/selected, `wtm` errors. The leading `WORKSPACE` in a command's
 positionals overrides the rest per-target (see **Target grammar**).
@@ -210,13 +210,13 @@ plus a bare or tuple key -- the substrate everything else is built on), the
 key resolves by a single **uniform locality merge** -- `merge_locality` folds a
 most-local-first probe table so increased locality always outranks lesser, the
 most-local *present* value wins, `hooks.on` accumulates, and **inheritance**
-climbs the **entity** chain for the few **inheritable keys**, only `base_branch`
+climbs the **entity** chain for the few **inheritable keys**, only `base-branch`
 today, via the tier-tagged inherit chains (`Config.provenance` labels the
 winning rung)), and the **structural registry mutations**
 (`add`/`set`/`rename`/`remove_workspace`, `set`/`clear_default`,
 `set`/`clear_base_branch`, `set_project_annotation`) that write only the user
 file and own their cross-key fixups (a rename follows a dangling
-`default_workspace`). An entity stores its own config at its file's **top level**
+`default-workspace`). An entity stores its own config at its file's **top level**
 (no `[project]` wrapper); a container nests a child under `<child-plural>.<name>`
 once per ancestor above the file. All I/O is one comment-preserving `tomlkit`
 round-trip with an atomic replace, serialised by a **per-directory lock**
@@ -238,7 +238,7 @@ calling command (default: the deepest scope whose dir exists); the
 `*_write_target` resolvers map a scope to its `(address, key-prefix)` write site,
 and `resolve_generic_target`/`resolve_generic_value` expose the same cascade to
 the arbitrary-key `config set/get/unset` and inline `hook set/unset` surfaces over the
-cwd-inferred entity (for an *inheritable* key -- the builtin `base_branch` per
+cwd-inferred entity (for an *inheritable* key -- the builtin `base-branch` per
 `INHERITABLE_KEYS`, or any key named in the user's accumulating `inheritable`
 array -- the arbitrary-key read folds the entity's own cascade plus its ancestors' so
   `config get` reports the same effective value a real command uses, and
@@ -315,7 +315,7 @@ _Avoid_: cascade, scope inheritance, override
 **Arbitrary key**:
 A config key with no dedicated typed surface -- equivalently, any key that is
 not a **reserved key** (`hooks`, `projects`, `worktrees`, `workspaces`, `path`,
-`default_workspace`, `inheritable`), each of which owns its own command. The
+`default-workspace`, `inheritable`), each of which owns its own command. The
 schema-open escape hatch: read and written through the **arbitrary-key
 facility** (`config set/get/unset KEY [VALUE]`, backed by
 `Config.get_value`/`set_value`/`unset_value` over a `ConfigAddress`); every
@@ -347,7 +347,7 @@ A config key that undergoes **inheritance** -- equivalently, a
 down the containment chain), as opposed to an *entity-specific* key describing a
 single node (`description`, `path`), which must never inherit. The two framings
 are one axis. The effective set is the builtin `INHERITABLE_KEYS` allowlist
-(`base_branch` only today) unioned with the user's `inheritable` array -- a
+(`base-branch` only today) unioned with the user's `inheritable` array -- a
 top-level TOML array of elements (a key name, or an inline
 `{ key = ..., floor = ... }` table) that *accumulates* across scopes (like
 `hooks.on`), so a workspace may opt a key in for all its projects
@@ -363,7 +363,7 @@ array that flag may touch, each added element validated by
 `parse_inheritable_element` (a reserved key or a hardcoded-non-inheritable
 builtin -- `NON_INHERITABLE_KEYS`, i.e. `description` -- is refused; so is any
 malformed element, at read time too). A **typed-surface** inheritable key --
-`TYPED_INHERITABLE_KEYS`, i.e. `base_branch` with its dedicated command surface
+`TYPED_INHERITABLE_KEYS`, i.e. `base-branch` with its dedicated command surface
 (`project set --base`/`workspace set --base`) -- never also folds into `extra`
 (that would report one value on two surfaces) and cannot take a user-declared
 **floor** (its resolution is fixed to the generic inherit chain).
@@ -377,10 +377,10 @@ of band entirely (dropped from `extra`, pruned from `config get`), and a write
 landing below it is refused with `WriteProhibitedError`
 (`check_key_floor` over `tier_of_write_site`; removals never guard -- unsetting
 a stray below-floor value is cleanup). Builtin floors live in
-`INHERIT_FLOORS` (`base_branch`: `project` -- a fork point is a property of a
+`INHERIT_FLOORS` (`base-branch`: `project` -- a fork point is a property of a
 project subtree, never of one checkout); user floors ride the `inheritable`
 element's `floor` field (conflicting declarations resolve most-local-wins).
-This generalizes what used to be two hardcoded name-checks; `base_branch` is
+This generalizes what used to be two hardcoded name-checks; `base-branch` is
 now just the one builtin instance of the mechanism.
 
 **Source / Target** (import):

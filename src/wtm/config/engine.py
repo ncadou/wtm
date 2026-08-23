@@ -90,7 +90,7 @@ def merge_locality(store: Store, probes: Sequence[Probe]) -> tuple[dict[str, obj
     stripped from the scalar payload: ``hooks`` accumulates into a single
     :class:`HookSpec` (builtins-first across scopes), ``projects`` /
     ``worktrees`` are child-descent containers handled elsewhere, and ``path`` /
-    ``default_workspace`` are declaration keys that own their typed surfaces (so
+    ``default-workspace`` are declaration keys that own their typed surfaces (so
     a workspace registry entry's own ``path`` never leaks into ``extra``). A kind
     mismatch (scalar / array / table) for the same key across scopes is a hard
     error.

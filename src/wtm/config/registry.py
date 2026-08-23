@@ -3,7 +3,7 @@
 Phase 1 of :func:`build_registry` discovers each workspace's *declaration*
 (name, path, winning scope) from the system/user files; phase 2 fills its
 payload through the locality-merge engine. :func:`resolve_active` implements
-the documented precedence ``$WTM_WORKSPACE > cwd > default_workspace > sole
+the documented precedence ``$WTM_WORKSPACE > cwd > default-workspace > sole
 workspace``.
 """
 
@@ -51,7 +51,7 @@ def build_registry(system: dict, user: dict, store: Store) -> dict[str, Workspac
     Phase 1 discovers each workspace's *declaration* -- its name, ``path``, and
     winning ``scope`` -- from the system/user files only (a workspace-local file
     cannot relocate its own workspace, so ``path`` is a global declaration).
-    Phase 2 fills the payload (``description`` / ``base_branch`` / ``hooks`` /
+    Phase 2 fills the payload (``description`` / ``base-branch`` / ``hooks`` /
     ``extra``) through the single presence-based locality merge over the
     workspace probe cascade, so the registry and probe engines never diverge.
     """
@@ -71,13 +71,13 @@ def build_registry(system: dict, user: dict, store: Store) -> dict[str, Workspac
     for name, (path, scope) in declarations.items():
         probes = _workspace_probes_for(name, path)
         payload, hooks = merge_locality(store, probes)
-        local = {k: v for k, v in payload.items() if k not in ("description", "base_branch")}
+        local = {k: v for k, v in payload.items() if k not in ("description", "base-branch")}
         registry[name] = Workspace(
             name=name,
             path=path,
             scope=scope,
             description=str_or_none(payload.get("description")),
-            base_branch=str_or_none(payload.get("base_branch")),
+            base_branch=str_or_none(payload.get("base-branch")),
             hooks=hooks,
             extra=_workspace_inherited_extra(store, probes, local),
         )
@@ -94,8 +94,8 @@ def _workspace_inherited_extra(
     user-declared inheritable key absent workspace-locally falls back to the
     global value. Mirrors ``Config._inherited_extra`` for the registry build,
     which runs before any :class:`Config` exists. Typed-surface keys
-    (:data:`TYPED_INHERITABLE_KEYS`, i.e. ``base_branch``) are excluded (they
-    own the typed base_branch-provenance surface), and a key's floor prunes
+    (:data:`TYPED_INHERITABLE_KEYS`, i.e. ``base-branch``) are excluded (they
+    own the typed base-branch-provenance surface), and a key's floor prunes
     the fold's rungs like everywhere else.
     """
     floors: dict[str, str | None] = {k: INHERIT_FLOORS.get(k) for k in INHERITABLE_KEYS}
@@ -152,7 +152,7 @@ def global_probes() -> list[Probe]:
     """The global top-level cascade (user then system), most-local-first.
 
     The tail of an inheritable key's chain: the top-level default read from the
-    two non-entity files (e.g. the global ``base_branch``).
+    two non-entity files (e.g. the global ``base-branch``).
     """
     return [
         Probe(Scope.USER, user_config_path(), ()),
@@ -169,7 +169,7 @@ def resolve_active(
 ) -> str | None:
     """Resolve the active workspace name per the documented precedence.
 
-    ``selector > cwd (longest match) > default_workspace > sole workspace >
+    ``selector > cwd (longest match) > default-workspace > sole workspace >
     None``. The *selector* is the ``$WTM_WORKSPACE`` value (passed in by the
     caller, from :class:`wtm.config.addressing.Settings`). A WORKSPACE named in
     a command's positionals overrides this per-target (see :mod:`wtm.target`);
@@ -188,7 +188,7 @@ def resolve_active(
 
     if default_workspace:
         if default_workspace not in registry:
-            raise WtmError(f"default_workspace '{default_workspace}' is not declared")
+            raise WtmError(f"default-workspace '{default_workspace}' is not declared")
 
         return default_workspace
 

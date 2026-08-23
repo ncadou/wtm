@@ -168,7 +168,7 @@ class Project:
         description: str | None,
         scope: Scope | None = None,
     ) -> ProjectSet:
-        """Edit a project's annotation scalars (base_branch / description).
+        """Edit a project's annotation scalars (base-branch / description).
 
         Writes the annotation at *scope* (one of project / workspace / user /
         system). When *scope* is ``None`` the auto-default is the deepest scope
@@ -211,7 +211,7 @@ class Project:
         description: str | None,
     ) -> None:
         """Set/clear the annotation scalars under *prefix* at *address*."""
-        for key, value in (("description", description), ("base_branch", base_branch)):
+        for key, value in (("description", description), ("base-branch", base_branch)):
             if value is None:
                 continue
             full = (*prefix, key) if prefix else key
@@ -238,7 +238,7 @@ class Project:
             if ws is not None
             else self.config.global_generic_target()
         )
-        rung = self.config.provenance(target, "base_branch")
+        rung = self.config.provenance(target, "base-branch")
         effective = str(rung.value) if rung is not None else None
         source = rung.tier if rung is not None else "(none)"
 

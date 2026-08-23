@@ -69,7 +69,7 @@ class WorkspaceDeleted:
     """Result of :meth:`Workspaces.delete`."""
 
     name: str
-    cleared_default: bool  # default_workspace pointed here and was cleared
+    cleared_default: bool  # default-workspace pointed here and was cleared
     remains_at_system: bool  # a system-scope declaration survives
 
 
@@ -89,7 +89,7 @@ class WorkspaceRenamed:
 
     old: str
     new: str
-    fixed_default: bool  # default_workspace pointed at old and was rewritten
+    fixed_default: bool  # default-workspace pointed at old and was rewritten
 
 
 @dataclass(frozen=True)
@@ -243,7 +243,7 @@ class Workspaces:
         description: str | None,
         base_branch: str | None,
     ) -> Scope:
-        """Place description/base_branch at *scope* (auto: deepest existing dir)."""
+        """Place description/base-branch at *scope* (auto: deepest existing dir)."""
         scope = scope if scope is not None else workspace_default_scope(ws_dir)
         check_write_scope(scope, WORKSPACE_WRITE_SCOPES, "workspace")
 
@@ -267,8 +267,8 @@ class Workspaces:
         description: str | None,
         base_branch: str | None,
     ) -> None:
-        """Set/clear description/base_branch under *prefix* at *address*."""
-        for key, value in (("description", description), ("base_branch", base_branch)):
+        """Set/clear description/base-branch under *prefix* at *address*."""
+        for key, value in (("description", description), ("base-branch", base_branch)):
             if value is None:
                 continue
             full = (*prefix, key) if prefix else key
@@ -318,17 +318,17 @@ class Workspaces:
         return WorkspaceRenamed(old=old, new=new, fixed_default=fixed)
 
     def default_set(self, name: str) -> None:
-        """Set the top-level ``default_workspace`` (name must be declared)."""
+        """Set the top-level ``default-workspace`` (name must be declared)."""
         if not self.config.declaring_scopes(name):
             raise WtmError(f"workspace '{name}' is not declared")
         self.config.set_default(name)
 
     def default_show(self) -> str | None:
-        """Return the current ``default_workspace``, or ``None`` when unset."""
+        """Return the current ``default-workspace``, or ``None`` when unset."""
         return self.config.default_workspace
 
     def default_clear(self) -> None:
-        """Remove the top-level ``default_workspace`` key."""
+        """Remove the top-level ``default-workspace`` key."""
         self.config.clear_default()
 
     # --- read view -----------------------------------------------------------

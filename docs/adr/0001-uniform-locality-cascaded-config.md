@@ -349,3 +349,29 @@ carry over unchanged, and needs no new reserved name. The cost is a
 mixed-type array, paid once in `parse_inheritable_element` — which also makes a
 malformed stored element a hard read-time error, the same treatment a kind
 clash gets.
+
+## Addendum (2026-08-23): kebab-case key spellings
+
+The multi-word config keys are renamed to kebab-case to match TOML style and
+the CLI surfaces that already used the dashed spelling (`config base-branch`,
+`--base-branch`): `base_branch` becomes `base-branch` and `default_workspace`
+becomes `default-workspace`, everywhere a user can see or type the name —
+config files, `config show` output, the `config_slice_json` contract
+(`base-branch`, `default-base-branch`, `base-branch-source`), and error text.
+Python identifiers stay snake_case (hyphens are not legal there), so
+`ProjectAnnotation.base_branch`, `Config.set_base_branch`, and friends are
+unchanged; only string literals naming the keys moved.
+
+**Compatibility is a hard break, deliberately silent**: a file still carrying
+the old snake_case spellings loads fine, but those keys are inert — no reader
+claims them, so e.g. a legacy global fork point quietly falls back to
+`origin/HEAD`. No dual-name reading, no auto-migration: the config library is
+young enough that carrying two spellings per concept forever costs more than
+the one-time break. This addendum's prose keeps the historical snake_case
+spellings on purpose; everything after this point in living docs uses the new
+ones.
+
+Reserved-key vocabulary updates with it (`RESERVED_KEYS` now holds
+`default-workspace`), as do the builtin registries (`INHERITABLE_KEYS`,
+`INHERIT_FLOORS`, `TYPED_INHERITABLE_KEYS` now keyed by `"base-branch"`), the
+arbitrary-key refusal message, and the inheritable-element validation surface.

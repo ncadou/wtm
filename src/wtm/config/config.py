@@ -118,7 +118,7 @@ class Config:
 
             raise NoActiveWorkspaceError(
                 "no active workspace; pass WORKSPACE PROJECT NAME, set WTM_WORKSPACE, "
-                "cd into a workspace, or set a default_workspace"
+                "cd into a workspace, or set a default-workspace"
             )
 
         return self.workspaces[self.active]
@@ -166,7 +166,7 @@ class Config:
         """Read one scalar at *key* from the file *address* names (raw, unmerged).
 
         *key* is a bare key for a top-level scalar, or a tuple of parts for a
-        nested table (e.g. ``("project", "base_branch")``). Returns ``None``
+        nested table (e.g. ``("project", "base-branch")``). Returns ``None``
         when the scope's file or the key is absent. The value is whatever TOML
         parsed (str/int/float/bool/dates) -- reads are native-typed, and
         typed writes land as their native kind too (strings by default).
@@ -426,8 +426,8 @@ class Config:
         so its most-local value can win wholesale) followed by the shared
         ancestor tiers (:meth:`_ancestor_tiers`) -- then pruned of every rung
         below the key's floor (see :meth:`inheritable_floors`). The builtin
-        ``base_branch`` floor (``project``) is what keeps it a project-tier
-        concept with no worktree tier of its own, so ``config get base_branch``
+        ``base-branch`` floor (``project``) is what keeps it a project-tier
+        concept with no worktree tier of its own, so ``config get base-branch``
         resolves the same rung every consumer sees via :meth:`provenance`.
         """
         ancestors = self._ancestor_tiers(ws, project)
@@ -529,7 +529,7 @@ class Config:
         *own_tier* names the calling entity's tier (``project`` / ``worktree``).
         For every user-declared inheritable key (see :meth:`inheritable_keys`,
         excluding the typed-surface :data:`TYPED_INHERITABLE_KEYS` --
-        ``base_branch`` owns its provenance method) folds the ancestor chain,
+        ``base-branch`` owns its provenance method) folds the ancestor chain,
         pruned of every rung below the key's floor (see
         :meth:`inheritable_floors`), and merges it in. A key whose floor sits
         above *own_tier* is out of band entirely: an entity-local value is
@@ -626,7 +626,7 @@ class Config:
         most-local (winning) rung. The effective set is the entity's own present
         arbitrary keys (walked across *target*'s probe cascade, reserved keys
         excluded) unioned with the inheritable keys actually set on an ancestor
-        (``target.inherit``), so a ``base_branch`` defined only at the workspace
+        (``target.inherit``), so a ``base-branch`` defined only at the workspace
         or global tier still appears. Sorted by key; the rung is the same head
         :meth:`resolve_generic_value` returns, so a caller can label by its
         ``tier`` (an inheritable key) or ``scope`` (an entity-local key) without
@@ -817,7 +817,7 @@ class Config:
             if description:
                 entry["description"] = description
             if base_branch:
-                entry["base_branch"] = base_branch
+                entry["base-branch"] = base_branch
             workspaces[name] = entry
 
     def set_workspace(
@@ -838,7 +838,7 @@ class Config:
             for key, value in (
                 ("path", path),
                 ("description", description),
-                ("base_branch", base_branch),
+                ("base-branch", base_branch),
             ):
                 if value is None:
                     continue
@@ -851,7 +851,7 @@ class Config:
     def rename_workspace(self, old: str, new: str) -> bool:
         """Rename the registry key *old* to *new*, preserving the entry's subtables.
 
-        Fixes a top-level ``default_workspace`` that pointed at *old*. Returns
+        Fixes a top-level ``default-workspace`` that pointed at *old*. Returns
         whether that fixup happened.
         """
         with self._store.user_transaction() as doc:
@@ -859,46 +859,46 @@ class Config:
             workspaces = doc["workspaces"]
             workspaces[new] = entry
             del workspaces[old]
-            fixed = doc.get("default_workspace") == old
+            fixed = doc.get("default-workspace") == old
             if fixed:
-                doc["default_workspace"] = new
+                doc["default-workspace"] = new
 
         return fixed
 
     def remove_workspace(self, name: str) -> bool:
         """Delete the ``[workspaces.NAME]`` entry from the user file.
 
-        Also clears a top-level ``default_workspace`` that pointed at *name*.
+        Also clears a top-level ``default-workspace`` that pointed at *name*.
         Returns whether that fixup happened.
         """
         with self._store.user_transaction() as doc:
             existing_entry(doc, name)  # existence check
             del doc["workspaces"][name]
-            fixed = doc.get("default_workspace") == name
+            fixed = doc.get("default-workspace") == name
             if fixed:
-                del doc["default_workspace"]
+                del doc["default-workspace"]
 
         return fixed
 
     def set_default(self, name: str) -> None:
-        """Set the top-level ``default_workspace`` key in the user file."""
+        """Set the top-level ``default-workspace`` key in the user file."""
         with self._store.user_transaction() as doc:
-            set_leaf(doc, "default_workspace", name)
+            set_leaf(doc, "default-workspace", name)
 
     def clear_default(self) -> None:
-        """Remove the top-level ``default_workspace`` key from the user file."""
+        """Remove the top-level ``default-workspace`` key from the user file."""
         with self._store.user_transaction() as doc:
-            doc.pop("default_workspace", None)
+            doc.pop("default-workspace", None)
 
     def set_base_branch(self, value: str) -> None:
-        """Set the top-level ``base_branch`` (global default fork point) in the user file."""
+        """Set the top-level ``base-branch`` (global default fork point) in the user file."""
         with self._store.user_transaction() as doc:
-            set_leaf(doc, "base_branch", value)
+            set_leaf(doc, "base-branch", value)
 
     def clear_base_branch(self) -> None:
-        """Remove the top-level ``base_branch`` key from the user file."""
+        """Remove the top-level ``base-branch`` key from the user file."""
         with self._store.user_transaction() as doc:
-            doc.pop("base_branch", None)
+            doc.pop("base-branch", None)
 
     # --- loading -------------------------------------------------------------
 
@@ -913,7 +913,7 @@ class Config:
             ``None`` resolves them from the environment, matching the CLI.
 
         The active workspace is resolved from ``$WTM_WORKSPACE > cwd >
-        default_workspace > sole workspace``; there is no ``-w`` flag -- a
+        default-workspace > sole workspace``; there is no ``-w`` flag -- a
         WORKSPACE named in a command's positionals overrides this per-target
         (see :mod:`wtm.target`).
         """
@@ -925,7 +925,7 @@ class Config:
         user = store.read(user_config_path())
 
         registry = build_registry(system, user, store)
-        default_workspace = global_scalar(user, system, "default_workspace")
+        default_workspace = global_scalar(user, system, "default-workspace")
         active = resolve_active(
             registry,
             cwd=cwd,
@@ -941,7 +941,7 @@ class Config:
             _system_hooks_dir=resolved_settings.resolved_system_hooks_dir(),
             _user_hooks_dir=resolved_settings.resolved_user_hooks_dir(),
             _store=store,
-            default_base_branch=global_scalar(user, system, "base_branch"),
+            default_base_branch=global_scalar(user, system, "base-branch"),
             default_workspace=default_workspace,
             _settings=resolved_settings,
         )
@@ -965,7 +965,7 @@ class Config:
         The by-name core shared by the cwd view and the tree dump: fold the
         worktree probe table most-local-wins, split its ``description`` off, and
         inherit the remaining arbitrary keys down the containment chain. The
-        ``base_branch`` carve-out (a worktree has no base_branch tier) is upheld
+        ``base-branch`` carve-out (a worktree has no base-branch tier) is upheld
         by the probes never carrying one to the effective view.
         """
         wt_dir = project_dir / "worktrees" / name

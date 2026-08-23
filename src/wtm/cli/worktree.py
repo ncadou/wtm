@@ -190,7 +190,7 @@ def create(
         None,
         "--base",
         "--off",
-        help="Base ref a new branch forks from (overrides configured base_branch)",
+        help="Base ref a new branch forks from (overrides configured base-branch)",
         autocompletion=_complete_branch,
     ),
     destdir: str | None = typer.Option(None, "-d", "--dir", help="Destination dir"),

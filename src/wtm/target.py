@@ -280,7 +280,7 @@ def _require_active(active_root: Path | None) -> Path:
     if active_root is None:
         raise WtmError(
             "no active workspace; pass WORKSPACE PROJECT NAME, set WTM_WORKSPACE, "
-            "cd into a workspace, or set a default_workspace"
+            "cd into a workspace, or set a default-workspace"
         )
 
     return active_root

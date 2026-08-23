@@ -4,7 +4,7 @@ Every command runs against one **active workspace**, resolved in this order:
 
 ```
 leading WORKSPACE positional  >  $WTM_WORKSPACE  >  cwd (longest path match)
-                              >  default_workspace  >  the sole declared workspace  >  error
+                              >  default-workspace  >  the sole declared workspace  >  error
 ```
 
 There is no built-in default and no `-w` flag: with no workspace declared or
@@ -25,7 +25,7 @@ usage.
 ```
 list                      declared workspaces (name, path, active marker '*', description)
 resolve [NAME] [-e|--env] print a workspace's path (default: active); --env emits WTM_WORKSPACE(_DIR)
-show    [NAME]            detail for one workspace (path, description, base_branch, scope, project count)
+show    [NAME]            detail for one workspace (path, description, base-branch, scope, project count)
 add     NAME [PATH] [-d DESC] [-b BASE] [-c]
                           register a workspace (user scope; PATH default: cwd; -c mkdir -p)
 set     NAME [-p PATH] [-d DESC] [-b BASE]
@@ -33,14 +33,14 @@ set     NAME [-p PATH] [-d DESC] [-b BASE]
                           entry, -d/-b write <ws>/.wtm/config.toml if the dir exists else the entry
 rename  OLD NEW           rename the registry key (does not move the directory)
 delete  NAME             unregister a workspace (user scope; never touches the projects root)
-default [NAME] [--clear] get/set/clear default_workspace
+default [NAME] [--clear] get/set/clear default-workspace
 enter   [NAME]           cd into the projects root, firing workspace-enter hooks
 leave   [NAME] [-C]      fire workspace-leave hooks (cascading the worktree leave when inside one); cd out unless -C
 ```
 
 Workspaces are *declared* in config. `wtm` reads config from every scope but
 *writes* only the user file (its `[workspaces.*]` registry and the top-level
-`default_workspace` / `base_branch` keys) and the entity-local `.wtm/config.toml`
+`default-workspace` / `base-branch` keys) and the entity-local `.wtm/config.toml`
 files — via `add`/`set`/`rename`/`delete`/`default` (and `wtm project set`,
 `wtm config base-branch`), using a comment-preserving `tomlkit` round-trip with
 an atomic replace. System config stays hand-edited (those verbs refuse
@@ -62,7 +62,7 @@ enter   [[WORKSPACE] PROJECT]     cd into the project dir, firing project-enter 
 leave   [[WORKSPACE] PROJECT] [-C]   fire project-leave hooks (cascading the worktree leave when inside one); cd out unless -C
 set     [[WORKSPACE] PROJECT] [-b BASE] [-d DESC]   annotate a project (empty value clears);
                                   writes <project>/.wtm/config.toml if the dir exists else the user-file annotation
-show    [[WORKSPACE] PROJECT]     detail (dir, description, base_branch + provenance, worktree count)
+show    [[WORKSPACE] PROJECT]     detail (dir, description, base-branch + provenance, worktree count)
 ```
 
 Projects are *discovered* on disk (a `<name>/.git`), never declared; config
@@ -126,7 +126,7 @@ show [LOCATOR...] [-g] [-r]    the effective merged config as one global-rooted 
                                locator); -o/--origin annotates where each value comes from; --hooks renders
                                accumulated inline hooks per scope (both work in all modes); -j/--json emits a
                                nested JSON tree (effective values only; --json --origin/--hooks error)
-base-branch [VALUE] [--clear] get/set/clear the global default base_branch (user config); the getter
+base-branch [VALUE] [--clear] get/set/clear the global default base-branch (user config); the getter
                                shows the effective value and the scope it comes from
 ```
 
@@ -240,7 +240,7 @@ resolution.
 
 `create` resolves a branch as: existing local branch → use it; `origin/NAME`
 exists → track it; otherwise create a new branch off a base ref (`--base/--off
-REF` > the project's configured `base_branch` > `origin/HEAD` > `HEAD`). A
+REF` > the project's configured `base-branch` > `origin/HEAD` > `HEAD`). A
 configured/requested base is resolved as `origin/REF` then local `REF`; in a
 populated repo a base that resolves to nothing is a hard error. If the
 repository has no commits yet (e.g. a freshly-created project), the worktree is

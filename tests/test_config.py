@@ -5,7 +5,7 @@ its methods, driven by TOML files under ``tmp_path`` and env vars, with no
 ``wtm`` invocation and no git: config *resolution* (the workspace registry,
 active-workspace precedence, per-scope hook merging, base-branch cascade) and
 config *writes* (the arbitrary-key facility, the structural registry mutations,
-comment preservation, scope policy, and the ``default_workspace`` fixups).
+comment preservation, scope policy, and the ``default-workspace`` fixups).
 Lifecycle (enter/leave) and CLI wiring live in :mod:`tests.test_wtm`.
 """
 
@@ -142,7 +142,7 @@ def test_default_workspace_used_when_cwd_outside(
     a, b = tmp_path / "A", tmp_path / "B"
     a.mkdir()
     b.mkdir()
-    body = f'default_workspace="B"\n[workspaces.A]\npath="{a}"\n[workspaces.B]\npath="{b}"\n'
+    body = f'default-workspace="B"\n[workspaces.A]\npath="{a}"\n[workspaces.B]\npath="{b}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     assert cfg.active == "B"
 
@@ -158,11 +158,11 @@ def test_unknown_selected_workspace_errors(
 def test_none_cwd_falls_through_to_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A removed cwd (cwd=None) skips the cwd tier and uses default_workspace."""
+    """A removed cwd (cwd=None) skips the cwd tier and uses default-workspace."""
     a, b = tmp_path / "A", tmp_path / "B"
     a.mkdir()
     b.mkdir()
-    body = f'default_workspace="B"\n[workspaces.A]\npath="{a}"\n[workspaces.B]\npath="{b}"\n'
+    body = f'default-workspace="B"\n[workspaces.A]\npath="{a}"\n[workspaces.B]\npath="{b}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=None)
     assert cfg.active == "B"
 
@@ -276,14 +276,14 @@ def test_base_branch_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     ws = tmp_path / "w"
     (ws / "proj").mkdir(parents=True)
     body = (
-        f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
-        '[workspaces.a.projects.proj]\nbase_branch="projann"\n'
+        f'base-branch="global"\n[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
+        '[workspaces.a.projects.proj]\nbase-branch="projann"\n'
     )
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     # Per-project annotation wins over the workspace default and global default.
-    assert cfg.entity("a", "proj").get("base_branch") == "projann"
+    assert cfg.entity("a", "proj").get("base-branch") == "projann"
     # A project with no annotation falls back to the workspace default.
-    assert cfg.entity("a", "other").get("base_branch") == "wsdefault"
+    assert cfg.entity("a", "other").get("base-branch") == "wsdefault"
 
 
 def test_project_local_beats_registry_annotation(
@@ -292,24 +292,24 @@ def test_project_local_beats_registry_annotation(
     ws = tmp_path / "w"
     proj = ws / "proj"
     (proj / ".wtm").mkdir(parents=True)
-    (proj / ".wtm" / "config.toml").write_text('base_branch="local"\n')
-    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nbase_branch="registry"\n'
+    (proj / ".wtm" / "config.toml").write_text('base-branch="local"\n')
+    body = f'[workspaces.a]\npath="{ws}"\n[workspaces.a.projects.proj]\nbase-branch="registry"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    assert cfg.entity("a", "proj").get("base_branch") == "local"
+    assert cfg.entity("a", "proj").get("base-branch") == "local"
 
 
 def test_workspace_local_project_base_branch_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A base_branch set only in the workspace-local [projects.NAME] table must be
+    # A base-branch set only in the workspace-local [projects.NAME] table must be
     # both seen and correctly attributed to the project tier (the provenance bug).
     ws = tmp_path / "w"
     (ws / "proj").mkdir(parents=True)
     (ws / ".wtm").mkdir(parents=True)
-    (ws / ".wtm" / "config.toml").write_text('[projects.proj]\nbase_branch="wslocal"\n')
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    (ws / ".wtm" / "config.toml").write_text('[projects.proj]\nbase-branch="wslocal"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    rung = cfg.entity("a", "proj").provenance("base_branch")
+    rung = cfg.entity("a", "proj").provenance("base-branch")
     assert rung.value == "wslocal"
     assert rung.tier == "project"
 
@@ -322,28 +322,28 @@ def test_base_branch_empty_string_wins_its_tier(
     ws = tmp_path / "w"
     (ws / "proj").mkdir(parents=True)
     body = (
-        f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch=""\n'
-        '[workspaces.a.projects.proj]\nbase_branch=""\n'
+        f'base-branch="global"\n[workspaces.a]\npath="{ws}"\nbase-branch=""\n'
+        '[workspaces.a.projects.proj]\nbase-branch=""\n'
     )
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    rung = cfg.entity("a", "proj").provenance("base_branch")
+    rung = cfg.entity("a", "proj").provenance("base-branch")
     assert (rung.value, rung.tier) == ("", "project")
 
 
 def test_worktree_base_branch_floor_drops_own_tier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # floor=project: a hand-written worktree-local base_branch is out of band,
+    # floor=project: a hand-written worktree-local base-branch is out of band,
     # and the worktree's provenance resolves straight up the ancestor chain.
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     (wt / ".wtm").mkdir(parents=True)
-    (wt / ".wtm" / "config.toml").write_text('base_branch="stray"\n')
+    (wt / ".wtm" / "config.toml").write_text('base-branch="stray"\n')
     (ws / ".wtm").mkdir(parents=True)
-    (ws / ".wtm" / "config.toml").write_text('base_branch="wsdefault"\n')
+    (ws / ".wtm" / "config.toml").write_text('base-branch="wsdefault"\n')
     body = f'[workspaces.a]\npath="{ws}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
-    rung = cfg.entity("a", "proj", "feat").provenance("base_branch")
+    rung = cfg.entity("a", "proj", "feat").provenance("base-branch")
     assert (rung.value, rung.tier) == ("wsdefault", "workspace")
 
 
@@ -398,18 +398,18 @@ def test_generic_get_kind_clash_across_scopes_errors(
 def test_generic_get_base_branch_inherits_from_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `config get base_branch` from a project reports the inherited workspace-own
+    # `config get base-branch` from a project reports the inherited workspace-own
     # value -- what `create` forks from -- not `(unset)`.
     ws = tmp_path / "w"
     proj = ws / "proj"
     proj.mkdir(parents=True)
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
     target = cfg.resolve_generic_target(proj)
-    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    effective, chain = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "wsdefault"
     # The provenance helper reports the same winning rung the fold returns.
-    assert cfg.provenance(target, "base_branch") == chain[0]
+    assert cfg.provenance(target, "base-branch") == chain[0]
     # The winning rung is tagged with its definition tier, not just its scope.
     assert chain[0].tier == "workspace"
 
@@ -422,10 +422,10 @@ def test_generic_get_base_branch_inherits_from_global(
     ws = tmp_path / "w"
     proj = ws / "proj"
     proj.mkdir(parents=True)
-    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\n'
+    body = f'base-branch="global"\n[workspaces.a]\npath="{ws}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
     target = cfg.resolve_generic_target(proj)
-    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    effective, chain = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "global"
     assert chain[0].tier == "global"
 
@@ -438,11 +438,11 @@ def test_generic_get_base_branch_project_local_wins(
     ws = tmp_path / "w"
     proj = ws / "proj"
     (proj / ".wtm").mkdir(parents=True)
-    (proj / ".wtm" / "config.toml").write_text('base_branch="local"\n')
-    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    (proj / ".wtm" / "config.toml").write_text('base-branch="local"\n')
+    body = f'base-branch="global"\n[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=proj)
     target = cfg.resolve_generic_target(proj)
-    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    effective, chain = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "local"
     assert [(r.tier, r.value) for r in chain] == [
         ("project", "local"),
@@ -454,29 +454,29 @@ def test_generic_get_base_branch_project_local_wins(
 def test_generic_get_base_branch_from_worktree_uses_project_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # From inside a worktree, base_branch (a project-tier concept) resolves the
+    # From inside a worktree, base-branch (a project-tier concept) resolves the
     # containing project's inherited value.
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     wt.mkdir(parents=True)
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
     target = cfg.resolve_generic_target(wt)
-    effective, _ = cfg.resolve_generic_value(target, "base_branch")
+    effective, _ = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "wsdefault"
 
 
 def test_generic_get_base_branch_from_workspace_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # At the workspace root (no project), base_branch resolves workspace-own then
+    # At the workspace root (no project), base-branch resolves workspace-own then
     # global -- there is no project tier to fold.
     ws = tmp_path / "w"
     ws.mkdir(parents=True)
-    body = f'base_branch="global"\n[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    body = f'base-branch="global"\n[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=ws)
     target = cfg.resolve_generic_target(ws)
-    effective, chain = cfg.resolve_generic_value(target, "base_branch")
+    effective, chain = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "wsdefault"
     assert [r.tier for r in chain] == ["workspace", "global"]
 
@@ -504,7 +504,7 @@ def test_user_declared_key_inherits_from_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # An arbitrary key named in the `inheritable` array folds ancestor tiers just
-    # like base_branch: a project without its own value reports the workspace one.
+    # like base-branch: a project without its own value reports the workspace one.
     ws = tmp_path / "w"
     proj = ws / "proj"
     proj.mkdir(parents=True)
@@ -570,7 +570,7 @@ def test_user_declared_key_project_local_wins(
 def test_user_declared_key_worktree_local_honoured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Unlike base_branch, a general inheritable key set worktree-local IS honoured
+    # Unlike base-branch, a general inheritable key set worktree-local IS honoured
     # (the worktree's own tier participates in its chain).
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
@@ -586,16 +586,16 @@ def test_user_declared_key_worktree_local_honoured(
 def test_base_branch_worktree_local_still_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # base_branch stays a project-tier concept: a worktree-local value is ignored
+    # base-branch stays a project-tier concept: a worktree-local value is ignored
     # by `config get`, the same chain `create` and every provenance read fold.
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     (wt / ".wtm").mkdir(parents=True)
-    (wt / ".wtm" / "config.toml").write_text('base_branch="wt-local"\n')
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="wsdefault"\n'
+    (wt / ".wtm" / "config.toml").write_text('base-branch="wt-local"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch="wsdefault"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
     target = cfg.resolve_generic_target(wt)
-    effective, _ = cfg.resolve_generic_value(target, "base_branch")
+    effective, _ = cfg.resolve_generic_value(target, "base-branch")
     assert effective == "wsdefault"
 
 
@@ -630,7 +630,7 @@ def test_workspaces_registry_key_is_reserved(
         validate_arbitrary_key("workspaces")
     ws = tmp_path / "w"
     ws.mkdir()
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch = "main"\n'
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch = "main"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     s = cfg.resolve_slice(target=None, recurse=True)
     assert "workspaces" not in s.global_extra
@@ -642,7 +642,7 @@ def test_validate_inheritable_element_rules() -> None:
     from wtm.config import validate_inheritable_element
 
     validate_inheritable_element("deploy_env")  # arbitrary key: allowed
-    validate_inheritable_element("base_branch")  # already builtin-inheritable: harmless
+    validate_inheritable_element("base-branch")  # already builtin-inheritable: harmless
     with pytest.raises(WtmError, match="never inheritable"):
         validate_inheritable_element("description")
     with pytest.raises(WtmError, match="reserved key"):
@@ -686,7 +686,7 @@ def test_worktree_extra_reflects_inherited_key(
 def test_floored_key_prunes_deeper_rungs_like_base_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A user-declared floor=project mirrors the base_branch carve-out: from a
+    # A user-declared floor=project mirrors the base-branch carve-out: from a
     # worktree, a worktree-local value is ignored while the project chain folds.
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
@@ -703,7 +703,7 @@ def test_floored_key_prunes_deeper_rungs_like_base_branch(
     assert effective == "proj-tier"
     assert [r.tier for r in chain] == ["project"]
     # The target carries the floor for write-site enforcement.
-    assert target.floors == {"base_branch": "project", "region": "project"}
+    assert target.floors == {"base-branch": "project", "region": "project"}
 
 
 def test_floor_workspace_drops_project_tier(
@@ -790,13 +790,13 @@ def test_bad_floor_tier_is_rejected_at_read(
 
 
 def test_floor_on_base_branch_refused() -> None:
-    # base_branch owns a typed surface with fixed resolution; re-flooring it
+    # base-branch owns a typed surface with fixed resolution; re-flooring it
     # would split `config get` from `create` again.
     from wtm.config import parse_inheritable_element
 
     with pytest.raises(WtmError, match="cannot take a floor"):
-        parse_inheritable_element({"key": "base_branch", "floor": "global"})
-    parse_inheritable_element("base_branch")  # bare opt-in stays harmless
+        parse_inheritable_element({"key": "base-branch", "floor": "global"})
+    parse_inheritable_element("base-branch")  # bare opt-in stays harmless
     parse_inheritable_element({"key": "deploy_env"})  # no floor: fine
 
 
@@ -994,12 +994,12 @@ def test_workspace_base_branch_matches_provenance(
     ws = tmp_path / "w"
     (ws / "proj").mkdir(parents=True)
     (ws / ".wtm").mkdir(parents=True)
-    (ws / ".wtm" / "config.toml").write_text('base_branch = "wslocal"\n')
-    body = f'[workspaces.a]\npath="{ws}"\nbase_branch="registry"\n'
+    (ws / ".wtm" / "config.toml").write_text('base-branch = "wslocal"\n')
+    body = f'[workspaces.a]\npath="{ws}"\nbase-branch="registry"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     workspace = cfg.workspaces["a"]
     assert workspace.base_branch == "wslocal"  # workspace-local wins
-    rung = cfg.provenance(cfg.resolve_generic_target_for("a", "other"), "base_branch")
+    rung = cfg.provenance(cfg.resolve_generic_target_for("a", "other"), "base-branch")
     assert (rung.value, rung.tier) == ("wslocal", "workspace")
 
 
@@ -1013,9 +1013,9 @@ def test_global_default_workspace_presence_based(
     ws_a.mkdir()
     ws_b.mkdir()
     sys_path = tmp_path / "system.toml"
-    sys_path.write_text(f'default_workspace = "a"\n[workspaces.a]\npath="{ws_a}"\n')
+    sys_path.write_text(f'default-workspace = "a"\n[workspaces.a]\npath="{ws_a}"\n')
     monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(sys_path))
-    body = f'default_workspace = "b"\n[workspaces.b]\npath="{ws_b}"\n'
+    body = f'default-workspace = "b"\n[workspaces.b]\npath="{ws_b}"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
     assert cfg.default_workspace == "b"
     assert cfg.active == "b"
@@ -1070,7 +1070,7 @@ def test_get_value_reads_scope_scalar(user_cfg: Path, tmp_path: Path) -> None:
     (ws / ".wtm" / "config.toml").write_text('description = "local"\n')
     config = Config.load()
     assert config.get_value(ConfigAddress.workspace(ws), "description") == "local"
-    assert config.get_value(ConfigAddress.workspace(ws), "base_branch") is None
+    assert config.get_value(ConfigAddress.workspace(ws), "base-branch") is None
 
 
 def test_set_value_roundtrip_preserves_comments(user_cfg: Path, tmp_path: Path) -> None:
@@ -1078,23 +1078,23 @@ def test_set_value_roundtrip_preserves_comments(user_cfg: Path, tmp_path: Path) 
     (ws / ".wtm").mkdir(parents=True)
     (ws / ".wtm" / "config.toml").write_text("# ws-local\ndescription = 'keep'\n")
     address = ConfigAddress.workspace(ws)
-    Config.load().set_value(address, "base_branch", "main")
+    Config.load().set_value(address, "base-branch", "main")
     text = (ws / ".wtm" / "config.toml").read_text()
     assert "# ws-local" in text
     assert "description = 'keep'" in text
-    assert 'base_branch = "main"' in text
-    Config.load().unset_value(address, "base_branch")
-    assert "base_branch" not in (ws / ".wtm" / "config.toml").read_text()
+    assert 'base-branch = "main"' in text
+    Config.load().unset_value(address, "base-branch")
+    assert "base-branch" not in (ws / ".wtm" / "config.toml").read_text()
 
 
 def test_set_value_nested_table(user_cfg: Path, tmp_path: Path) -> None:
     proj = tmp_path / "w" / "proj"
     address = ConfigAddress.project(proj)
-    Config.load().set_value(address, ("project", "base_branch"), "develop")
+    Config.load().set_value(address, ("project", "base-branch"), "develop")
     text = (proj / ".wtm" / "config.toml").read_text()
     assert "[project]" in text
-    assert 'base_branch = "develop"' in text
-    Config.load().unset_value(address, ("project", "base_branch"))
+    assert 'base-branch = "develop"' in text
+    Config.load().unset_value(address, ("project", "base-branch"))
     assert "develop" not in (proj / ".wtm" / "config.toml").read_text()
 
 
@@ -1110,8 +1110,8 @@ def test_set_value_writes_system_scope(monkeypatch: pytest.MonkeyPatch, tmp_path
     # System scope is writable too (no WTM_NO_SYSTEM guard); it lands in the file.
     sys_path = tmp_path / "system.toml"
     monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(sys_path))
-    Config.load().set_value(ConfigAddress.system(), "base_branch", "trunk")
-    assert 'base_branch = "trunk"' in sys_path.read_text()
+    Config.load().set_value(ConfigAddress.system(), "base-branch", "trunk")
+    assert 'base-branch = "trunk"' in sys_path.read_text()
 
 
 def test_set_value_refused_under_no_config(
@@ -1517,14 +1517,14 @@ def test_mixed_scalar_and_array_writes_coexist(user_cfg: Path, tmp_path: Path) -
 
 def test_structural_write_does_not_clobber_concurrent_key(user_cfg: Path, tmp_path: Path) -> None:
     # The structural tier (add_workspace) rides the same transaction: a concurrent
-    # top-level base_branch write on the user file survives the workspace add.
+    # top-level base-branch write on the user file survives the workspace add.
     (tmp_path / "one").mkdir()
     a = Config.load()
     b = Config.load()
     a.set_base_branch("trunk")
     b.add_workspace("one", str(tmp_path / "one"))
     text = user_cfg.read_text()
-    assert 'base_branch = "trunk"' in text
+    assert 'base-branch = "trunk"' in text
     assert "[workspaces.one]" in text
 
 
@@ -1556,7 +1556,7 @@ def test_add_creates_file_and_entry(user_cfg: Path, tmp_path: Path) -> None:
     assert "[workspaces.work]" in text
     assert f'path = "{ws}"' in text
     assert 'description = "day job"' in text
-    assert 'base_branch = "main"' in text
+    assert 'base-branch = "main"' in text
 
 
 def test_add_defaults_path_to_cwd(
@@ -1639,7 +1639,7 @@ def test_add_rejects_bad_name(user_cfg: Path, tmp_path: Path) -> None:
 def test_add_preserves_comments_and_other_keys(user_cfg: Path, tmp_path: Path) -> None:
     user_cfg.write_text(
         "# my wtm config\n"
-        'default_workspace = "keep"\n\n'
+        'default-workspace = "keep"\n\n'
         '[workspaces.keep]  # note\npath = "/tmp/keep"\n'
     )
     ws = tmp_path / "new"
@@ -1647,7 +1647,7 @@ def test_add_preserves_comments_and_other_keys(user_cfg: Path, tmp_path: Path) -
     _ops().add("new", str(ws), description=None, base_branch=None, create=False)
     text = user_cfg.read_text()
     assert "# my wtm config" in text
-    assert 'default_workspace = "keep"' in text
+    assert 'default-workspace = "keep"' in text
     assert "[workspaces.keep]  # note" in text
     assert "[workspaces.new]" in text
 
@@ -1672,7 +1672,7 @@ def test_add_refused_under_no_config(
 
 
 def test_set_updates_fields_local(user_cfg: Path, tmp_path: Path) -> None:
-    # The workspace dir exists, so description/base_branch land in its
+    # The workspace dir exists, so description/base-branch land in its
     # workspace-local <ws>/.wtm/config.toml, not the user-scope registry entry.
     ws = tmp_path / "w"
     ws.mkdir()
@@ -1680,7 +1680,7 @@ def test_set_updates_fields_local(user_cfg: Path, tmp_path: Path) -> None:
     _ops().set("w", path=None, description="edited", base_branch="dev")
     local = (ws / ".wtm" / "config.toml").read_text()
     assert 'description = "edited"' in local
-    assert 'base_branch = "dev"' in local
+    assert 'base-branch = "dev"' in local
     assert "edited" not in user_cfg.read_text()
 
 
@@ -1691,7 +1691,7 @@ def test_set_falls_back_to_registry_when_dir_absent(user_cfg: Path, tmp_path: Pa
     _ops().set("w", path=None, description="edited", base_branch="dev")
     text = user_cfg.read_text()
     assert 'description = "edited"' in text
-    assert 'base_branch = "dev"' in text
+    assert 'base-branch = "dev"' in text
 
 
 def test_set_empty_clears_local_field(user_cfg: Path, tmp_path: Path) -> None:
@@ -1750,14 +1750,14 @@ def test_rename_moves_key_and_fixes_default(user_cfg: Path, tmp_path: Path) -> N
     ws = tmp_path / "w"
     ws.mkdir()
     user_cfg.write_text(
-        f'default_workspace = "old"\n[workspaces.old]\npath = "{ws}"\ndescription = "d"\n'
+        f'default-workspace = "old"\n[workspaces.old]\npath = "{ws}"\ndescription = "d"\n'
     )
     result = _ops().rename("old", "new")
     assert result.fixed_default
     text = user_cfg.read_text()
     assert "[workspaces.new]" in text and "[workspaces.old]" not in text
     assert 'description = "d"' in text  # subtable/scalars carried over
-    assert 'default_workspace = "new"' in text
+    assert 'default-workspace = "new"' in text
 
 
 def test_rename_new_collision_errors(user_cfg: Path, tmp_path: Path) -> None:
@@ -1783,12 +1783,12 @@ def test_rename_system_only_refused(
 def test_delete_removes_entry_and_clears_default(user_cfg: Path, tmp_path: Path) -> None:
     ws = tmp_path / "w"
     ws.mkdir()
-    user_cfg.write_text(f'default_workspace = "w"\n[workspaces.w]\npath = "{ws}"\n')
+    user_cfg.write_text(f'default-workspace = "w"\n[workspaces.w]\npath = "{ws}"\n')
     result = _ops().delete("w")
     assert result.cleared_default and not result.remains_at_system
     text = user_cfg.read_text()
     assert "[workspaces.w]" not in text
-    assert "default_workspace" not in text
+    assert "default-workspace" not in text
 
 
 def test_delete_unknown_errors(user_cfg: Path) -> None:
@@ -1829,9 +1829,9 @@ def test_default_set_and_clear(user_cfg: Path, tmp_path: Path) -> None:
     ws.mkdir()
     _seed_user(user_cfg, "w", ws)
     _ops().default_set("w")
-    assert 'default_workspace = "w"' in user_cfg.read_text()
+    assert 'default-workspace = "w"' in user_cfg.read_text()
     _ops().default_clear()
-    assert "default_workspace" not in user_cfg.read_text()
+    assert "default-workspace" not in user_cfg.read_text()
 
 
 # --- scope detection ---------------------------------------------------------
@@ -1854,29 +1854,29 @@ def test_declaring_scopes(user_cfg: Path, tmp_path: Path, monkeypatch: pytest.Mo
     assert config.declaring_scopes("nobody") == set()
 
 
-# --- global base_branch (top-level) ------------------------------------------
+# --- global base-branch (top-level) ------------------------------------------
 
 
 def _global_base_branch_scope(config: Config) -> Scope | None:
-    """The scope declaring the global top-level ``base_branch``, or ``None``."""
-    rung = config.provenance(config.global_generic_target(), "base_branch")
+    """The scope declaring the global top-level ``base-branch``, or ``None``."""
+    rung = config.provenance(config.global_generic_target(), "base-branch")
 
     return None if rung is None else rung.scope
 
 
 def test_base_branch_set_clear_and_source(user_cfg: Path) -> None:
     _ops().config.set_base_branch("main")
-    assert 'base_branch = "main"' in user_cfg.read_text()
+    assert 'base-branch = "main"' in user_cfg.read_text()
     assert _global_base_branch_scope(Config.load()) is Scope.USER
     _ops().config.clear_base_branch()
-    assert "base_branch" not in user_cfg.read_text()
+    assert "base-branch" not in user_cfg.read_text()
     assert _global_base_branch_scope(Config.load()) is None
 
 
 def test_base_branch_source_prefers_user_over_system(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _system(monkeypatch, tmp_path, 'base_branch = "trunk"\n')
+    _system(monkeypatch, tmp_path, 'base-branch = "trunk"\n')
     assert _global_base_branch_scope(Config.load()) is Scope.SYSTEM
     _ops().config.set_base_branch("main")
     assert _global_base_branch_scope(Config.load()) is Scope.USER
@@ -1892,7 +1892,7 @@ def test_project_set_writes_local_when_dir_exists(user_cfg: Path, tmp_path: Path
     result = _proj_ops().set("w", "api", base_branch="develop", description="the api")
     assert result.scope is Scope.PROJECT
     local = (ws / "api" / ".wtm" / "config.toml").read_text()
-    assert 'base_branch = "develop"' in local
+    assert 'base-branch = "develop"' in local
     assert 'description = "the api"' in local
     assert "develop" not in user_cfg.read_text()  # not the registry
 
@@ -1908,7 +1908,7 @@ def test_project_set_defaults_to_workspace_when_only_ws_dir_exists(
     assert result.scope is Scope.WORKSPACE
     text = (ws / ".wtm" / "config.toml").read_text()
     assert "[projects.api]" in text
-    assert 'base_branch = "develop"' in text
+    assert 'base-branch = "develop"' in text
     assert "develop" not in user_cfg.read_text()
 
 
@@ -1920,7 +1920,7 @@ def test_project_set_scope_user_writes_registry(user_cfg: Path, tmp_path: Path) 
     assert result.scope is Scope.USER
     text = user_cfg.read_text()
     assert "[workspaces.w.projects.api]" in text
-    assert 'base_branch = "develop"' in text
+    assert 'base-branch = "develop"' in text
 
 
 def test_project_set_scope_workspace_writes_local(user_cfg: Path, tmp_path: Path) -> None:
@@ -1930,7 +1930,7 @@ def test_project_set_scope_workspace_writes_local(user_cfg: Path, tmp_path: Path
     _proj_ops().set("w", "api", base_branch="develop", description=None, scope=Scope.WORKSPACE)
     text = (ws / ".wtm" / "config.toml").read_text()
     assert "[projects.api]" in text
-    assert 'base_branch = "develop"' in text
+    assert 'base-branch = "develop"' in text
 
 
 def test_project_set_scope_user_requires_user_workspace_declaration(
@@ -1955,7 +1955,7 @@ def test_project_set_requires_a_field(user_cfg: Path, tmp_path: Path) -> None:
 def test_project_show_base_branch_provenance(user_cfg: Path, tmp_path: Path) -> None:
     ws = tmp_path / "w"
     (ws / "api").mkdir(parents=True)
-    _seed_user(user_cfg, "w", ws, base_branch="wsdefault")
+    _seed_user(user_cfg, "w", ws, **{"base-branch": "wsdefault"})
     # Workspace-tier default until the project overrides it.
     shown = _proj_ops().show("w", "api")
     assert shown.effective_base_branch == "wsdefault"
@@ -2096,9 +2096,9 @@ def _slice_setup(
     (ws / "web" / "worktrees" / "draft").mkdir(parents=True)
     (ws / "web" / "worktrees" / "draft" / ".git").touch()
     body = (
-        f'base_branch = "main"\n'
+        f'base-branch = "main"\n'
         f'[workspaces.w]\npath = "{ws}"\n'
-        '[workspaces.w.projects.api]\nbase_branch = "develop"\n'
+        '[workspaces.w.projects.api]\nbase-branch = "develop"\n'
         '[workspaces.w.projects.api.worktrees.planned]\ndescription = "later"\n'
         '[workspaces.w.projects.ghost]\ndescription = "gone"\n'
     )
@@ -2330,7 +2330,7 @@ def test_resolve_slice_global_extra_and_hooks(tmp_path, monkeypatch) -> None:
     ws = tmp_path / "w"
     ws.mkdir()
     body = (
-        f'base_branch = "main"\nteam = "alpha"\n'
+        f'base-branch = "main"\nteam = "alpha"\n'
         f'[hooks.on.enter]\ncommand = "echo hi"\n'
         f'[workspaces.w]\npath = "{ws}"\n'
     )

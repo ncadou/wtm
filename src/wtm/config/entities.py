@@ -277,14 +277,14 @@ class ProjectEntity(EntityHandle):
     kind = "project"
 
     def annotation(self) -> ProjectAnnotation:
-        """The project's effective annotation (description/base_branch/hooks/extra)."""
+        """The project's effective annotation (description/base-branch/hooks/extra)."""
         ws = self._config.workspaces[self.workspace_name]
 
         return self._config.project_annotation(ws, self.project_name)
 
 
 class WorktreeEntity(EntityHandle):
-    """A worktree's key surface (no base_branch tier)."""
+    """A worktree's key surface (no base-branch tier)."""
 
     kind = "worktree"
 

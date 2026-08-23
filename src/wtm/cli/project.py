@@ -321,7 +321,7 @@ def project_set(
         help="Where to write (project|workspace|user|system); default: deepest existing dir",
     ),
 ) -> None:
-    """Annotate a project's base_branch / description (partial update).
+    """Annotate a project's base-branch / description (partial update).
 
     Writes at ``--scope`` (project/workspace/user/system); the default is the
     deepest scope whose directory exists. A field passed as ``""`` clears it.
@@ -343,7 +343,7 @@ def project_show(
         autocompletion=_complete_project,
     ),
 ) -> None:
-    """Show a project's detail (dir, description, base_branch + provenance, worktrees)."""
+    """Show a project's detail (dir, description, base-branch + provenance, worktrees)."""
     workspace, project = split_workspace_project(args or [])
     result = ctx.obj.project.show(workspace, project)
     exists = "" if result.exists else "  (no .git on disk)"
@@ -352,9 +352,9 @@ def project_show(
     if result.description:
         print(f"description: {result.description}")
     if result.base_branch:
-        print(f"base_branch: {result.base_branch}")
+        print(f"base-branch: {result.base_branch}")
     effective = result.effective_base_branch or "(built-in: origin/HEAD > HEAD > orphan)"
-    print(f"effective base_branch: {effective} [{result.base_branch_source}]")
+    print(f"effective base-branch: {effective} [{result.base_branch_source}]")
     print(f"worktrees: {result.worktree_count}")
 
 

@@ -53,7 +53,7 @@ def config_slice_json(slice: ConfigSlice) -> str:
     """Serialise a global-rooted pruned config slice as a nested JSON object.
 
     The machine-readable counterpart of the text slice renderer: always rooted
-    at global (``default_base_branch`` / ``extra``), with workspaces, projects,
+    at global (``default-base-branch`` / ``extra``), with workspaces, projects,
     and worktrees nested as pruned by the slice. Effective values only -- no
     provenance (``--origin``) and no hooks, per the JSON contract (``--json
     --origin``/``--json --hooks`` error). Date/time leaves encode as their
@@ -61,7 +61,7 @@ def config_slice_json(slice: ConfigSlice) -> str:
     """
     root: dict[str, object] = {}
     if slice.default_base_branch:
-        root["default_base_branch"] = slice.default_base_branch
+        root["default-base-branch"] = slice.default_base_branch
     if slice.global_extra:
         root["extra"] = dict(sorted(slice.global_extra.items()))
     root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in slice.workspaces}
@@ -75,7 +75,7 @@ def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:
     if ws.entry.description:
         node["description"] = ws.entry.description
     if ws.entry.base_branch:
-        node["base_branch"] = ws.entry.base_branch
+        node["base-branch"] = ws.entry.base_branch
     if ws.entry.extra:
         node["extra"] = dict(sorted(ws.entry.extra.items()))
     node["projects"] = {p.name: _project_node(p) for p in ws.projects}
@@ -84,7 +84,7 @@ def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:
 
 
 def _project_node(project: ResolvedProject) -> dict[str, object]:
-    """One project object: scalars, effective base_branch, extra, and worktrees."""
+    """One project object: scalars, effective base-branch, extra, and worktrees."""
     node: dict[str, object] = {
         "name": project.name,
         "dir": str(project.dir),
@@ -93,7 +93,7 @@ def _project_node(project: ResolvedProject) -> dict[str, object]:
     if project.description:
         node["description"] = project.description
     if project.effective_base_branch:
-        node["base_branch"] = project.effective_base_branch
+        node["base-branch"] = project.effective_base_branch
     if project.extra:
         node["extra"] = dict(sorted(project.extra.items()))
     node["worktrees"] = {w.name: _worktree_node(w) for w in project.worktrees}
@@ -102,7 +102,7 @@ def _project_node(project: ResolvedProject) -> dict[str, object]:
 
 
 def _worktree_node(worktree: ResolvedWorktree) -> dict[str, object]:
-    """One worktree object: name, dir, description, extra (no base_branch tier)."""
+    """One worktree object: name, dir, description, extra (no base-branch tier)."""
     node: dict[str, object] = {"name": worktree.name, "dir": str(worktree.dir)}
     if worktree.description:
         node["description"] = worktree.description
@@ -173,8 +173,8 @@ def resolve_slice(
         depth_limit = 3 if recurse else target_depth
 
     global_payload, global_hooks = merge_locality(cfg._store, global_probes())
-    global_extra = {k: v for k, v in global_payload.items() if k != "base_branch"}
-    global_rung = cfg.provenance(cfg.global_generic_target(), "base_branch")
+    global_extra = {k: v for k, v in global_payload.items() if k != "base-branch"}
+    global_rung = cfg.provenance(cfg.global_generic_target(), "base-branch")
     # Global extra is locality-only (no ancestor to inherit from): each key's
     # chain is its fold over the user/system top-level probes (tier=None).
     global_tiered = [TierProbe(None, p) for p in global_probes()]
@@ -210,7 +210,7 @@ def _slice_workspace(
 ) -> ResolvedWorkspace:
     """Fill one workspace node with the pruned set of projects for the slice."""
     ws_target = cfg.resolve_generic_target_for(ws.name)
-    ws_rung = cfg.provenance(ws_target, "base_branch")
+    ws_rung = cfg.provenance(ws_target, "base-branch")
     bb_source = ws_rung.scope if ws_rung is not None else None
     extra_origins = cfg._extra_origins_for(ws_target, ws.extra)
     if depth_limit < 2:
@@ -252,7 +252,7 @@ def _slice_project(
     project_dir = ws.path / pname
     annotation = cfg.project_annotation(ws, pname)
     proj_target = cfg.resolve_generic_target_for(ws.name, pname)
-    rung = cfg.provenance(proj_target, "base_branch")
+    rung = cfg.provenance(proj_target, "base-branch")
     effective = str(rung.value) if rung is not None else None
     source = rung.tier if rung is not None else "(none)"
     extra_origins = cfg._extra_origins_for(proj_target, annotation.extra)

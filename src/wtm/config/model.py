@@ -37,7 +37,7 @@ from wtm.core import expand_path
 from wtm.exceptions import KindConflictError
 
 RESERVED_KEYS = frozenset(
-    {"hooks", "projects", "worktrees", "workspaces", "path", "default_workspace", "inheritable"}
+    {"hooks", "projects", "worktrees", "workspaces", "path", "default-workspace", "inheritable"}
 )
 # Keys whose tables are pure containers of named children.
 CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
@@ -50,19 +50,19 @@ SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
 # `inheritable` array; a key's membership is always a curated decision --
 # hardcoded here or opted in by the user -- never inferred from its name,
 # type, or value.
-INHERITABLE_KEYS = frozenset({"base_branch"})
+INHERITABLE_KEYS = frozenset({"base-branch"})
 # Builtin floors: the deepest entity tier an inheritable key participates in.
 # Chains drop every rung below the floor and writes landing deeper are
-# refused. ``base_branch`` is a project-tier concept (the fork point for a
+# refused. ``base-branch`` is a project-tier concept (the fork point for a
 # project's new branches), so a worktree-local value neither resolves nor
 # writes -- the generalization of what used to be two hardcoded name-checks.
 FLOOR_TIERS = {"worktree": 0, "project": 1, "workspace": 2, "global": 3}
-INHERIT_FLOORS = {"base_branch": "project"}
+INHERIT_FLOORS = {"base-branch": "project"}
 # The inheritable keys that own a dedicated typed read surface (a provenance
 # method), so they never also fold into an entity's ``extra`` payload -- that
 # would report the same value on two surfaces -- and never take a user-declared
 # floor (their resolution is fixed to keep it aligned with the typed surface).
-TYPED_INHERITABLE_KEYS = frozenset({"base_branch"})
+TYPED_INHERITABLE_KEYS = frozenset({"base-branch"})
 # Builtin entity-specific keys whose non-inheritance is hardcoded: a shared
 # default they can never be. They must be refused as elements of a user's
 # `inheritable` array (opting them in would contradict the hardcoded rule).
@@ -153,7 +153,7 @@ class ResolvedWorktree:
 
 @dataclass(frozen=True)
 class ResolvedProject:
-    """The cwd-bound project's effective annotation with base_branch provenance."""
+    """The cwd-bound project's effective annotation with base-branch provenance."""
 
     name: str
     dir: Path
@@ -177,7 +177,7 @@ class ResolvedWorkspace:
     declared workspace itself and *projects* its fully-resolved projects (on-disk
     unioned with declared), each carrying its own ``worktrees`` tuple.
     *base_branch_source* is the scope value (``"workspace"``/``"user"``/
-    ``"system"``) carrying the workspace's own ``base_branch``, or ``None`` --
+    ``"system"``) carrying the workspace's own ``base-branch``, or ``None`` --
     used by ``config show --origin`` (text-only, never JSON). *extra_origins*
     likewise feeds ``config show --origin`` for the workspace's own ``extra``.
     """
@@ -214,7 +214,7 @@ class ConfigSlice:
     present; with ``-r`` the target's subtree expands. *workspaces* carries the
     pruned workspace nodes (empty when depth-limited below the workspace tier).
     *base_branch_source* is the scope value (``"user"``/``"system"``) declaring
-    the global default base_branch, or ``None``. *global_extra_origins* feeds
+    the global default base-branch, or ``None``. *global_extra_origins* feeds
     ``config show --origin`` for the global node's ``extra``.
     """
 
@@ -267,11 +267,11 @@ def parse_hooks(table: dict | None) -> HookSpec:
 
 def annotation_from_payload(payload: dict[str, object], hooks: HookSpec) -> ProjectAnnotation:
     """Split a locality-merged payload into the known scalars plus ``extra``."""
-    extra = {k: v for k, v in payload.items() if k not in ("description", "base_branch")}
+    extra = {k: v for k, v in payload.items() if k not in ("description", "base-branch")}
 
     return ProjectAnnotation(
         description=str_or_none(payload.get("description")),
-        base_branch=str_or_none(payload.get("base_branch")),
+        base_branch=str_or_none(payload.get("base-branch")),
         hooks=hooks,
         extra=extra,
     )

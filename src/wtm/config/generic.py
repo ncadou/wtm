@@ -33,7 +33,7 @@ def validate_arbitrary_key(key: str) -> None:
     """Reject a reserved name as an arbitrary ``config`` key (raises on clash).
 
     The container tables (``hooks`` / ``projects`` / ``worktrees``), the
-    user-file declarations (``path`` / ``default_workspace``), the global
+    user-file declarations (``path`` / ``default-workspace``), the global
     registry table (``workspaces``), and the ``inheritable`` allowlist own their
     own typed surfaces; the arbitrary-key facility must not shadow them.
     """
@@ -67,7 +67,7 @@ def validate_inheritable_element(key: str) -> None:
     where it contradicts a hardcoded rule: a reserved key (its own typed surface,
     :func:`validate_arbitrary_key`) or a hardcoded-non-inheritable builtin
     (:data:`NON_INHERITABLE_KEYS`, e.g. ``description``). The builtin
-    :data:`INHERITABLE_KEYS` (``base_branch``) are already inheritable -- opting
+    :data:`INHERITABLE_KEYS` (``base-branch``) are already inheritable -- opting
     them in is harmless and allowed.
     """
     validate_arbitrary_key(key)
