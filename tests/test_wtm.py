@@ -4541,6 +4541,127 @@ def test_config_base_branch_set_show_clear(root: Path) -> None:
     assert "base_branch =" not in cfg.read_text()
 
 
+# --- config set/get typed values (opt-in scalar writes) -----------------------
+
+
+def test_config_set_typed_scalar_writes_native_kind(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert (
+        run("config", "set", "-g", "port", "8080", "--type", "int", root=root, extra_env=env)
+    ).returncode == 0
+    assert (
+        run(
+            "config",
+            "set",
+            "-g",
+            "when",
+            "1979-05-27T07:32:00Z",
+            "-x",
+            root=root,
+            extra_env=env,
+        )
+    ).returncode == 0
+    text = cfg.read_text()
+    assert "port = 8080" in text
+    assert "when = 1979-05-27T07:32:00Z" in text
+    # Bare writes stay strings, whatever the value looks like.
+    assert run("config", "set", "-g", "ver", "1.20", root=root, extra_env=env).returncode == 0
+    text = cfg.read_text()
+    assert 'ver = "1.20"' in text
+
+
+def test_config_get_renders_and_json_encodes_typed_values(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    # Scalars go above the [workspaces] header so they are true global-tier keys.
+    cfg.write_text(f'port = 8080\nflag = true\n[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "get", "-g", "flag", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "true"
+    res = run("config", "get", "-g", "port", "-j", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "8080"
+    res = run("config", "get", "-g", "absent", "-j", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "null"
+
+
+def test_config_set_type_bool_truthiness_tokens(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    for token in ("YES", "on", "1"):
+        assert (
+            run("config", "set", "-g", "flag", token, "--type", "bool", root=root, extra_env=env)
+        ).returncode == 0
+        assert "flag = true" in cfg.read_text()
+    res = run("config", "set", "-g", "flag", "maybe", "--type", "bool", root=root, extra_env=env)
+    assert res.returncode != 0
+    assert "recognized" in (res.stderr + res.stdout)
+
+
+def test_config_set_typed_flag_guards(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+
+    def set_res(*args: str) -> _Result:
+        return run("config", "set", *args, root=root, extra_env=env)
+
+    res = set_res("-g", "k", "v", "--type", "int", "--toml")
+    assert res.returncode != 0 and "--toml are mutually exclusive" in res.stderr
+    res = set_res("-g", "k", "v", "--type", "decimal")
+    assert res.returncode != 0 and "unknown --type" in res.stderr
+    res = set_res("-g", "k", "[1,2]", "--toml")
+    assert res.returncode != 0 and "not writable yet" in res.stderr
+    res = set_res("-g", "inheritable", "ci", "-a", "--type", "int")
+    assert res.returncode != 0 and "key declarations" in res.stderr
+
+
+def test_config_set_unset_typed_array_elements(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    assert (
+        run("config", "set", "-g", "nums", "8080", "--type", "int", "-a", root=root, extra_env=env)
+    ).returncode == 0
+    assert (
+        run("config", "set", "-g", "nums", "8080", "-a", root=root, extra_env=env)
+    ).returncode == 0
+    assert 'nums = [8080, "8080"]' in cfg.read_text()
+    # Removal matches by native kind: the typed element goes, the string stays.
+    res = run(
+        "config", "unset", "-g", "nums", "8080", "--type", "int", "-a", root=root, extra_env=env
+    )
+    assert res.returncode == 0
+    assert 'nums = ["8080"]' in cfg.read_text()
+
+
+def test_config_set_typed_table_cell(root: Path) -> None:
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run(
+        "config",
+        "set",
+        "-g",
+        "limits",
+        "cpu",
+        "4",
+        "--type",
+        "int",
+        "-t",
+        root=root,
+        extra_env=env,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "cpu = 4" in cfg.read_text()
+    res = run("config", "get", "-g", "limits", "-j", root=root, extra_env=env)
+    assert res.stdout.strip() == '{"cpu": 4}'
+
+
 def test_config_show_reports_base_branch_source(root: Path) -> None:
     cfg = root / "cfg.toml"
     cfg.write_text(f'base_branch = "main"\n[workspaces.ws]\npath = "{root}"\n')

@@ -28,6 +28,7 @@ import tomlkit
 
 from wtm.config.addressing import user_config_path
 from wtm.config.model import SUPER_TABLE_KEYS, kind
+from wtm.config.values import RemovableValue, TomlValue
 from wtm.exceptions import KindConflictError, WriteProhibitedError, WtmError
 
 
@@ -43,9 +44,13 @@ def _unwrap_scalar(node: object) -> object:
     return unwrap() if callable(unwrap) else node
 
 
-def _array_element(value: str | Mapping):
-    """Normalise an array-add *value* into a TOML element (scalar or inline table)."""
-    if isinstance(value, str):
+def _array_element(value: TomlValue | Mapping):
+    """Normalise an array-add *value* into a TOML element (scalar or inline table).
+
+    A native scalar (string included) is appended as-is; a mapping becomes an
+    inline table (the ``inheritable`` floor form).
+    """
+    if not isinstance(value, Mapping):
         return value
 
     table = tomlkit.inline_table()
@@ -69,11 +74,12 @@ def _element_id(item: object) -> object:
     return ("scalar", unwrapped)
 
 
-def _matches_element(item: object, value: str) -> bool:
+def _matches_element(item: object, value: RemovableValue) -> bool:
     """Whether array *item* matches a remove request for *value*.
 
-    Both identity forms reduce to the bare name: a scalar equals it directly;
-    a table element matches by its ``key`` field.
+    Both identity forms reduce to the bare name: a scalar equals it directly
+    (native-typed, so ``8080`` and ``"8080"`` stay distinct); a table element
+    matches by its ``key`` field.
     """
     _, ident = _element_id(item)
 
@@ -99,7 +105,7 @@ def _descend_for_write(doc: tomlkit.TOMLDocument, parts: Sequence[str]):
     return table
 
 
-def set_leaf(table, key: str, value: str) -> None:
+def set_leaf(table, key: str, value: TomlValue) -> None:
     """Set a scalar leaf, keeping a *new* top-level key above any trailing table.
 
     A plain ``doc[key] = value`` on a document that ends in a table appends the
@@ -259,8 +265,12 @@ class Store:
 
         return _unwrap_scalar(node)
 
-    def set(self, path: Path, key: str | tuple[str, ...], value: str) -> None:
-        """Set *key* = *value* in *path*, creating tables and the file as needed."""
+    def set(self, path: Path, key: str | tuple[str, ...], value: TomlValue) -> None:
+        """Set *key* = *value* in *path*, creating tables and the file as needed.
+
+        *value* is any native TOML scalar (a string by default; typed scalars
+        opt-in via the coercion helpers in :mod:`wtm.config.values`).
+        """
         with self._transaction(path) as doc:
             parts = key_parts(key)
             table = _descend_for_write(doc, parts[:-1])
@@ -279,15 +289,18 @@ class Store:
             if isinstance(node, dict):
                 node.pop(parts[-1], None)
 
-    def array_add(self, path: Path, key: str | tuple[str, ...], value: str | Mapping) -> None:
+    def array_add(
+        self, path: Path, key: str | tuple[str, ...], value: TomlValue | Mapping
+    ) -> None:
         """Add *value* to the array at *key* in *path* (set semantics).
 
-        A string *value* appends a scalar element; a mapping appends an inline
-        table (the ``inheritable`` floor form ``{ key = ..., floor = ... }``).
-        Creates an empty array on first add; the add is idempotent (an element
-        already present is a no-op -- matched by the scalar itself, or by its
-        ``key`` field for a table element). A non-array value already at *key*
-        is a kind clash (hard error), matching
+        A scalar *value* (any native TOML type) appends an element; a mapping
+        appends an inline table (the ``inheritable`` floor form ``{ key = ...,
+        floor = ... }``). Creates an empty array on first add; the add is
+        idempotent (an element already present is a no-op -- matched by the
+        scalar itself -- so ``8080`` and ``"8080"`` stay distinct elements --
+        or by its ``key`` field for a table element). A non-array value
+        already at *key* is a kind clash (hard error), matching
         :func:`wtm.config.model.check_kind`.
         """
         with self._transaction(path) as doc:
@@ -299,14 +312,14 @@ class Store:
             if _element_id(element) not in [_element_id(item) for item in array]:
                 array.append(element)
 
-    def array_remove(self, path: Path, key: str | tuple[str, ...], value: str) -> None:
+    def array_remove(self, path: Path, key: str | tuple[str, ...], value: RemovableValue) -> None:
         """Strip every occurrence of *value* from the array at *key* in *path*.
 
         The mirror of :meth:`array_add`: a no-op when the key or the value is
-        absent. A scalar element matches by equality; a table element matches
-        by its ``key`` field (so ``{ key = "region", floor = ... }`` is removed
-        by the bare name). A non-array value at *key* is a kind clash (hard
-        error).
+        absent. A scalar element matches by native equality; a table element
+        matches by its ``key`` field (so ``{ key = "region", floor = ... }``
+        is removed by the bare name). A non-array value at *key* is a kind
+        clash (hard error).
         """
         with self._transaction(path) as doc:
             parts = key_parts(key)
@@ -323,7 +336,9 @@ class Store:
             for item in [i for i in array if _matches_element(i, value)]:
                 array.remove(item)
 
-    def table_set(self, path: Path, key: str | tuple[str, ...], subkey: str, value: str) -> None:
+    def table_set(
+        self, path: Path, key: str | tuple[str, ...], subkey: str, value: TomlValue
+    ) -> None:
         """Set *subkey* = *value* in the table at *key* in *path* (set semantics).
 
         Creates an empty table on first write; a non-table value already at *key*

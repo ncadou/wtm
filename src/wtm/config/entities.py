@@ -44,6 +44,7 @@ from wtm.config.model import (
 )
 from wtm.config.registry import global_probes
 from wtm.config.targets import GenericTarget
+from wtm.config.values import RemovableValue, TomlValue
 from wtm.config.writes import GLOBAL_WRITE_SCOPES, check_key_floor, check_write_scope
 from wtm.exceptions import WtmError
 
@@ -107,12 +108,13 @@ class EntityHandle:
 
     # -- writes ----------------------------------------------------------------
 
-    def set(self, key: str, value: str, *, scope: Scope | None = None) -> ConfigAddress:
+    def set(self, key: str, value: TomlValue, *, scope: Scope | None = None) -> ConfigAddress:
         """Set scalar *key* = *value* at *scope* (default: the placement policy).
 
-        Returns the address of the file that received the write. A floored key
-        (see ``GenericTarget.floors``) refuses a write landing deeper than its
-        floor.
+        *value* is any native TOML scalar -- a string by default, or typed via
+        :mod:`wtm.config.values`. Returns the address of the file that
+        received the write. A floored key (see ``GenericTarget.floors``)
+        refuses a write landing deeper than its floor.
         """
         resolved, address, prefix = self._write_site(scope)
         self._refuse_below_floor(key, resolved, prefix)
@@ -131,13 +133,13 @@ class EntityHandle:
         return address
 
     def array_add(
-        self, key: str, value: str | Mapping, *, scope: Scope | None = None
+        self, key: str, value: TomlValue | Mapping, *, scope: Scope | None = None
     ) -> ConfigAddress:
         """Add *value* to the array at *key* (idempotent set semantics).
 
-        A mapping *value* appends an inline-table element (the ``inheritable``
-        floor form). A floored key refuses a write landing deeper than its
-        floor.
+        A scalar *value* may be any native TOML type; a mapping *value*
+        appends an inline-table element (the ``inheritable`` floor form). A
+        floored key refuses a write landing deeper than its floor.
         """
         resolved, address, prefix = self._write_site(scope)
         self._refuse_below_floor(key, resolved, prefix)
@@ -145,19 +147,26 @@ class EntityHandle:
 
         return address
 
-    def array_remove(self, key: str, value: str, *, scope: Scope | None = None) -> ConfigAddress:
-        """Strip every occurrence of *value* from the array at *key* (not floor-guarded)."""
+    def array_remove(
+        self, key: str, value: RemovableValue, *, scope: Scope | None = None
+    ) -> ConfigAddress:
+        """Strip every occurrence of *value* from the array at *key* (not floor-guarded).
+
+        Scalars match by native equality, so a typed element is removed by its
+        own kind of value.
+        """
         _resolved, address, prefix = self._write_site(scope)
         self._config.remove_from_array(address, self._join(prefix, key), value)
 
         return address
 
     def table_set(
-        self, key: str, subkey: str, value: str, *, scope: Scope | None = None
+        self, key: str, subkey: str, value: TomlValue, *, scope: Scope | None = None
     ) -> ConfigAddress:
         """Set *subkey* = *value* inside the section at *key*.
 
-        A floored key refuses a write landing deeper than its floor.
+        *value* may be any native TOML scalar. A floored key refuses a write
+        landing deeper than its floor.
         """
         resolved, address, prefix = self._write_site(scope)
         self._refuse_below_floor(key, resolved, prefix)

@@ -73,6 +73,14 @@ from wtm.config.model import (
 )
 from wtm.config.slice import config_slice_json
 from wtm.config.targets import GenericTarget
+from wtm.config.values import (
+    TYPED_VALUE_FORMATS,
+    TomlValue,
+    json_leaf_default,
+    parse_toml_value,
+    parse_typed_value,
+    render_scalar,
+)
 from wtm.config.writes import (
     PROJECT_WRITE_SCOPES,
     WORKSPACE_WRITE_SCOPES,
@@ -113,6 +121,8 @@ __all__ = [
     "SliceTarget",
     "SourceRung",
     "TYPED_INHERITABLE_KEYS",
+    "TYPED_VALUE_FORMATS",
+    "TomlValue",
     "WORKSPACE_WRITE_SCOPES",
     "WORKTREE_WRITE_SCOPES",
     "Workspace",
@@ -121,8 +131,12 @@ __all__ = [
     "check_key_floor",
     "check_write_scope",
     "config_slice_json",
+    "json_leaf_default",
     "parse_inheritable_element",
+    "parse_toml_value",
+    "parse_typed_value",
     "project_default_scope",
+    "render_scalar",
     "resolve_project_dir",
     "scope_list",
     "tier_of_write_site",

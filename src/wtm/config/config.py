@@ -16,6 +16,7 @@ __all__ = [
     "resolve_project_dir",
 ]
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -70,6 +71,7 @@ from wtm.config.model import (
 from wtm.config.registry import build_registry, global_probes, global_scalar, resolve_active
 from wtm.config.store import Store, existing_entry, key_parts, set_leaf, workspaces_table
 from wtm.config.targets import GenericTarget
+from wtm.config.values import RemovableValue, TomlValue
 from wtm.config.writes import (
     project_default_scope,
     worktree_default_scope,
@@ -166,16 +168,18 @@ class Config:
         *key* is a bare key for a top-level scalar, or a tuple of parts for a
         nested table (e.g. ``("project", "base_branch")``). Returns ``None``
         when the scope's file or the key is absent. The value is whatever TOML
-        parsed (str/int/float/bool) -- reads are native-typed; only writes are
-        string-only.
+        parsed (str/int/float/bool/dates) -- reads are native-typed, and
+        typed writes land as their native kind too (strings by default).
         """
         return self._store.get(address.file, key)
 
-    def set_value(self, address: ConfigAddress, key: Key, value: str) -> None:
+    def set_value(self, address: ConfigAddress, key: Key, value: TomlValue) -> None:
         """Write one scalar at *key* into the file *address* names.
 
         The scope is named explicitly by the caller; the file (and its parent
-        dirs) is created on first write. Refused under ``WTM_NO_CONFIG``.
+        dirs) is created on first write. *value* is any native TOML scalar --
+        a string by default, or a typed scalar via :mod:`wtm.config.values`.
+        Refused under ``WTM_NO_CONFIG``.
         """
         self._store.set(address.file, key, value)
 
@@ -183,20 +187,28 @@ class Config:
         """Remove one scalar at *key* from the file *address* names (a no-op if absent)."""
         self._store.unset(address.file, key)
 
-    def add_to_array(self, address: ConfigAddress, key: Key, value: str) -> None:
-        """Add *value* (a string) to the array at *key* in the file *address* names.
+    def add_to_array(self, address: ConfigAddress, key: Key, value: TomlValue | Mapping) -> None:
+        """Add *value* to the array at *key* in the file *address* names.
 
         Set semantics: the add is idempotent (a value already present is a
-        no-op). Read-modify-write under a per-file lock; the file is created on
-        first add. Refused under ``WTM_NO_CONFIG``.
+        no-op). A scalar *value* may be any native TOML type; a mapping
+        appends an inline-table element. Read-modify-write under a per-file
+        lock; the file is created on first add. Refused under
+        ``WTM_NO_CONFIG``.
         """
         self._store.array_add(address.file, key, value)
 
-    def remove_from_array(self, address: ConfigAddress, key: Key, value: str) -> None:
-        """Strip every occurrence of *value* from the array at *key* (a no-op if absent)."""
+    def remove_from_array(self, address: ConfigAddress, key: Key, value: RemovableValue) -> None:
+        """Strip every occurrence of *value* from the array at *key* (a no-op if absent).
+
+        Scalars match by native equality, so a typed element is removed by
+        its own kind of value.
+        """
         self._store.array_remove(address.file, key, value)
 
-    def set_table_value(self, address: ConfigAddress, key: Key, subkey: str, value: str) -> None:
+    def set_table_value(
+        self, address: ConfigAddress, key: Key, subkey: str, value: TomlValue
+    ) -> None:
         """Set *subkey* = *value* in the table at *key* in the file *address* names.
 
         Set semantics: an empty table is created on first write; a non-table

@@ -11,11 +11,23 @@ Lifecycle (enter/leave) and CLI wiring live in :mod:`tests.test_wtm`.
 
 from __future__ import annotations
 
+import datetime
+import json
 from pathlib import Path
 
 import pytest
 
-from wtm.config import Config, ConfigAddress, Scope, SliceTarget
+from wtm.config import (
+    TYPED_VALUE_FORMATS,
+    Config,
+    ConfigAddress,
+    Scope,
+    SliceTarget,
+    json_leaf_default,
+    parse_toml_value,
+    parse_typed_value,
+    render_scalar,
+)
 from wtm.core import WtmError
 from wtm.project import Project
 from wtm.workspace import Workspaces
@@ -1148,6 +1160,124 @@ def test_set_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) ->
     address = ConfigAddress.workspace(ws)
     with pytest.raises(WtmError, match="not a table"):
         Config.load().set_table_value(address, "env", "TIER", "prod")
+
+
+# --- typed values (opt-in scalar writes) --------------------------------------
+
+
+def test_set_value_typed_scalar_roundtrip(user_cfg: Path, tmp_path: Path) -> None:
+    # A typed write lands as its native TOML kind and reads back native-typed.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    config = Config.load()
+    when = datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.UTC)
+    config.set_value(address, "port", 8080)
+    config.set_value(address, "ratio", 3.14)
+    config.set_value(address, "flag", True)
+    config.set_value(address, "when", when)
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "port = 8080" in text
+    assert "ratio = 3.14" in text
+    assert "flag = true" in text
+    assert "when = 1979-05-27T07:32:00Z" in text
+    got = Config.load()
+    port = got.get_value(address, "port")
+    assert isinstance(port, int) and port == 8080
+    assert isinstance(got.get_value(address, "flag"), bool)
+    assert got.get_value(address, "when") == when
+
+
+def test_set_value_bare_string_stays_string(user_cfg: Path, tmp_path: Path) -> None:
+    # The default write is unchanged: VALUE lands quoted, whatever it looks like.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().set_value(address, "ver", "1.20")
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'ver = "1.20"' in text
+    assert Config.load().get_value(address, "ver") == "1.20"
+
+
+def test_typed_write_overwrites_kind_silently(user_cfg: Path, tmp_path: Path) -> None:
+    # A kind change on overwrite is a silent replace (locality semantics untouched).
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().set_value(address, "k", "text")
+    Config.load().set_value(address, "k", 7)
+    assert Config.load().get_value(address, "k") == 7
+
+
+def test_array_add_typed_element_dedupes_across_kinds(user_cfg: Path, tmp_path: Path) -> None:
+    # Identity is the unwrapped value: 8080 and "8080" stay distinct elements,
+    # while a repeated typed add is idempotent.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().add_to_array(address, "nums", 8080)
+    Config.load().add_to_array(address, "nums", "8080")
+    Config.load().add_to_array(address, "nums", 8080)
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert 'nums = [8080, "8080"]' in text
+    # Removal matches by native equality: the int goes, the string stays.
+    Config.load().remove_from_array(address, "nums", 8080)
+    assert Config.load().get_value(address, "nums") == ["8080"]
+
+
+def test_set_table_value_typed_cell(user_cfg: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().set_table_value(address, ("limits",), "cpu", 4)
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "cpu = 4" in text
+    assert Config.load().get_value(address, ("limits", "cpu")) == 4
+
+
+def test_parse_typed_value_formats() -> None:
+    assert parse_typed_value("42", "int") == 42
+    assert parse_typed_value("2.5", "float") == 2.5
+    assert parse_typed_value("007", "str") == "007"
+    for token in ("true", "TRUE", "1", "yes", "Y", "on", "t"):
+        assert parse_typed_value(token, "bool") is True, token
+    for token in ("false", "FALSE", "0", "no", "N", "off", "f", ""):
+        assert parse_typed_value(token, "bool") is False, token
+    with pytest.raises(WtmError, match="recognized"):
+        parse_typed_value("maybe", "bool")
+    with pytest.raises(WtmError, match="--type int"):
+        parse_typed_value("12x", "int")
+    with pytest.raises(WtmError, match="unknown value type"):
+        parse_typed_value("1", "decimal")
+
+
+def test_parse_toml_value_scalars_and_gate() -> None:
+    when = parse_toml_value("1979-05-27T07:32:00Z")
+    assert isinstance(when, datetime.datetime) and when.year == 1979
+    assert parse_toml_value("'quoted'") == "quoted"
+    assert parse_toml_value("-3") == -3
+    for literal in ("[1, 2]", "{a = 1}", "'unclosed", "1 2"):
+        with pytest.raises(WtmError):
+            parse_toml_value(literal)
+
+
+def test_render_scalar_toml_fidelity() -> None:
+    assert render_scalar(True) == "true"
+    assert render_scalar(False) == "false"
+    assert render_scalar(8080) == "8080"
+    assert render_scalar("text") == "text"
+    when = datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.UTC)
+    assert render_scalar(when) == "1979-05-27T07:32:00+00:00"
+    assert render_scalar(datetime.date(1979, 5, 27)) == "1979-05-27"
+
+
+def test_json_leaf_default_encodes_dates() -> None:
+    when = datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.UTC)
+    assert json.loads(json.dumps({"d": when}, default=json_leaf_default)) == {
+        "d": "1979-05-27T07:32:00+00:00"
+    }
+    assert json.dumps({"b": True, "n": 8080}, default=json_leaf_default) == (
+        '{"b": true, "n": 8080}'
+    )
+
+
+def test_typed_value_formats_are_the_documented_four() -> None:
+    assert TYPED_VALUE_FORMATS == ("int", "float", "bool", "str")
 
 
 # --- arbitrary-key sections (dotted paths + deep-merge) ----------------------

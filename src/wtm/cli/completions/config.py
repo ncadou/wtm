@@ -18,7 +18,13 @@ import typer
 
 from wtm.cli.common import _rung_label
 from wtm.cli.completions.locator import _labelled_locations, _locate_candidates
-from wtm.config import FLOOR_TIERS, Config, GenericTarget, validate_arbitrary_key
+from wtm.config import (
+    FLOOR_TIERS,
+    TYPED_VALUE_FORMATS,
+    Config,
+    GenericTarget,
+    validate_arbitrary_key,
+)
 from wtm.core import current_dir
 from wtm.hooks import Scope
 from wtm.locator import LocationIndex, Resolved, build_index, locate
@@ -404,6 +410,20 @@ def _complete_floor(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]
         (tier, f"key participates at {tier} tier and above")
         for tier in FLOOR_TIERS
         if tier.startswith(incomplete)
+    ]
+
+
+def _complete_type(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    """Complete ``--type``: the named scalar coercions (dates go through --toml)."""
+    labels = {
+        "int": "TOML integer",
+        "float": "TOML float",
+        "bool": "boolean (click truthiness tokens)",
+        "str": "string (the default)",
+    }
+
+    return [
+        (fmt, labels.get(fmt, "")) for fmt in TYPED_VALUE_FORMATS if fmt.startswith(incomplete)
     ]
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,9 +16,11 @@ from wtm.cli.completions.config import (
     _complete_config_unset,
     _complete_floor,
     _complete_scope,
+    _complete_type,
 )
 from wtm.cli.locator import _locate_one, _locate_optional
 from wtm.config import (
+    TYPED_VALUE_FORMATS,
     ConfigSlice,
     DepthTier,
     GenericTarget,
@@ -27,8 +30,13 @@ from wtm.config import (
     ResolvedWorktree,
     SliceTarget,
     SourceRung,
+    TomlValue,
     check_key_floor,
+    json_leaf_default,
     parse_inheritable_element,
+    parse_toml_value,
+    parse_typed_value,
+    render_scalar,
     validate_arbitrary_key_path,
 )
 from wtm.core import WtmError, current_dir
@@ -163,7 +171,7 @@ def _print_extra(
             if chain and not _defined_here(chain[0].tier, entity_tier):
                 continue
             origin = f"  [{_rung_label(chain[0])}]" if show_origin and chain else ""
-            print(f"{indent}{key}: {value}{origin}")
+            print(f"{indent}{key}: {render_scalar(value)}{origin}")
 
 
 def _print_extra_table(
@@ -204,7 +212,7 @@ def _print_extra_table(
             if winner is not None and not _defined_here(winner.tier, entity_tier):
                 continue
             origin = f"  [{_rung_label(winner)}]" if show_origin and winner is not None else ""
-            lines.append(f"{indent}{key}: {value}{origin}")
+            lines.append(f"{indent}{key}: {render_scalar(value)}{origin}")
 
     return lines
 
@@ -376,6 +384,19 @@ def config_set(
         help="With -a on KEY 'inheritable': declare the element with a tier floor "
         "(worktree/project/workspace/global)",
     ),
+    toml_literal: bool = typer.Option(
+        False,
+        "-x",
+        "--toml",
+        help="Parse VALUE as a TOML literal (scalars only: strings, ints, floats, "
+        "booleans, date/times)",
+    ),
+    value_type: str | None = typer.Option(
+        None,
+        "--type",
+        autocompletion=_complete_type,
+        help="Coerce VALUE to a named scalar type: " + ", ".join(TYPED_VALUE_FORMATS),
+    ),
 ) -> None:
     """Set an arbitrary config KEY on the cwd-inferred or locator-named entity.
 
@@ -393,18 +414,24 @@ def config_set(
     annotation. It is mutually exclusive with a locator; a global-tier key
     stays entity-local until opted into ``inheritable`` (see the array form).
 
-    The write is scalar by default (``KEY VALUE``). ``-a``/``--array`` (``KEY
-    VALUE``) instead adds VALUE to the string array at KEY, idempotently (set
-    semantics); ``-t``/``--table`` (``KEY SUBKEY VALUE``) sets SUBKEY in the
-    table at KEY. Both mutate element-wise under a per-file lock; the two flags
-    are mutually exclusive. The one reserved array a user may mutate via ``-a``
-    is ``inheritable`` (the opt-in allowlist of extra inheritable keys); each
-    element it takes is validated (a reserved or hardcoded-non-inheritable key
-    such as ``description`` is refused). With ``--floor``, an ``inheritable``
-    element is stored as ``{ key = VALUE, floor = FLOOR }``: the key then only
-    participates at FLOOR and above (worktree < project < workspace < global),
-    so deeper values neither resolve nor write -- the same rule the builtin
-    ``base_branch`` (floor ``project``) always had.
+    The write is scalar by default (``KEY VALUE``), stored as a **string**
+    unless typed opt-in is requested: ``--toml`` parses VALUE as a TOML value
+    literal (every scalar spelling, including dates; tables/arrays are not
+    writable yet) and ``--type NAME`` coerces it to a named scalar (bool uses
+    click's truthiness tokens). The two are mutually exclusive; both also work
+    element-wise. ``-a``/``--array`` (``KEY VALUE``) adds VALUE to the string
+    array at KEY, idempotently (set semantics); ``-t``/``--table`` (``KEY
+    SUBKEY VALUE``) sets SUBKEY in the table at KEY. Both mutate element-wise
+    under a per-file lock. The one reserved array a user may mutate via
+    ``-a`` is ``inheritable`` (the opt-in allowlist of extra inheritable
+    keys); its elements are key *declarations*, so ``--type``/``--toml`` are
+    refused there. Each inheritable element is validated (a reserved or
+    hardcoded-non-inheritable key such as ``description`` is refused). With
+    ``--floor``, an ``inheritable`` element is stored as ``{ key = VALUE,
+    floor = FLOOR }``: the key then only participates at FLOOR and above
+    (worktree < project < workspace < global), so deeper values neither
+    resolve nor write -- the same rule the builtin ``base_branch`` (floor
+    ``project``) always had.
 
     A floored inheritable key refuses any write landing below its floor
     (`WriteProhibitedError`); removing one is never refused.
@@ -421,6 +448,8 @@ def config_set(
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
+    if toml_literal and value_type is not None:
+        raise WtmError("--type and --toml are mutually exclusive")
     if floor is not None and not array:
         raise WtmError("--floor requires -a/--array")
 
@@ -439,6 +468,8 @@ def config_set(
         key, value = args[-2:]
 
     element: str | dict[str, str] = value
+    if (toml_literal or value_type is not None) and array and key == "inheritable":
+        raise WtmError("inheritable elements are key declarations; --type/--toml do not apply")
     if key == "inheritable" and array:
         if floor is not None:
             element = {"key": value, "floor": floor}
@@ -447,6 +478,18 @@ def config_set(
         raise WtmError("--floor applies only to KEY 'inheritable' with -a/--array")
     else:
         validate_arbitrary_key_path(key)
+
+    # Coerce the raw VALUE once, after validation; the bare form stays a string.
+    coerced: TomlValue = value
+    if toml_literal:
+        coerced = parse_toml_value(value)
+    elif value_type is not None:
+        if value_type not in TYPED_VALUE_FORMATS:
+            raise WtmError(
+                f"unknown --type '{value_type}' (choose one of {', '.join(TYPED_VALUE_FORMATS)})"
+            )
+        coerced = parse_typed_value(value, value_type)
+
     config = ctx.obj.config
     if global_scope:
         target = config.global_generic_target()
@@ -463,16 +506,17 @@ def config_set(
     head = key.split(".", 1)[0]
     check_key_floor(target.floors.get(head), head, scope, (*prefix, *key.split(".")))
     if array:
-        config.add_to_array(address, full_key, element)
+        written: TomlValue | dict[str, str] = coerced if key != "inheritable" else element
+        config.add_to_array(address, full_key, written)
         log(f"{target.label}: {key} += {value} [{scope.value}] ({address.file})")
 
         return
     if table:
-        config.set_table_value(address, full_key, subkey, value)
+        config.set_table_value(address, full_key, subkey, coerced)
         log(f"{target.label}: {key}.{subkey} = {value} [{scope.value}] ({address.file})")
 
         return
-    config.set_value(address, full_key, value)
+    config.set_value(address, full_key, coerced)
     log(f"{target.label}: set {key} [{scope.value}] ({address.file})")
 
 
@@ -495,18 +539,29 @@ def config_get(
     show_origin: bool = typer.Option(
         False, "-o", "--origin", help="Print the full probe chain, most-local first"
     ),
+    as_json: bool = typer.Option(
+        False,
+        "-j",
+        "--json",
+        help="Emit the effective value as bare JSON instead of text "
+        "(null when unset; mutually exclusive with --origin)",
+    ),
 ) -> None:
     """Resolve an arbitrary config KEY for the cwd-inferred or locator-named entity.
 
     Prints the winning (most-local) value, or ``(unset)`` when the key appears
     nowhere in the entity's cascade. An array prints one element per line and a
     table prints ``subkey = value`` per line (sorted, nested sub-tables
-    indented); a scalar prints bare. Passing SUBKEY reads a single cell of the
-    table at KEY. ``--origin`` instead lists where each value is defined:
-    per-cell for a table (each leaf ``path = value`` annotated with its source)
-    or one line per carrying rung for a scalar/array -- the definition level
-    (``project``/``workspace``/``global``) for an inherited key such as
-    ``base_branch``, otherwise its scope -- and the file it lives in.
+    indented); a scalar prints bare. Non-string scalars render TOML-faithfully
+    (booleans lower-case, dates ISO-8601). Passing SUBKEY reads a single cell
+    of the table at KEY. ``--origin`` instead lists where each value is
+    defined: per-cell for a table (each leaf ``path = value`` annotated with
+    its source) or one line per carrying rung for a scalar/array -- the
+    definition level (``project``/``workspace``/``global``) for an inherited
+    key such as ``base_branch``, otherwise its scope -- and the file it lives
+    in. ``--json`` emits the effective value as bare JSON (``8080``, ``true``,
+    ``[1, 2]``, a nested object; ``null`` when unset), machine-readable with
+    no provenance; it cannot be combined with ``--origin``.
 
     With ``-g``/``--global`` the KEY resolves against the global tier alone --
     the top level of the user file (the system file is not probed), exactly one
@@ -536,9 +591,15 @@ def config_get(
         target, path = _resolve_get_target(ctx, args)
     validate_arbitrary_key_path(path)
     config = ctx.obj.config
+    if as_json and show_origin:
+        raise WtmError("--json cannot be combined with --origin")
     effective, chain = config.resolve_generic_value(target, path)
     if show_origin:
         _print_origin(effective, chain, path)
+
+        return
+    if as_json:
+        print(json.dumps(effective, default=json_leaf_default))
 
         return
     print(_render_config_value(effective))
@@ -639,18 +700,15 @@ def _print_origin(effective: object, chain: list[SourceRung], path: Key) -> None
     if isinstance(effective, dict):
         for sub, value, winner in _origin_leaves(effective, chain, rest):
             full = ".".join((head, *sub))
-            if winner is None:
-                print(f"{full} = {value}")
-
-                continue
-            print(f"{full} = {value}  [{_rung_label(winner)}]  {_tilde(winner.file)}")
+            label = f"  [{_rung_label(winner)}]  {_tilde(winner.file)}" if winner else ""
+            print(f"{full} = {render_scalar(value)}{label}")
 
         return
     found = False
     for rung in chain:
         cell = _descend_path(rung.value, rest)
         if cell is not None:
-            print(f"{cell}  [{_rung_label(rung)}]  {_tilde(rung.file)}")
+            print(f"{render_scalar(cell)}  [{_rung_label(rung)}]  {_tilde(rung.file)}")
             found = True
     if not found:
         print("(unset)")
@@ -690,18 +748,20 @@ def _descend_path(value: object, parts: tuple[str, ...]) -> object:
 def _render_config_value(value: object) -> str:
     """Render a resolved config value by kind for ``config get``.
 
-    A scalar prints bare, an array one element per line, a table ``subkey =
-    value`` per line (sorted); an unset value prints ``(unset)``. A nested table
-    indents its sub-tables, so a section renders readably at any depth.
+    A scalar prints bare (non-strings TOML-faithfully: booleans lower-case,
+    dates ISO-8601, via :func:`~wtm.config.values.render_scalar`), an array
+    one element per line, a table ``subkey = value`` per line (sorted); an
+    unset value prints ``(unset)``. A nested table indents its sub-tables, so
+    a section renders readably at any depth.
     """
     if value is None:
         return "(unset)"
     if isinstance(value, dict):
         return _render_table(value, "")
     if isinstance(value, (list, tuple)):
-        return "\n".join(str(item) for item in value)
+        return "\n".join(render_scalar(item) for item in value)
 
-    return str(value)
+    return render_scalar(value)
 
 
 def _render_table(table: dict[str, object], indent: str) -> str:
@@ -713,7 +773,7 @@ def _render_table(table: dict[str, object], indent: str) -> str:
             lines.append(f"{indent}{key}:")
             lines.append(_render_table(value, f"{indent}  "))
         else:
-            lines.append(f"{indent}{key} = {value}")
+            lines.append(f"{indent}{key} = {render_scalar(value)}")
 
     return "\n".join(lines)
 
@@ -754,6 +814,20 @@ def config_unset(
         False, "-a", "--array", help="Remove every occurrence of VALUE from the array at KEY"
     ),
     table: bool = typer.Option(False, "-t", "--table", help="Remove SUBKEY from the table at KEY"),
+    toml_literal: bool = typer.Option(
+        False,
+        "-x",
+        "--toml",
+        help="With -a: parse VALUE as a TOML literal (scalars only) so a typed "
+        "element is removed by its own kind of value",
+    ),
+    value_type: str | None = typer.Option(
+        None,
+        "--type",
+        autocompletion=_complete_type,
+        help="With -a: coerce VALUE to a named scalar type before matching -- "
+        + ", ".join(TYPED_VALUE_FORMATS),
+    ),
 ) -> None:
     """Remove an arbitrary config KEY from one tier of the cwd-inferred or locator-named entity.
 
@@ -761,9 +835,11 @@ def config_unset(
     when an optional locator prefix precedes the key group) and ``--scope``
     picks the file (defaulting to the deepest existing dir). The removal is
     scalar by default (``KEY``); ``-a``/``--array`` (``KEY VALUE``) strips every
-    occurrence of VALUE from the array at KEY; ``-t``/``--table`` (``KEY
-    SUBKEY``) removes SUBKEY from the table at KEY. The two flags are mutually
-    exclusive. A no-op when the target is already absent at that tier.
+    occurrence of VALUE from the array at KEY, matching by native equality --
+    with ``--type``/``--toml`` a typed element is removed by its own kind of
+    value; ``-t``/``--table`` (``KEY SUBKEY``) removes SUBKEY from the table at
+    KEY. The two flags are mutually exclusive. A no-op when the target is
+    already absent at that tier.
 
     ``-g``/``--global`` targets the global tier instead -- the top level of the
     user file (``-s system``: the system file), mutually exclusive with a
@@ -776,6 +852,10 @@ def config_unset(
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
+    if (toml_literal or value_type is not None) and not array:
+        raise WtmError("--type/--toml require -a/--array (nothing to match otherwise)")
+    if toml_literal and value_type is not None:
+        raise WtmError("--type and --toml are mutually exclusive")
 
     n = 2 if (array or table) else 1
     if len(args) < n:
@@ -793,6 +873,17 @@ def config_unset(
     else:
         (key,) = args[-1:]
 
+    if key == "inheritable" and array and (toml_literal or value_type is not None):
+        raise WtmError("inheritable elements are key declarations; --type/--toml do not apply")
+    coerced: TomlValue | None = None
+    if toml_literal:
+        coerced = parse_toml_value(value)
+    elif value_type is not None:
+        if value_type not in TYPED_VALUE_FORMATS:
+            raise WtmError(
+                f"unknown --type '{value_type}' (choose one of {', '.join(TYPED_VALUE_FORMATS)})"
+            )
+        coerced = parse_typed_value(value, value_type)
     if not (key == "inheritable" and array):
         validate_arbitrary_key_path(key)
     config = ctx.obj.config
@@ -809,7 +900,7 @@ def config_unset(
     address, prefix = target.write_target(scope)
     full_key = _join_key(prefix, key)
     if array:
-        config.remove_from_array(address, full_key, value)
+        config.remove_from_array(address, full_key, coerced if coerced is not None else value)
         log(f"{target.label}: {key} -= {value} [{scope.value}] ({address.file})")
 
         return

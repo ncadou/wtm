@@ -250,7 +250,9 @@ array -- the arbitrary-key read folds the entity's own cascade plus its ancestor
 suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
 `WTM_SYSTEM_CONFIG` at an absent path to skip system scope). The library surface
 is whatever `wtm.config.__all__` exports: reads are native-typed (TOML ints/bools
-come back as-is) while writes are string-only, `(unset)` remains a CLI rendering
+come back as-is) and writes are strings by default, typed scalars opt-in through
+the coercion helpers (`parse_typed_value`/`parse_toml_value`, scalar-gated --
+tables/arrays are not writable yet), `(unset)` remains a CLI rendering
 of a `None`. The **placement policy** ("deepest scope whose dir exists" + the
 per-tier write-scope allowlists) has one home in `wtm.config.writes`
 (`project_default_scope`/`workspace_default_scope`/`worktree_default_scope`,

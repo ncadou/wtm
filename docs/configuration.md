@@ -75,13 +75,16 @@ instead; `-g/--global` skips entities entirely and targets the global tier
 - `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key. `KEY` may be a
   dotted path (`ci.runner.image`) naming a nested cell; see [Sections](#sections)
   below.
-- `wtm config get KEY [SUBKEY] [--origin]` — resolve it (most-local wins). A
+- `wtm config get KEY [SUBKEY] [--origin] [--json]` — resolve it (most-local wins). A
   scalar prints bare, an array one element per line, a table `subkey = value` per
   line (sorted, nested sub-tables indented); pass `SUBKEY` to read a single table
-  cell, or use a dotted `KEY` to read a nested cell. `--origin` lists where each
+  cell, or use a dotted `KEY` to read a nested cell. Non-string scalars print
+  TOML-faithfully (booleans lower-case, dates ISO-8601). `--origin` lists where each
   value is defined: per-cell (`path = value  [source]  file`) for a table, or one
   line per carrying rung for a scalar/array — its scope, or its definition level
   (`project`/`workspace`/`global`) for an inherited key — and the file it lives in.
+  `--json` instead emits the effective value as bare JSON (`8080`, `true`, a nested
+  object, `null` when unset); mutually exclusive with `--origin`.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
 
 ### Global tier (`-g`)
@@ -126,14 +129,15 @@ element-wise, instead of writing a scalar:
   (**set semantics**: idempotent, a value already present is a no-op); creates
   the array on first add. `KEY` may be dotted (`ci.ports`).
 - `wtm config unset KEY VALUE -a [-s SCOPE]` — strip every occurrence of `VALUE`
-  from that array.
+  from that array (matching by native equality; see [Typed values](#typed-values) below).
 - `wtm config set KEY SUBKEY VALUE -t [-s SCOPE]` — set `SUBKEY = VALUE` in the
   table at `KEY`; creates the table on first set. `KEY` may be dotted, so this is
   the one-level form of a dotted write.
 - `wtm config unset KEY SUBKEY -t [-s SCOPE]` — remove `SUBKEY` from that table.
 
-`-a` and `-t` are mutually exclusive. Values are always stored as **strings**.
-Mutating a key that already holds a different kind (a scalar, or an array where a
+`-a` and `-t` are mutually exclusive. Values are stored as **strings** unless a
+typed opt-in says otherwise (see below). Mutating a key that already holds a
+different kind (a scalar, or an array where a
 table is expected, or vice versa) is a hard error (the same kind-clash rule reads
 enforce). Arrays do **not** merge across scopes (unlike `hooks.on` /
 `inheritable`, and unlike *tables* which deep-merge per cell): a read takes the
@@ -146,6 +150,40 @@ a per-worktree port registry beside a per-project one:
 project_ports = ["8080"]
 # worktree scope
 worktree_ports = ["3001", "3002"]
+```
+
+### Typed values (`--type` / `--toml`)
+
+Bare writes store strings. Two opt-in flags make a write land as its native TOML
+kind instead — useful when other tools read the file directly, or when an integer
+should not spend its life quoted:
+
+- `wtm config set KEY VALUE --type int|float|bool|str` — coerce `VALUE` to the
+  named scalar. `bool` accepts click's truthiness tokens case-insensitively
+  (`true/t/1/yes/y/on` vs `false/f/0/no/n/off`; anything else is refused).
+- `wtm config set KEY VALUE -x/--toml` — parse `VALUE` exactly as TOML would:
+  every scalar spelling, including the three date/time forms
+  (`1979-05-27T07:32:00Z`). Arrays and tables parse but are **not writable yet**
+  (scalars only) — element-wise `-a`/`-t` remain the way to grow them.
+
+The two flags are mutually exclusive; both compose with `-a` (typed elements,
+removed by their own kind of value via the same flags on `config unset`) and
+`-t` (typed cells). They are refused on `inheritable -a`, whose elements are key
+declarations, not values. A typed overwrite silently replaces whatever kind was
+there; cross-tier reads still resolve most-local, regardless of kind.
+
+Reads were always native-typed (a hand-written `port = 8080` resolves as an
+integer); text output renders non-strings TOML-faithfully so what `config get`
+prints round-trips back through `--toml`, and `config_slice_json`
+(`config show --json`, `config get --json`) encodes dates as ISO-8601 strings.
+The structural tier (`base_branch`, `path`, descriptions, hook commands) stays
+string-only by nature.
+
+```sh
+wtm config set -g port 8080 --type int          # port = 8080
+wtm config set -g strict on --type bool         # strict = true
+wtm config set -g since 1979-05-27T07:32:00Z -x # a real TOML datetime
+wtm config get -g port --json                   # 8080
 ```
 
 Every config write is serialised by a **per-directory lock** (`flock` on the

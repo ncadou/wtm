@@ -34,6 +34,7 @@ from wtm.config.model import (
     Workspace,
 )
 from wtm.config.registry import global_probes
+from wtm.config.values import json_leaf_default
 from wtm.core import abspath, current_dir, project_dir_for, within, worktree_name
 
 if TYPE_CHECKING:
@@ -47,7 +48,8 @@ def config_slice_json(slice: ConfigSlice) -> str:
     at global (``default_base_branch`` / ``extra``), with workspaces, projects,
     and worktrees nested as pruned by the slice. Effective values only -- no
     provenance (``--origin``) and no hooks, per the JSON contract (``--json
-    --origin``/``--json --hooks`` error).
+    --origin``/``--json --hooks`` error). Date/time leaves encode as their
+    ISO-8601 string (:func:`~wtm.config.values.json_leaf_default`).
     """
     root: dict[str, object] = {}
     if slice.default_base_branch:
@@ -56,7 +58,7 @@ def config_slice_json(slice: ConfigSlice) -> str:
         root["extra"] = dict(sorted(slice.global_extra.items()))
     root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in slice.workspaces}
 
-    return json.dumps(root, default=str)
+    return json.dumps(root, default=json_leaf_default)
 
 
 def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:
