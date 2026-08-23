@@ -50,13 +50,13 @@ workspace).
 
 ## Scopes and discovery
 
-Builtin file discovery per scope (a bare `wtm-<event>` file plus a
-`wtm-<event>.d/*` directory):
+Builtin file discovery per scope (a bare `<event>` file plus a
+`<event>.d/*` directory):
 
 - **system**    — `/etc/wtm/hooks` (override: `$WTM_SYSTEM_HOOKS_DIR`, or config `[hooks] dir`)
 - **user**      — `$XDG_CONFIG_HOME/wtm/hooks` (override: `$WTM_USER_HOOKS_DIR`, or config `[hooks] dir`)
 - **workspace** — `<workspace>/.wtm/hooks` (override: workspace config `[hooks] dir`)
-- **project**   — `<project>/.git/hooks` (override: project config `[project.hooks] dir`)
+- **project**   — `<project>/.wtm/hooks` (override: project config `[project.hooks] dir`)
 - **worktree**  — `<worktree>/.wtm/hooks` (override: worktree config `[hooks] dir`)
 
 Every `[hooks] dir` override applies to firing *and* management alike —
@@ -101,8 +101,8 @@ TOML booleans.
 
 ## Firing order
 
-Within a scope, builtin files run first (the bare `wtm-<event>` file before its
-`wtm-<event>.d/*` entries, sorted lexically), then inline commands in declared
+Within a scope, builtin files run first (the bare `<event>` file before its
+`<event>.d/*` entries, sorted lexically), then inline commands in declared
 order.
 
 Across scopes, order depends on the phase:
@@ -169,10 +169,10 @@ list    [TARGET] [--types]                                 list installed hooks,
 
 - `wtm hook install FILE|DIR [TARGET] [--scope system|user|workspace|project|worktree] [--event E] [--link] [--force]`
   installs a hook (default scope `project`). The event is inferred from a
-  `wtm-<event>` / `wtm-<event>.d` source name, or given with `--event`. A
-  **file** joins an existing `wtm-<event>.d/` (keeping its basename) or otherwise
-  becomes the bare `wtm-<event>` file; a **directory**'s contents are merged into
-  `wtm-<event>.d/`. Copies are made executable (0755); `--link` symlinks the
+  `<event>` / `<event>.d` source name, or given with `--event`. A
+  **file** joins an existing `<event>.d/` (keeping its basename) or otherwise
+  becomes the bare `<event>` file; a **directory**'s contents are merged into
+  `<event>.d/`. Copies are made executable (0755); `--link` symlinks the
   source instead. Existing destinations require `--force`. `--scope system`,
   `--scope user`, and `--scope workspace` need no target.
 - `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks (all
@@ -181,8 +181,8 @@ list    [TARGET] [--types]                                 list installed hooks,
   positional; everything before it is a `TARGET`, which — like `hook list`'s — is
   a **locator** pinned to the worktree tier.
 - `wtm hook delete [TARGET] HOOK [--scope …] [-r]` removes a hook. `HOOK` is the
-  last positional: an event (removes the bare `wtm-<event>` file; its
-  `wtm-<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
+  last positional: an event (removes the bare `<event>` file; its
+  `<event>.d/` only with `-r/--recursive`) or `event/entry` (removes one
   `.d` entry).
 - `wtm hook list [TARGET] [--types]` lists hooks grouped by event across scopes,
   builtin files and inline config hooks alike (inline ones marked `(config)`);

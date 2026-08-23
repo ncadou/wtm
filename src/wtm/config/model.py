@@ -86,7 +86,7 @@ class HookSpec:
     """A scope's hook configuration: inline commands plus builtin-file controls.
 
     :param on: event -> list of ``sh -c`` command strings (inline hooks).
-    :param builtins: whether to also discover builtin ``wtm-<event>`` files;
+    :param builtins: whether to also discover builtin ``<event>`` files;
         ``None`` means unset (treated as enabled), ``False`` disables them for
         this scope. Carried as tri-state so a more-specific declaration site can
         override a less-specific one.

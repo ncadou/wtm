@@ -35,8 +35,8 @@ def hook_install(
         None,
         "-e",
         "--event",
-        help="Event (create|install|enter|leave|delete); inferred from a "
-        "wtm-<event> name otherwise",
+        help="Event (create|install|enter|leave|delete); inferred from an "
+        "<event>-named source otherwise",
         autocompletion=_complete_event,
     ),
     link: bool = typer.Option(False, "-l", "--link", help="Symlink instead of copy"),
@@ -93,7 +93,7 @@ def hook_delete(
         Scope.PROJECT, "-s", "--scope", help="Where to delete the hook from"
     ),
     recursive: bool = typer.Option(
-        False, "-r", "--recursive", help="Also remove the wtm-<event>.d/ directory"
+        False, "-r", "--recursive", help="Also remove the <event>.d/ directory"
     ),
 ) -> None:
     """Delete a hook: an event (bare file; .d/ needs -r) or event/entry.

@@ -7,11 +7,11 @@ a state mutation (``pre-create``/``post-create``, ``pre-delete``/``post-delete``
 file or an **inline** ``sh -c`` command declared in config; inline hooks add to
 the builtins. Builtin files are discovered across five scopes::
 
-    system:    /etc/wtm/hooks/wtm-<event>                    and  .../wtm-<event>.d/*
-    user:      $XDG_CONFIG_HOME/wtm/hooks/wtm-<event>        and  .../wtm-<event>.d/*
-    workspace: <workspace>/.wtm/hooks/wtm-<event>            and  .../wtm-<event>.d/*
-    project:   <project>/.git/hooks/wtm-<event>              and  .../wtm-<event>.d/*
-    worktree:  <worktree>/.wtm/hooks/wtm-<event>             and  .../wtm-<event>.d/*
+    system:    /etc/wtm/hooks/<event>                        and  .../<event>.d/*
+    user:      $XDG_CONFIG_HOME/wtm/hooks/<event>            and  .../<event>.d/*
+    workspace: <workspace>/.wtm/hooks/<event>                and  .../<event>.d/*
+    project:   <project>/.wtm/hooks/<event>                  and  .../<event>.d/*
+    worktree:  <worktree>/.wtm/hooks/<event>                 and  .../<event>.d/*
 
 (system/user dirs are overridable via env or config; every scope's dir may be
 overridden by its config ``[hooks] dir`` -- resolved through the single
@@ -36,8 +36,8 @@ run most-general-first: system, then user, then workspace, then project, then
 worktree. Teardown events (leave, pre-delete, post-delete) run
 most-specific-first: worktree, then project, then workspace, then user, then
 system.
-Within a scope, builtin files run first (a bare ``wtm-<event>`` file before its
-``wtm-<event>.d/`` directory, entries sorted lexically), then inline commands in
+Within a scope, builtin files run first (a bare ``<event>`` file before its
+``<event>.d/`` directory, entries sorted lexically), then inline commands in
 declared order. Non-zero hook exits are logged but non-fatal unless the
 operation is strict; under strict a present-but-non-executable file is also
 fatal — so a failing ``pre-*`` hook aborts its operation only when strict.
@@ -205,7 +205,7 @@ def _fire(
     for scope in selected:
         spec = specs[scope]
         if spec.run_builtins:
-            base = dir_of(scope) / f"wtm-{event}"
+            base = dir_of(scope) / event
             _run_hook_source(base, hcwd, arg1, env, strict=fatal)
         for command in spec.on.get(event, []):
             _run_inline_hook(command, hcwd, arg1, env, strict=fatal)
@@ -292,7 +292,7 @@ def run_workspace_hooks(
     workspace scopes apply, and the environment contract is workspace-only
     (``WTM_EVENT`` + ``WTM_WORKSPACE`` + ``WTM_WORKSPACE_DIR``). The projects
     root *path* is both the subprocess working directory and the hooks' ``$1``.
-    Builtin files are ``wtm-<event>`` / ``wtm-<event>.d/*`` under each scope's
+    Builtin files are ``<event>`` / ``<event>.d/*`` under each scope's
     hooks dir; inline hooks come from the scope's ``[hooks.on]`` (system/user) or
     the workspace entry's ``hooks.on`` (workspace).
     """
@@ -344,7 +344,7 @@ def run_project_hooks(
     subset (``WTM_EVENT`` + the six project vars) with no ``WTM_WORKTREE_DIR`` /
     ``WTM_BRANCH``. *project_dir* is both the subprocess working directory and
     the hooks' ``$1``; the project-scope builtins live under
-    ``<project>/.git/hooks`` and the workspace scope resolves against the
+    ``<project>/.wtm/hooks`` and the workspace scope resolves against the
     workspace that contains the project (not necessarily the active one).
     """
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
@@ -452,8 +452,8 @@ class ScopeListing:
     """The hooks found in one scope for one event: files plus inline config hooks."""
 
     scope: Scope
-    file: Path | None  # the bare wtm-<event> file, if present
-    entries: list[Path]  # sorted wtm-<event>.d/* entries
+    file: Path | None  # the bare <event> file, if present
+    entries: list[Path]  # sorted <event>.d/* entries
     inline: list[str] = field(default_factory=list)  # inline config commands
 
 
@@ -475,10 +475,10 @@ class Hooks:
     ) -> Path:
         """Install *source* (a file or directory) into *scope*; return the destination.
 
-        The event is inferred from a ``wtm-<event>`` / ``wtm-<event>.d`` source
-        name unless *event* overrides it. A directory's contents are merged into
-        ``wtm-<event>.d/``. A file lands in ``wtm-<event>.d/`` when that
-        directory already exists, else as the bare ``wtm-<event>`` file.
+        The event is inferred from an ``<event>`` / ``<event>.d`` source name
+        unless *event* overrides it. A directory's contents are merged into
+        ``<event>.d/``. A file lands in ``<event>.d/`` when that directory
+        already exists, else as the bare ``<event>`` file.
         """
         src = abspath(source)
         if not src.exists():
@@ -492,7 +492,7 @@ class Hooks:
         _validate_event(resolved_event)
 
         hooks_dir = self._scope_dir(scope, args)
-        base = hooks_dir / f"wtm-{resolved_event}"
+        base = hooks_dir / resolved_event
         dotd = Path(f"{base}.d")
 
         if src.is_dir():
@@ -530,14 +530,14 @@ class Hooks:
     ) -> list[Path]:
         """Delete a hook from *scope*; return the paths removed.
 
-        *hook* is an event (removes the bare ``wtm-<event>`` file; its
-        ``wtm-<event>.d/`` only with *recursive*) or ``event/entry`` (removes a
+        *hook* is an event (removes the bare ``<event>`` file; its
+        ``<event>.d/`` only with *recursive*) or ``event/entry`` (removes a
         single ``.d`` entry).
         """
         event, entry = _split_hook(hook)
         _validate_event(event)
         hooks_dir = self._scope_dir(scope, args)
-        base = hooks_dir / f"wtm-{event}"
+        base = hooks_dir / event
         dotd = Path(f"{base}.d")
 
         if entry is not None:
@@ -563,7 +563,7 @@ class Hooks:
     def list(self, args: list[str]) -> dict[str, list[ScopeListing]]:
         """Return installed hooks grouped by event, then scope.
 
-        Includes both builtin ``wtm-<event>`` files and inline config hooks
+        Includes both builtin ``<event>`` files and inline config hooks
         (the latter marked in the CLI rendering). Scopes that cannot be resolved
         (e.g. no worktree context) are silently omitted so listing works from
         anywhere.
@@ -584,7 +584,7 @@ class Hooks:
                 file: Path | None = None
                 entries: list[Path] = []
                 if hooks_dir is not None:
-                    base = hooks_dir / f"wtm-{event}"
+                    base = hooks_dir / event
                     dotd = Path(f"{base}.d")
                     file = base if (base.exists() or base.is_symlink()) else None
                     entries = sorted(dotd.iterdir(), key=lambda p: p.name) if dotd.is_dir() else []
@@ -625,7 +625,7 @@ class Hooks:
         authority (so a ``[hooks] dir`` override is honored exactly as when
         firing). System, user, and workspace need no target -- workspace
         resolving against the *active* workspace; project resolves to
-        ``<project>/.git/hooks`` without requiring a worktree to exist; worktree
+        ``<project>/.wtm/hooks`` without requiring a worktree to exist; worktree
         needs a live worktree.
         """
         if scope is Scope.SYSTEM or scope is Scope.USER:
@@ -660,14 +660,12 @@ class Hooks:
 
 
 def _infer_event(src: Path) -> str | None:
-    """Infer an event from a ``wtm-<event>`` or ``wtm-<event>.d`` source name."""
+    """Infer an event from an ``<event>`` or ``<event>.d`` source name."""
     name = src.name
     if name.endswith(".d"):
         name = name[: -len(".d")]
-    if name.startswith("wtm-"):
-        candidate = name[len("wtm-") :]
-        if candidate in EVENTS:
-            return candidate
+    if name in EVENTS:
+        return name
 
     return None
 

@@ -155,7 +155,7 @@ facility as `hooks.strict`/`hooks.enabled`; `config get hooks.strict` reports
 exactly what firing would resolve.
 
 **Builtin hook / inline hook**:
-A **builtin** hook is a discovered `wtm-<event>` file (or `.d/*` entry); an
+A **builtin** hook is a discovered `<event>` file (or `.d/*` entry); an
 **inline** hook is a command declared in config (`[...hooks.on] event = "..."`).
 Within a scope, builtins fire first (unless `builtins = false`), then inline
 commands. Both accumulate across scopes.

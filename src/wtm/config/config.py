@@ -164,7 +164,7 @@ class Config:
 
         Each tier's ``[hooks] dir`` override wins; otherwise the tier default --
         system ``$WTM_SYSTEM_HOOKS_DIR`` (default ``/etc/wtm/hooks``), user XDG,
-        workspace ``<ws>/.wtm/hooks``, project ``<project>/.git/hooks``,
+        workspace ``<ws>/.wtm/hooks``, project ``<project>/.wtm/hooks``,
         worktree ``<worktree>/.wtm/hooks``. Firing and management both resolve
         through here, so an override is honored identically on both sides. The
         workspace scope resolves against *ws* -- firing passes the workspace
@@ -194,7 +194,7 @@ class Config:
             spec = self.scope_hook_spec(
                 scope, project_dir, worktree_dir or project_dir / "worktrees"
             )
-            return spec.dir or project_dir / ".git" / "hooks"
+            return spec.dir or project_dir / ".wtm" / "hooks"
 
         if project_dir is None or worktree_dir is None:
             raise WtmError("worktree hooks dir needs a project dir and worktree dir")
