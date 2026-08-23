@@ -3381,6 +3381,202 @@ def test_workspace_hook_fires_and_lists(root: Path, tmp_path: Path) -> None:
     assert "workspace:" in listed.stdout
 
 
+# --- fire-time policy: [hooks] enabled / strict -------------------------------
+
+
+def test_hooks_enabled_false_kills_the_operation(root: Path, tmp_path: Path) -> None:
+    # [hooks] enabled = false at project tier fires nothing -- builtin and
+    # inline alike -- for the whole operation, without any CLI flag.
+    git_dir = _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    fired = tmp_path / "fired"
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-enter", f'touch "{fired}"\n')
+    (root / "alpha" / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / ".wtm" / "config.toml").write_text("[hooks]\nenabled = false\n")
+    res = run("hook", "run", "alpha", "feat", "enter", root=root, hooks_dir=hooks)
+    assert res.returncode == 0, res.stderr
+    assert not fired.exists()
+    assert git_dir.is_dir()  # sanity: the project is untouched
+
+
+def test_hooks_enabled_false_beats_strict(root: Path, tmp_path: Path) -> None:
+    # Precedence: the master-off knob wins over strictness wherever declared --
+    # worktree-scope enabled=false silences an operation the user file makes
+    # strict; the CLI --strict force-on does not resurrect it.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    (wt / ".wtm").mkdir(parents=True, exist_ok=True)
+    (wt / ".wtm" / "config.toml").write_text("[hooks]\nenabled = false\n")
+    config = root / "_strict.toml"
+    config.write_text(f'[workspaces.ws]\npath = "{root}"\n[hooks]\nstrict = true\n')
+    fired = tmp_path / "fired"
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-enter", f'touch "{fired}"\n')
+    res = run(
+        "hook",
+        "run",
+        "enter",
+        "--strict",
+        root=root,
+        cwd=wt,
+        hooks_dir=hooks,
+        extra_env={"WTM_CONFIG": str(config)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert not fired.exists()
+
+
+def test_user_scope_strict_makes_failures_fatal(root: Path, tmp_path: Path) -> None:
+    # [hooks] strict = true in the user file makes hook failures fatal without
+    # the CLI flag -- less-local declarations fill the ladder's gaps.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    config = root / "_strict.toml"
+    config.write_text(f'[workspaces.ws]\npath = "{root}"\n[hooks]\nstrict = true\n')
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-post-create", "exit 3\n")
+    res = run(
+        "hook",
+        "run",
+        "alpha",
+        "feat",
+        "post-create",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_CONFIG": str(config)},
+    )
+    assert res.returncode == 1
+    assert "hook failed" in res.stderr
+
+
+def test_config_strict_vetoes_pre_create(root: Path, tmp_path: Path) -> None:
+    # A project-tier [hooks] strict = true aborts create before any filesystem
+    # change when its pre-create hook fails -- no --strict flag involved.
+    _seed_repo(root, "alpha")
+    (root / "alpha" / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / ".wtm" / "config.toml").write_text("[hooks]\nstrict = true\n")
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-pre-create", "exit 4\n")
+    res = run("create", "alpha", "feat", root=root, hooks_dir=hooks)
+    assert res.returncode == 1
+    assert not (root / "alpha" / "worktrees" / "feat").exists()
+
+
+def test_no_hooks_env_overrides_config_policy(root: Path, tmp_path: Path) -> None:
+    # WTM_NO_HOOKS is the master off switch: it wins over a config ladder that
+    # enables and stricts everything.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    config = root / "_policy.toml"
+    config.write_text(f'[workspaces.ws]\npath = "{root}"\n[hooks]\nstrict = true\n')
+    fired = tmp_path / "fired"
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks / "wtm-post-create", f'touch "{fired}"; exit 3\n')
+    res = run(
+        "hook",
+        "run",
+        "alpha",
+        "feat",
+        "post-create",
+        root=root,
+        hooks_dir=hooks,
+        extra_env={"WTM_CONFIG": str(config), "WTM_NO_HOOKS": "1"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert not fired.exists()
+
+
+# --- [hooks] policy via the arbitrary-key facility ----------------------------
+
+
+def test_hooks_policy_roundtrip_through_config_set_get_unset(root: Path) -> None:
+    # hooks.strict / hooks.enabled flow through config set/get/unset: written
+    # as native booleans, read back as the most-local effective value over the
+    # entity's cascade, unset cleanly.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "hooks.strict", "true", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert "strict = true" in text  # a native TOML boolean, not the string "true"
+    assert run("config", "get", "hooks.strict", root=root, cwd=cwd).stdout.strip() == "true"
+
+    # A less-local declaration fills the gap; each knob resolves independently.
+    (root / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / ".wtm" / "config.toml").write_text("[projects.proj.hooks]\nenabled = false\n")
+    got = run("config", "get", "hooks.enabled", root=root, cwd=cwd)
+    assert got.stdout.strip() == "false"
+    origin = run("config", "get", "hooks.enabled", "-o", root=root, cwd=cwd)
+    assert origin.stdout.startswith("false")
+    assert "[workspace]" in origin.stdout  # labeled by the file tier it lives in
+
+    assert run("config", "unset", "hooks.strict", root=root, cwd=cwd).returncode == 0
+    unset = run("config", "get", "hooks.strict", root=root, cwd=cwd)
+    assert unset.stdout.strip() == "(unset)"
+
+
+def test_hooks_policy_global_top_level_visible_to_entity_tiers(root: Path) -> None:
+    # The user file's own top-level [hooks] is a fire-time scope spec, so an
+    # entity-tier read folds it too: config get answers what firing resolves.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n[hooks]\nstrict = true\n')
+    res = run(
+        "config",
+        "get",
+        "hooks.strict",
+        root=root,
+        cwd=cwd,
+        extra_env={"WTM_CONFIG": str(cfg)},
+    )
+    assert res.stdout.strip() == "true"
+
+
+def test_hooks_policy_write_refusals(root: Path) -> None:
+    # The narrowed reservation: only the two policy cells are writable; every
+    # other hooks.* path stays refused, and non-boolean values are rejected.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    for key in ("hooks.on.enter", "hooks.bogus", "hooks.strict.deep", "hooks"):
+        res = run("config", "set", key, "x", root=root, cwd=cwd)
+        assert res.returncode == 1, f"{key} should be refused"
+        assert "reserved key" in res.stderr.lower()
+
+    bad = run("config", "set", "hooks.strict", "yes", root=root, cwd=cwd)
+    assert bad.returncode == 1
+    assert "boolean" in bad.stderr.lower()
+
+
+def test_config_show_renders_hook_policy(root: Path) -> None:
+    # config show --hooks renders the policy cells alongside inline commands.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "hooks.strict", "true", root=root, cwd=cwd)
+    shown = run("config", "show", "--hooks", root=root, cwd=cwd)
+    assert shown.returncode == 0, shown.stderr
+    assert "hook strict = true" in shown.stdout
+
+
+def test_hook_management_honors_dir_override(root: Path, tmp_path: Path) -> None:
+    # The unified dir authority: a project-tier [hooks] dir override sends
+    # management (install) to the same place firing looks -- previously only
+    # firing honored it.
+    _seed_repo(root, "proj")
+    override = tmp_path / "custom-project-hooks"
+    (root / "proj" / ".wtm").mkdir(parents=True, exist_ok=True)
+    (root / "proj" / ".wtm" / "config.toml").write_text(f'[hooks]\ndir = "{override}"\n')
+    src = tmp_path / "wtm-post-create"
+    _write_hook(src, "true\n")
+    res = run("hook", "install", str(src), "-s", "project", root=root, cwd=root / "proj")
+    assert res.returncode == 0, res.stderr
+    assert (override / "wtm-post-create").exists()
+    listed = run("hook", "list", root=root, cwd=root / "proj")
+    assert str(override / "wtm-post-create") in listed.stdout
+
+
 # --- enter / leave events ----------------------------------------------------
 
 

@@ -52,6 +52,7 @@ from wtm.config.entities import (
 from wtm.config.generic import parse_inheritable_element
 from wtm.config.model import (
     FLOOR_TIERS,
+    HOOKS_POLICY_CELLS,
     INHERIT_FLOORS,
     INHERITABLE_DECL_KEY,
     INHERITABLE_KEYS,
@@ -65,6 +66,7 @@ from wtm.config.model import (
     SourceRung,
     Workspace,
     annotation_from_payload,
+    check_kind,
     parse_hooks,
     str_or_none,
 )
@@ -144,21 +146,62 @@ class Config:
         return self.projects_root
 
     @property
-    def system_hooks_dir(self) -> Path:
-        """The system-scope builtin hook-discovery directory."""
-        return self.system_scope_hooks.dir or self._system_hooks_dir
+    def no_hooks(self) -> bool:
+        """Whether hook firing is disabled for this invocation (``WTM_NO_HOOKS``)."""
+        return self._settings.no_hooks
 
-    @property
-    def user_hooks_dir(self) -> Path:
-        """The user-scope builtin hook-discovery directory."""
-        return self.user_scope_hooks.dir or self._user_hooks_dir
+    # --- builtin hook-discovery dirs -----------------------------------------
 
-    @property
-    def workspace_hooks_dir(self) -> Path:
-        """The active workspace's builtin hook-discovery directory."""
-        ws = self.active_workspace
+    def hooks_dir(
+        self,
+        scope: Scope,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> Path:
+        """The builtin hook-discovery directory for *scope*: the single authority.
 
-        return ws.hooks.dir or ws.path / ".wtm" / "hooks"
+        Each tier's ``[hooks] dir`` override wins; otherwise the tier default --
+        system ``$WTM_SYSTEM_HOOKS_DIR`` (default ``/etc/wtm/hooks``), user XDG,
+        workspace ``<ws>/.wtm/hooks``, project ``<project>/.git/hooks``,
+        worktree ``<worktree>/.wtm/hooks``. Firing and management both resolve
+        through here, so an override is honored identically on both sides. The
+        workspace scope resolves against *ws* -- firing passes the workspace
+        *containing* the event's subject, management the active one; with no
+        *ws* (an undeclared project) it falls back to *project_dir*'s parent.
+        """
+        if scope is Scope.SYSTEM:
+            return self.system_scope_hooks.dir or self._system_hooks_dir
+
+        if scope is Scope.USER:
+            return self.user_scope_hooks.dir or self._user_hooks_dir
+
+        if scope is Scope.WORKSPACE:
+            if ws is not None and ws.hooks.dir is not None:
+                return ws.hooks.dir
+            if ws is not None:
+                return ws.path / ".wtm" / "hooks"
+            if project_dir is not None:
+                return project_dir.parent / ".wtm" / "hooks"
+
+            raise WtmError("workspace hooks dir needs a workspace or project dir")
+
+        if scope is Scope.PROJECT:
+            if project_dir is None:
+                raise WtmError("project hooks dir needs a project dir")
+
+            spec = self.scope_hook_spec(
+                scope, project_dir, worktree_dir or project_dir / "worktrees"
+            )
+            return spec.dir or project_dir / ".git" / "hooks"
+
+        if project_dir is None or worktree_dir is None:
+            raise WtmError("worktree hooks dir needs a project dir and worktree dir")
+
+        spec = self.scope_hook_spec(scope, project_dir, worktree_dir)
+
+        return spec.dir or worktree_dir / ".wtm" / "hooks"
 
     # --- arbitrary-key facility ----------------------------------------------
 
@@ -590,9 +633,19 @@ class Config:
         entity-local. A scalar/array/table kind clash for the head across scopes
         is a hard error, matching the read-side rule (one rule for every read
         surface).
+
+        The reserved ``hooks`` head is special-cased for its policy cells: a
+        ``hooks.strict`` / ``hooks.enabled`` path folds per-rung *inside* the
+        container (:meth:`fold_tiers` with *cell*), so the reported value is the
+        same most-local-wins ladder the firing engine resolves. Any other
+        ``hooks.*`` path folds nothing (the surface is refused at the write
+        gate; ``on`` cells belong to ``hook set/unset``).
         """
         parts = key_parts(key)
         head, rest = parts[0], parts[1:]
+        if head == "hooks" and len(rest) == 1 and rest[0] in HOOKS_POLICY_CELLS:
+            return self._fold_policy_cell(target, rest[0])
+
         rungs = target.inherit.get(head)
         tiered = (
             rungs if rungs is not None else [TierProbe(None, probe) for probe in target.probes]
@@ -601,6 +654,57 @@ class Config:
         effective = descend_value(effective, rest)
 
         return effective, chain
+
+    def _fold_policy_cell(
+        self, target: GenericTarget, cell: str
+    ) -> tuple[object | None, list[SourceRung]]:
+        """Fold a ``[hooks]`` policy cell over *target*'s fire-time ladder.
+
+        The read-side twin of the firing ladder: the entity's own probe cascade
+        (its registry entries are per-scope hook specs) plus the user/system
+        files' top-level tables -- the scopes whose own ``[hooks]`` every
+        operation folds. Each carrying rung's chain entry holds the whole
+        ``hooks`` table (so ``--origin`` descends to the cell per rung), while
+        the effective value is the most-local rung's cell -- no cross-tier
+        merging, matching :func:`merge_hooks`' tri-state rule. A kind clash for
+        the cell across scopes is a hard error.
+        """
+        chain: list[SourceRung] = []
+        prev: object = None
+        label = f"hooks.{cell}"
+        for probe in self._policy_ladder(target):
+            node = read_table(self._store, probe).get("hooks")
+            if not isinstance(node, dict) or cell not in node:
+                continue
+
+            value = node[cell]
+            check_kind(label, prev, value, probe.file)
+            chain.append(SourceRung(probe.scope, node, probe.file, None))
+            prev = value
+
+        if not chain:
+            return None, []
+
+        return chain[0].value.get(cell), chain
+
+    def _policy_ladder(self, target: GenericTarget) -> list[Probe]:
+        """*target*'s probes plus the user/system top-level rungs (deduplicated).
+
+        The global tier's own target already carries the two top-level probes;
+        entity targets do not, so they are appended here -- least-local last,
+        mirroring where the fire ladder reads its system/user scope specs.
+        """
+        ladder = list(target.probes)
+        seen = {(p.scope, p.file, p.table_path) for p in ladder}
+        for scope, path in (
+            (Scope.USER, user_config_path()),
+            (Scope.SYSTEM, system_config_path()),
+        ):
+            probe = Probe(scope, path, ())
+            if (probe.scope, probe.file, probe.table_path) not in seen:
+                ladder.append(probe)
+
+        return ladder
 
     def provenance(self, target: GenericTarget, key: Key) -> SourceRung | None:
         """Resolve where *key*'s effective value comes from over *target*'s cascade.

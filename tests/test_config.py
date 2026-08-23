@@ -269,6 +269,45 @@ def test_worktree_scope_hooks_accumulate_from_ancestor_registry(
     assert spec.on["leave"] == ["from-worktree"]  # the worktree-local file
 
 
+def test_hooks_policy_tri_state_folds_most_local_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The [hooks] strict/enabled policy cells parse as tri-state booleans and
+    # fold most-local-present-wins across an entity's own cascade (the same
+    # rule the firing engine applies across the fired scope ladder).
+    ws = tmp_path / "w"
+    proj = ws / "proj"
+    wt = proj / "worktrees" / "feat"
+    wt.mkdir(parents=True)
+    (proj / ".wtm").mkdir(parents=True)
+    (proj / ".wtm" / "config.toml").write_text(
+        "[worktrees.feat.hooks]\nstrict = true\nenabled = false\n"
+    )
+    (wt / ".wtm").mkdir(parents=True)
+    (wt / ".wtm" / "config.toml").write_text("[hooks]\nstrict = false\n")
+    body = f'[workspaces.a]\npath="{ws}"\n'
+    cfg = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    spec = cfg.scope_hook_spec(Scope.WORKTREE, proj, wt)
+    assert spec.strict is False  # the worktree-local value beats the project's
+    assert spec.enabled is False  # declared only at the project tier: fills through
+
+    # With both silent, the knobs stay unset (fire-time defaults apply).
+    empty = _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+    assert empty.scope_hook_spec(Scope.PROJECT, proj, wt).strict is None
+
+
+def test_hooks_policy_wrong_kind_is_a_hard_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-boolean in a known policy cell is refused at read time (the same
+    # hard-error treatment a kind clash gets); unknown sub-keys stay tolerated.
+    ws = tmp_path / "w"
+    ws.mkdir()
+    body = f'[workspaces.a]\npath="{ws}"\n[hooks]\nstrict="yes"\nstrick=true\n'
+    with pytest.raises(WtmError, match=r"\[hooks\] strict must be a boolean"):
+        _load(monkeypatch, tmp_path, body, cwd=tmp_path)
+
+
 # --- base branch resolution --------------------------------------------------
 
 
@@ -1325,8 +1364,14 @@ def test_validate_arbitrary_key_path_checks_head_only() -> None:
 
     validate_arbitrary_key_path("ci.runner.image")  # ok
     validate_arbitrary_key_path(("ci", "workspaces"))  # deep reserved segment ok
+    validate_arbitrary_key_path("hooks.strict")  # the [hooks] policy cells carve-out
+    validate_arbitrary_key_path(("hooks", "enabled"))  # tuple form, same rule
     with pytest.raises(WtmError, match="reserved key"):
         validate_arbitrary_key_path("hooks.on.x")
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key_path("hooks.bogus")  # only strict/enabled are writable
+    with pytest.raises(WtmError, match="reserved key"):
+        validate_arbitrary_key_path("hooks.strict.deep")  # exactly two segments
     with pytest.raises(WtmError, match="reserved key"):
         validate_arbitrary_key_path(("worktrees", "x"))
 

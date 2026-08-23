@@ -142,6 +142,7 @@ class Settings:
     """
 
     no_config: bool = False  # WTM_NO_CONFIG: empty reads, refused writes
+    no_hooks: bool = False  # WTM_NO_HOOKS: fire nothing (builtin or inline)
     workspace_selector: str | None = None  # WTM_WORKSPACE
     system_hooks_dir: Path | None = None  # WTM_SYSTEM_HOOKS_DIR; None -> default
     user_hooks_dir: Path | None = None  # WTM_USER_HOOKS_DIR; None -> XDG default
@@ -151,6 +152,7 @@ class Settings:
         """Resolve the settings from their environment variables."""
         return cls(
             no_config=_flag_env("WTM_NO_CONFIG"),
+            no_hooks=_flag_env("WTM_NO_HOOKS"),
             workspace_selector=os.environ.get("WTM_WORKSPACE") or None,
             system_hooks_dir=Path(os.environ.get("WTM_SYSTEM_HOOKS_DIR") or "/etc/wtm/hooks"),
             user_hooks_dir=Path(os.environ.get("WTM_USER_HOOKS_DIR") or _default_user_hooks_dir()),

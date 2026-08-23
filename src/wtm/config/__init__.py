@@ -50,12 +50,14 @@ from wtm.config.entities import (
 from wtm.config.generic import (
     InheritableDecl,
     parse_inheritable_element,
+    parse_policy_value,
     validate_arbitrary_key,
     validate_arbitrary_key_path,
     validate_inheritable_element,
 )
 from wtm.config.model import (
     FLOOR_TIERS,
+    HOOKS_POLICY_CELLS,
     INHERIT_FLOORS,
     INHERITABLE_KEYS,
     NON_INHERITABLE_KEYS,
@@ -103,6 +105,7 @@ __all__ = [
     "FLOOR_TIERS",
     "GenericTarget",
     "GlobalEntity",
+    "HOOKS_POLICY_CELLS",
     "HookSpec",
     "INHERITABLE_KEYS",
     "INHERIT_FLOORS",
@@ -133,6 +136,7 @@ __all__ = [
     "config_slice_json",
     "json_leaf_default",
     "parse_inheritable_element",
+    "parse_policy_value",
     "parse_toml_value",
     "parse_typed_value",
     "project_default_scope",

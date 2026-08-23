@@ -20,6 +20,7 @@ from wtm.cli.completions.config import (
 )
 from wtm.cli.locator import _locate_one, _locate_optional
 from wtm.config import (
+    HOOKS_POLICY_CELLS,
     TYPED_VALUE_FORMATS,
     ConfigSlice,
     DepthTier,
@@ -34,6 +35,7 @@ from wtm.config import (
     check_key_floor,
     json_leaf_default,
     parse_inheritable_element,
+    parse_policy_value,
     parse_toml_value,
     parse_typed_value,
     render_scalar,
@@ -42,6 +44,14 @@ from wtm.config import (
 from wtm.core import WtmError, current_dir
 from wtm.hooks import HookSpec, Scope
 from wtm.output import config_slice_json, log
+
+
+def _is_policy_key(key: str) -> bool:
+    """Whether *key* names a ``[hooks]`` policy cell (``hooks.strict``/``enabled``)."""
+    parts = key.split(".")
+
+    return len(parts) == 2 and parts[0] == "hooks" and parts[1] in HOOKS_POLICY_CELLS
+
 
 config_app = typer.Typer(
     help="Inspect config (show), manage the global default (base-branch), "
@@ -218,10 +228,14 @@ def _print_extra_table(
 
 
 def _print_scope_hooks(indent: str, spec: HookSpec, show_origin: bool, scope: str) -> None:
-    """Render a scope's inline hooks (``event = cmd``), skipping empty specs."""
+    """Render a scope's hook policy and inline hooks (``event = cmd``), skipping empties."""
+    origin = f"  [{scope}]" if show_origin else ""
+    if spec.strict is not None:
+        print(f"{indent}hook strict = {render_scalar(spec.strict)}{origin}")
+    if spec.enabled is not None:
+        print(f"{indent}hook enabled = {render_scalar(spec.enabled)}{origin}")
     for event, commands in sorted(spec.on.items()):
         for command in commands:
-            origin = f"  [{scope}]" if show_origin else ""
             print(f"{indent}hook {event} = {command}{origin}")
 
 
@@ -489,6 +503,11 @@ def config_set(
                 f"unknown --type '{value_type}' (choose one of {', '.join(TYPED_VALUE_FORMATS)})"
             )
         coerced = parse_typed_value(value, value_type)
+
+    # A [hooks] policy cell always lands as a native boolean, whatever form
+    # the raw VALUE took (bare "true"/"false", --toml, or --type bool).
+    if _is_policy_key(key):
+        coerced = parse_policy_value(coerced)
 
     config = ctx.obj.config
     if global_scope:

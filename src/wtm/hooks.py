@@ -13,10 +13,23 @@ the builtins. Builtin files are discovered across five scopes::
     project:   <project>/.git/hooks/wtm-<event>              and  .../wtm-<event>.d/*
     worktree:  <worktree>/.wtm/hooks/wtm-<event>             and  .../wtm-<event>.d/*
 
-(system/user dirs are overridable via env or config; each scope's dir may be
-overridden by its config ``[hooks] dir``, and ``builtins = false`` disables that
-scope's file discovery.) Inline hooks come from the matching config scope's
-``[hooks.on]`` / entity ``hooks.on`` maps and accumulate across scopes.
+(system/user dirs are overridable via env or config; every scope's dir may be
+overridden by its config ``[hooks] dir`` -- resolved through the single
+:meth:`Config.hooks_dir <wtm.config.Config.hooks_dir>` authority, which both
+firing and management consult.) Inline hooks come from the matching config
+scope's ``[hooks.on]`` / entity ``hooks.on`` maps and accumulate across scopes.
+
+Fire-time policy resolves through config too. Two tri-state booleans live in
+each scope's ``[hooks]`` table and fold most-local-present-wins down the fired
+scope ladder (one effective value per operation):
+
+- ``[hooks] enabled = false`` -- fire nothing for the operation.
+- ``[hooks] strict = true`` -- hook failures are fatal without ``--strict``.
+
+The precedence tower is: ``WTM_NO_HOOKS`` (env, master off) > the CLI
+``--strict`` flag (force-on only) > the config ladder > defaults
+(enabled, non-strict). Both knobs are fire-time only -- ``hook install`` /
+``delete`` / ``list`` always operate.
 
 Setup events (pre-create, post-create, install, enter, pre-rename, post-rename)
 run most-general-first: system, then user, then workspace, then project, then
@@ -25,10 +38,9 @@ most-specific-first: worktree, then project, then workspace, then user, then
 system.
 Within a scope, builtin files run first (a bare ``wtm-<event>`` file before its
 ``wtm-<event>.d/`` directory, entries sorted lexically), then inline commands in
-declared order. Non-zero hook exits are logged but non-fatal unless strict is
-set; under strict a present-but-non-executable file is also fatal — so a failing
-``pre-*`` hook aborts its operation only under strict. ``WTM_NO_HOOKS`` disables
-all firing.
+declared order. Non-zero hook exits are logged but non-fatal unless the
+operation is strict; under strict a present-but-non-executable file is also
+fatal — so a failing ``pre-*`` hook aborts its operation only when strict.
 
 The pre-delete event fires *before* the worktree is removed, so per-worktree
 teardown hooks still exist when they run; its cwd is ``WTM_WORKTREE_DIR``. The
@@ -73,6 +85,7 @@ __all__ = [
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,9 +140,75 @@ _PROJECT_SCOPES = (Scope.SYSTEM, Scope.USER, Scope.WORKSPACE, Scope.PROJECT)
 # --- firing engine -----------------------------------------------------------
 
 
-def _env_flag(name: str) -> bool:
-    """Return whether an env var is set to a truthy value."""
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
+def _ladder_policy(specs: list[HookSpec]) -> tuple[bool, bool]:
+    """Fold (enabled, strict) most-local-present-wins across an operation's specs.
+
+    *specs* are ordered most-local-first; the first present declaration of each
+    knob wins and a less-local value fills a gap -- the same tri-state rule
+    :func:`wtm.config.model.merge_hooks` applies, applied here across the fired
+    scope ladder. Unset knobs fall back to their defaults: enabled, non-strict.
+    """
+    enabled: bool | None = None
+    strict: bool | None = None
+    for spec in specs:
+        if enabled is None:
+            enabled = spec.enabled
+        if strict is None:
+            strict = spec.strict
+        if enabled is not None and strict is not None:
+            break
+
+    return enabled is not False, bool(strict)
+
+
+def _fire(
+    *,
+    event: str,
+    applicable: tuple[Scope, ...],
+    config: Config,
+    env: dict[str, str],
+    hcwd: Path,
+    arg1: Path,
+    strict: bool,
+    specs: dict[Scope, HookSpec],
+    dir_of: Callable[[Scope], Path],
+) -> None:
+    """The one fire loop behind every event tier.
+
+    Resolves the operation's policy from the ladder (see :func:`_ladder_policy`),
+    then fires each applicable scope in the event's natural order: builtin files
+    (when the scope's spec enables them) under its discovery dir, then inline
+    commands. ``WTM_NO_HOOKS`` (via ``config.no_hooks``) is the master off
+    switch; ``[hooks] enabled = false`` anywhere on the ladder kills the whole
+    operation; ``strict`` (the CLI force-on) or a ladder-resolved ``[hooks]
+    strict = true`` makes failures fatal.
+
+    :param applicable: the scopes this event tier may fire at all.
+    :param specs: per-scope :class:`HookSpec`, resolved by the caller (which
+        knows the target's dirs).
+    :param dir_of: scope -> builtin discovery dir (delegates to
+        :meth:`Config.hooks_dir <wtm.config.Config.hooks_dir>`).
+    """
+    # The env master switch wins over everything, config included.
+    if config.no_hooks:
+        return
+
+    order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
+    selected = tuple(s for s in order if s in applicable)
+
+    # One policy answer per operation, folded most-local-first.
+    enabled, config_strict = _ladder_policy([specs[s] for s in reversed(selected)])
+    if not enabled:
+        return
+
+    fatal = strict or config_strict
+    for scope in selected:
+        spec = specs[scope]
+        if spec.run_builtins:
+            base = dir_of(scope) / f"wtm-{event}"
+            _run_hook_source(base, hcwd, arg1, env, strict=fatal)
+        for command in spec.on.get(event, []):
+            _run_inline_hook(command, hcwd, arg1, env, strict=fatal)
 
 
 def run_hooks(
@@ -142,12 +221,13 @@ def run_hooks(
     extra_env: dict[str, str] | None = None,
     hcwd: Path | None = None,
 ) -> None:
-    """Fire hooks for *event* using *context*, honouring ordering and strict.
+    """Fire hooks for *event* using *context*, honouring ordering and policy.
 
     :param event: one of the :data:`EVENTS`.
     :param context: derived worktree context supplying the env contract.
-    :param config: resolved configuration (for the system/user/workspace hooks dirs).
-    :param strict: when true, hook failures and non-executable hooks are fatal.
+    :param config: resolved configuration (hook dirs, specs, policy).
+    :param strict: CLI ``--strict`` -- forces hook failures to be fatal on top
+        of whatever the config ladder resolves.
     :param scopes: restrict firing to these scopes (default: all five, in the
         event's natural order).
     :param extra_env: extra environment variables layered on top of the standard
@@ -158,10 +238,6 @@ def run_hooks(
     """
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = order if scopes is None else tuple(s for s in order if s in scopes)
-
-    # WTM_NO_HOOKS is a global escape hatch: fire nothing (builtin or inline).
-    if _env_flag("WTM_NO_HOOKS"):
-        return
 
     # Default to the worktree dir; callers whose worktree dir is absent override.
     if hcwd is None:
@@ -183,13 +259,23 @@ def run_hooks(
     if extra_env:
         env.update(extra_env)
 
-    for scope in selected:
-        spec = config.scope_hook_spec(scope, context.project_dir, context.dir)
-        if spec.run_builtins:
-            base = _firing_dir(scope, context, config, spec) / f"wtm-{event}"
-            _run_hook_source(base, hcwd, context.dir, env, strict=strict)
-        for command in spec.on.get(event, []):
-            _run_inline_hook(command, hcwd, context.dir, env, strict=strict)
+    project_dir = context.project_dir
+    worktree_dir = context.dir
+    specs = {s: config.scope_hook_spec(s, project_dir, worktree_dir) for s in selected}
+
+    _fire(
+        event=event,
+        applicable=selected,
+        config=config,
+        env=env,
+        hcwd=hcwd,
+        arg1=worktree_dir,
+        strict=strict,
+        specs=specs,
+        dir_of=lambda scope: config.hooks_dir(
+            scope, ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ),
+    )
 
 
 def run_workspace_hooks(
@@ -210,9 +296,6 @@ def run_workspace_hooks(
     hooks dir; inline hooks come from the scope's ``[hooks.on]`` (system/user) or
     the workspace entry's ``hooks.on`` (workspace).
     """
-    if _env_flag("WTM_NO_HOOKS"):
-        return
-
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = tuple(s for s in order if s in _WORKSPACE_SCOPES)
 
@@ -226,13 +309,24 @@ def run_workspace_hooks(
     env["WTM_WORKSPACE"] = name
     env["WTM_WORKSPACE_DIR"] = str(path)
 
-    for scope in selected:
-        spec = _workspace_scope_spec(scope, config, path)
-        if spec.run_builtins:
-            base = _workspace_firing_dir(scope, config, spec, path) / f"wtm-{event}"
-            _run_hook_source(base, path, path, env, strict=strict)
-        for command in spec.on.get(event, []):
-            _run_inline_hook(command, path, path, env, strict=strict)
+    ws = config.workspace_of(path)
+    specs = {
+        Scope.SYSTEM: config.system_scope_hooks,
+        Scope.USER: config.user_scope_hooks,
+        Scope.WORKSPACE: ws.hooks if ws is not None else HookSpec(),
+    }
+
+    _fire(
+        event=event,
+        applicable=selected,
+        config=config,
+        env=env,
+        hcwd=path,
+        arg1=path,
+        strict=strict,
+        specs=specs,
+        dir_of=lambda scope: config.hooks_dir(scope, ws=ws),
+    )
 
 
 def run_project_hooks(
@@ -253,9 +347,6 @@ def run_project_hooks(
     ``<project>/.git/hooks`` and the workspace scope resolves against the
     workspace that contains the project (not necessarily the active one).
     """
-    if _env_flag("WTM_NO_HOOKS"):
-        return
-
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = tuple(s for s in order if s in _PROJECT_SCOPES)
 
@@ -274,111 +365,20 @@ def run_project_hooks(
     env["WTM_WORKSPACE"] = ws.name if ws is not None else ""
     env["WTM_WORKSPACE_DIR"] = str(ws.path if ws is not None else project_dir.parent)
 
-    for scope in selected:
-        spec = _project_scope_spec(scope, config, project_dir)
-        if spec.run_builtins:
-            base = _project_firing_dir(scope, config, spec, project_dir) / f"wtm-{event}"
-            _run_hook_source(base, project_dir, project_dir, env, strict=strict)
-        for command in spec.on.get(event, []):
-            _run_inline_hook(command, project_dir, project_dir, env, strict=strict)
+    worktrees_sentinel = project_dir / "worktrees"
+    specs = {s: config.scope_hook_spec(s, project_dir, worktrees_sentinel) for s in selected}
 
-
-def _project_scope_spec(scope: Scope, config: Config, project_dir: Path) -> HookSpec:
-    """The inline :class:`HookSpec` for a project-lifecycle fire at *scope*."""
-    return config.scope_hook_spec(scope, project_dir, project_dir / "worktrees")
-
-
-def _project_firing_dir(scope: Scope, config: Config, spec: HookSpec, project_dir: Path) -> Path:
-    """The builtin discovery dir for a project-lifecycle fire at *scope*."""
-    if scope is Scope.SYSTEM:
-        return config.system_hooks_dir
-    if scope is Scope.USER:
-        return config.user_hooks_dir
-    if scope is Scope.WORKSPACE:
-        if spec.dir is not None:
-            return spec.dir
-        ws = config.workspace_of(project_dir)
-
-        return (
-            ws.path / ".wtm" / "hooks" if ws is not None else project_dir.parent / ".wtm" / "hooks"
-        )
-
-    return spec.dir or project_dir / ".git" / "hooks"
-
-
-def _workspace_scope_spec(scope: Scope, config: Config, path: Path) -> HookSpec:
-    """The inline :class:`HookSpec` for a workspace-lifecycle fire at *scope*."""
-    if scope is Scope.SYSTEM:
-        return config.system_scope_hooks
-    if scope is Scope.USER:
-        return config.user_scope_hooks
-    ws = config.workspace_of(path)
-
-    return ws.hooks if ws is not None else HookSpec()
-
-
-def _workspace_firing_dir(scope: Scope, config: Config, spec: HookSpec, path: Path) -> Path:
-    """The builtin discovery dir for a workspace-lifecycle fire at *scope*."""
-    if scope is Scope.SYSTEM:
-        return config.system_hooks_dir
-    if scope is Scope.USER:
-        return config.user_hooks_dir
-
-    return spec.dir or path / ".wtm" / "hooks"
-
-
-def _firing_dir(scope: Scope, context: Context, config: Config, spec: HookSpec) -> Path:
-    """The builtin ``wtm-<event>`` discovery directory for *scope* when firing.
-
-    Honours a scope's ``hooks.dir`` override, then falls back to the scope
-    default. The workspace scope resolves against the workspace that *contains*
-    this context's project (not necessarily the active one), so hooks fire
-    correctly even across workspaces.
-    """
-    if scope is Scope.SYSTEM:
-        return config.system_hooks_dir
-    if scope is Scope.USER:
-        return config.user_hooks_dir
-    if scope is Scope.WORKSPACE:
-        if spec.dir is not None:
-            return spec.dir
-        ws = config.workspace_of(context.project_dir)
-
-        return (
-            ws.path / ".wtm" / "hooks"
-            if ws is not None
-            else (context.project_dir.parent / ".wtm" / "hooks")
-        )
-    if scope is Scope.PROJECT:
-        return spec.dir or context.git_common_dir / "hooks"
-
-    return spec.dir or context.dir / ".wtm" / "hooks"
-
-
-def _scope_base(scope: Scope, context: Context, config: Config, event: str) -> Path:
-    """Return the ``wtm-<event>`` base path for *scope* (its ``.d`` is base + '.d')."""
-    return _scope_hooks_dir(scope, context, config) / f"wtm-{event}"
-
-
-def _scope_hooks_dir(scope: Scope, context: Context | None, config: Config) -> Path:
-    """Return the hooks directory for *scope*.
-
-    Only the system, user, and workspace scopes work without a *context*; the
-    project and worktree scopes derive their directories from the worktree's git
-    layout.
-    """
-    if scope is Scope.SYSTEM:
-        return config.system_hooks_dir
-    if scope is Scope.USER:
-        return config.user_hooks_dir
-    if scope is Scope.WORKSPACE:
-        return config.workspace_hooks_dir
-    if context is None:
-        raise WtmError(f"scope '{scope.value}' needs a worktree/project target")
-    if scope is Scope.PROJECT:
-        return context.git_common_dir / "hooks"
-
-    return context.dir / ".wtm" / "hooks"
+    _fire(
+        event=event,
+        applicable=selected,
+        config=config,
+        env=env,
+        hcwd=project_dir,
+        arg1=project_dir,
+        strict=strict,
+        specs=specs,
+        dir_of=lambda scope: config.hooks_dir(scope, ws=ws, project_dir=project_dir),
+    )
 
 
 def _run_hook_source(
@@ -621,16 +621,17 @@ class Hooks:
     def _scope_dir(self, scope: Scope, args: list[str]) -> Path:
         """Resolve the hooks directory for a write operation in *scope*.
 
-        System, user, and workspace need no target; project resolves to
+        Delegates to the :meth:`Config.hooks_dir <wtm.config.Config.hooks_dir>`
+        authority (so a ``[hooks] dir`` override is honored exactly as when
+        firing). System, user, and workspace need no target -- workspace
+        resolving against the *active* workspace; project resolves to
         ``<project>/.git/hooks`` without requiring a worktree to exist; worktree
         needs a live worktree.
         """
-        if scope is Scope.SYSTEM:
-            return self.config.system_hooks_dir
-        if scope is Scope.USER:
-            return self.config.user_hooks_dir
+        if scope is Scope.SYSTEM or scope is Scope.USER:
+            return self.config.hooks_dir(scope)
         if scope is Scope.WORKSPACE:
-            return self.config.workspace_hooks_dir
+            return self.config.hooks_dir(scope, ws=self.config.active_workspace)
         if scope is Scope.PROJECT:
             # Hook target grammar is [[WORKSPACE] PROJECT] NAME: the trailing
             # NAME is irrelevant for a project-scope dir, so read the leading
@@ -646,11 +647,13 @@ class Hooks:
             if not git_dir.is_dir():
                 raise WtmError(f"project git dir not found: {git_dir}")
 
-            return git_dir / "hooks"
+            return self.config.hooks_dir(scope, project_dir=project_dir)
 
         context = derive_context(resolve_target(self.config, TargetMode.WORKTREE, args))
 
-        return _scope_hooks_dir(scope, context, self.config)
+        return self.config.hooks_dir(
+            scope, project_dir=context.project_dir, worktree_dir=context.dir
+        )
 
 
 # --- management helpers ------------------------------------------------------

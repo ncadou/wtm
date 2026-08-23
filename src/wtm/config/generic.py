@@ -11,6 +11,7 @@ from __future__ import annotations
 __all__ = [
     "InheritableDecl",
     "parse_inheritable_element",
+    "parse_policy_value",
     "validate_arbitrary_key",
     "validate_arbitrary_key_path",
     "validate_inheritable_element",
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from wtm.config.model import (
     FLOOR_TIERS,
+    HOOKS_POLICY_CELLS,
     NON_INHERITABLE_KEYS,
     RESERVED_KEYS,
     TYPED_INHERITABLE_KEYS,
@@ -55,9 +57,42 @@ def validate_arbitrary_key_path(key: str | tuple[str, ...]) -> None:
     (the store treats a dotted string as a single literal part, but a user-typed
     key uses dots as separators). The bare-key case delegates to
     :func:`validate_arbitrary_key`.
+
+    The one carve-out: the ``[hooks]`` policy cells (``hooks.strict`` /
+    ``hooks.enabled``, exactly two segments) are writable through this facility
+    -- they have no dedicated verb of their own. Every other ``hooks.*`` path
+    stays refused (``hooks.on.*`` belongs to ``hook set/unset``; the remaining
+    cells are hand-edited).
     """
-    head = key.split(".", 1)[0] if isinstance(key, str) else key[0]
+    parts = key.split(".") if isinstance(key, str) else list(key)
+    head = parts[0]
+    if head == "hooks":
+        if len(parts) == 2 and parts[1] in HOOKS_POLICY_CELLS:
+            return
+
+        raise ReservedKeyError(
+            "'hooks' is a reserved key: hooks.on.* belongs to "
+            "'wtm hook set/unset'; only hooks.strict / hooks.enabled are writable here"
+        )
+
     validate_arbitrary_key(head)
+
+
+def parse_policy_value(raw: object) -> bool:
+    """Coerce a written value for a ``[hooks]`` policy cell to a boolean.
+
+    Accepts a native bool or the strings ``"true"``/``"false"`` (the default
+    string form of ``config set``); anything else is refused, so a policy cell
+    never lands as a non-boolean kind (which :func:`parse_hooks` would reject
+    at read time).
+    """
+    if isinstance(raw, bool):
+        return raw
+
+    if isinstance(raw, str) and raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+
+    raise WtmError("hooks.strict / hooks.enabled take a boolean (true | false)")
 
 
 def validate_inheritable_element(key: str) -> None:

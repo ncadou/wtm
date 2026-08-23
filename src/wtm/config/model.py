@@ -34,13 +34,18 @@ from pathlib import Path
 
 from wtm.config.addressing import Scope
 from wtm.core import expand_path
-from wtm.exceptions import KindConflictError
+from wtm.exceptions import KindConflictError, WtmError
 
 RESERVED_KEYS = frozenset(
     {"hooks", "projects", "worktrees", "workspaces", "path", "default-workspace", "inheritable"}
 )
 # Keys whose tables are pure containers of named children.
 CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
+# The policy cells inside the reserved ``[hooks]`` table that the arbitrary-key
+# facility may address as dotted paths (``hooks.strict`` / ``hooks.enabled``).
+# Every other cell stays owned by its dedicated surface (``hooks.on.*`` by
+# ``hook set/unset``, ``builtins``/``dir`` by hand-editing).
+HOOKS_POLICY_CELLS = frozenset({"strict", "enabled"})
 # Keys whose tables are rendered as super-tables so a fresh nested write
 # produces dotted headers, no empty parent.
 SUPER_TABLE_KEYS = frozenset({"workspaces", "projects", "worktrees"})
@@ -86,11 +91,19 @@ class HookSpec:
         this scope. Carried as tri-state so a more-specific declaration site can
         override a less-specific one.
     :param dir: an override for this scope's builtin hook-discovery directory.
+    :param strict: fire-time policy -- hook failures in this scope are fatal
+        (``None`` unset, ``True`` fatal). Resolved per operation by folding the
+        fired scopes' specs most-local-first (see :func:`merge_hooks`).
+    :param enabled: fire-time policy -- when ``False``, nothing fires for the
+        whole operation. Resolved like *strict*: most-local present declaration
+        wins down the fired ladder.
     """
 
     on: dict[str, list[str]] = field(default_factory=dict)
     builtins: bool | None = None
     dir: Path | None = None
+    strict: bool | None = None
+    enabled: bool | None = None
 
     @property
     def run_builtins(self) -> bool:
@@ -249,7 +262,12 @@ class SourceRung:
 
 
 def parse_hooks(table: dict | None) -> HookSpec:
-    """Parse a ``[hooks]``-shaped table into a :class:`HookSpec`."""
+    """Parse a ``[hooks]``-shaped table into a :class:`HookSpec`.
+
+    Unknown sub-keys are tolerated (forward compatibility); the known policy
+    booleans (``strict`` / ``enabled``) must be TOML booleans -- any other kind
+    is a hard error, matching the kind-clash rule everywhere else.
+    """
     if not table:
         return HookSpec()
 
@@ -262,7 +280,17 @@ def parse_hooks(table: dict | None) -> HookSpec:
         on=on,
         builtins=table.get("builtins"),
         dir=expand_path(dir_value) if dir_value else None,
+        strict=_policy_bool(table.get("strict"), "strict"),
+        enabled=_policy_bool(table.get("enabled"), "enabled"),
     )
+
+
+def _policy_bool(value: object, name: str) -> bool | None:
+    """Coerce a ``[hooks]`` policy cell to ``bool | None``, refusing other kinds."""
+    if value is None or isinstance(value, bool):
+        return value
+
+    raise WtmError(f"[hooks] {name} must be a boolean, got {kind(value)}")
 
 
 def annotation_from_payload(payload: dict[str, object], hooks: HookSpec) -> ProjectAnnotation:
@@ -283,7 +311,14 @@ def str_or_none(value: object) -> str | None:
 
 
 def merge_hooks(a: HookSpec, b: HookSpec) -> HookSpec:
-    """Merge two same-scope hook specs: accumulate commands, more-specific wins."""
+    """Merge two same-scope hook specs: accumulate commands, more-specific wins.
+
+    ``on`` accumulates (builtins-first across scopes); every other cell is
+    tri-state -- the more-specific *present* value wins, a less-local value
+    fills a gap. This is also the fire-time ladder rule: folding an operation's
+    specs most-local-first with :func:`merge_hooks` resolves one effective
+    policy per knob.
+    """
     on: dict[str, list[str]] = {event: list(cmds) for event, cmds in a.on.items()}
     for event, cmds in b.on.items():
         on.setdefault(event, []).extend(cmds)
@@ -292,6 +327,8 @@ def merge_hooks(a: HookSpec, b: HookSpec) -> HookSpec:
         on=on,
         builtins=b.builtins if b.builtins is not None else a.builtins,
         dir=b.dir or a.dir,
+        strict=b.strict if b.strict is not None else a.strict,
+        enabled=b.enabled if b.enabled is not None else a.enabled,
     )
 
 

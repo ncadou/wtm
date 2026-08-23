@@ -59,14 +59,45 @@ Builtin file discovery per scope (a bare `wtm-<event>` file plus a
 - **project**   — `<project>/.git/hooks` (override: project config `[project.hooks] dir`)
 - **worktree**  — `<worktree>/.wtm/hooks` (override: worktree config `[hooks] dir`)
 
+Every `[hooks] dir` override applies to firing *and* management alike —
+`hook install` / `delete` / `list` resolve through the same directory authority,
+so what you install is where firing looks.
+
 Inline hooks are declared as an event→command(s) map in the matching config
 scope (see [configuration.md](configuration.md)): a scope's own `[hooks.on]`, a
 workspace entry's `[workspaces.NAME.hooks.on]`, a project's `[project.hooks.on]`
 / `[workspaces.NAME.projects.PNAME.hooks.on]`. A command may be a string or a
 list of strings; each runs via `/bin/sh -c` with the same `$1` + `WTM_*`
-contract and `--strict` semantics as file hooks. Set `builtins = false` in a
+contract and strict semantics as file hooks. Set `builtins = false` in a
 scope's `[hooks]` table to disable *that scope's* builtin file discovery (inline
 hooks still fire).
+
+## Fire-time policy
+
+Two tri-state booleans live in any scope's `[hooks]` table and resolve through
+config like everything else — folded most-local-present-wins down the fired
+scope ladder, so one effective answer per operation (a less-local declaration
+fills a gap; the most-local one wins):
+
+```toml
+[hooks]
+enabled = false   # fire nothing for operations under this entity
+strict = true     # hook failures are fatal without --strict
+```
+
+The precedence tower, high to low:
+
+1. `WTM_NO_HOOKS` (env) — master off switch, wins over everything;
+2. the CLI `--strict` flag — force-on only (it can never un-strict);
+3. the config ladder (`[hooks] enabled` / `[hooks] strict`);
+4. defaults — enabled, non-strict.
+
+Both knobs are **fire-time only**: `hook install`, `hook delete`, and
+`hook list` always operate. Write them with the arbitrary-key facility
+(`wtm config set hooks.strict true [-s SCOPE]`, `wtm config unset …`) —
+`config get hooks.strict` then reports exactly what firing would resolve.
+Unknown sub-keys under `[hooks]` are tolerated; the known booleans must be
+TOML booleans.
 
 ## Firing order
 
@@ -120,8 +151,10 @@ pre-rename path and branch; equal to the new values when unchanged), so a hook
 can reconcile path-keyed state, e.g.
 `sesh rename "$WTM_OLD_DIR" "$WTM_WORKTREE_DIR"`.
 
-Failures are logged but non-fatal unless `--strict` is passed (under which a
-failing `pre-*` hook aborts its operation). `wtm` does not track or ignore
+Failures are logged but non-fatal unless the operation is strict — the CLI
+`--strict` flag, or a ladder-resolved `[hooks] strict = true` (see
+[Fire-time policy](#fire-time-policy)) — under which a failing `pre-*` hook
+aborts its operation. `wtm` does not track or ignore
 `$WTM_WORKTREE_DIR/.wtm/` — whether per-worktree hooks are committed to the
 branch is left to you.
 
@@ -143,7 +176,8 @@ list    [TARGET] [--types]                                 list installed hooks,
   source instead. Existing destinations require `--force`. `--scope system`,
   `--scope user`, and `--scope workspace` need no target.
 - `wtm hook run [TARGET] HOOK [--scope …] [--strict]` runs an event's hooks (all
-  scopes unless `--scope` restricts it). `HOOK` (the event) is the last
+  scopes unless `--scope` restricts it). `--strict` forces failures to be fatal
+  on top of the config ladder. `HOOK` (the event) is the last
   positional; everything before it is a `TARGET`, which — like `hook list`'s — is
   a **locator** pinned to the worktree tier.
 - `wtm hook delete [TARGET] HOOK [--scope …] [-r]` removes a hook. `HOOK` is the

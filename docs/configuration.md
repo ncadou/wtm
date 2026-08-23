@@ -109,7 +109,11 @@ top-level meaning. Only the **head** segment of a dotted path is checked against
 the reserved names (`hooks` / `projects` / `worktrees` / `workspaces` / `path` /
 `default-workspace` / `inheritable`) — deeper segments are harmless cells, so
 `ci.workspaces` is allowed (a cell named `workspaces` inside your `ci` section),
-but `hooks.on.x` is refused.
+but `hooks.on.x` is refused. The one carve-out: the hook policy cells
+`hooks.strict` and `hooks.enabled` (exactly two segments, boolean values) are
+writable here — they have no dedicated verb (see
+[hooks.md](hooks.md#fire-time-policy)); every other `hooks.*` path stays
+reserved (`hooks.on.*` belongs to `hook set/unset`).
 
 A section **deep-merges** across tiers — per cell, most-local wins. If a project
 sets `[ci] registry` and the workspace sets `[ci] runner`, `config get ci` yields
@@ -357,6 +361,8 @@ path = "$HOME/oss"
 
 [hooks]                             # this file's own (user) scope
 builtins = false                    # disable user-scope builtin file discovery
+strict = true                       # hook failures fatal everywhere (ladder-resolved)
+enabled = false                     # …or fire nothing at all (wins over strict)
 [hooks.on]
 leave = "echo bye"
 ```
@@ -371,7 +377,7 @@ scopes); per-project scalars are deliberately *not* env-settable.
 - `WTM_SYSTEM_CONFIG` — system config file path (default `/etc/wtm/config.toml`; point it at an absent path to skip system scope)
 - `WTM_NO_CONFIG` — ignore all config files for reads, and refuse all config writes (env + CLI + defaults only)
 - `WTM_SYSTEM_HOOKS_DIR` / `WTM_USER_HOOKS_DIR` — builtin hooks dir for that scope
-- `WTM_NO_HOOKS` — disable all hook firing
+- `WTM_NO_HOOKS` — disable all hook firing (master off switch, above the `[hooks] enabled`/`strict` config ladder and `--strict`)
 - `XDG_CONFIG_HOME` — user config + user hooks location
 - `WTM_SHELL_FILE` — the shell-wrapper directive channel (see
   [shell-integration.md](shell-integration.md))

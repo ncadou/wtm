@@ -145,6 +145,15 @@ new-branch base ref only (`--base/--off` > configured > `origin/HEAD` > `HEAD`
 An executable (builtin file) or `sh -c` command (inline config) fired on a
 lifecycle event, discovered/declared across scopes.
 
+**Fire-time policy**:
+The per-operation hook knobs `enabled` / `strict`, tri-state booleans in any
+scope's `[hooks]` table. They fold most-local-present-wins down the fired scope
+ladder (one answer per operation, less-local filling gaps), under the tower
+`WTM_NO_HOOKS` > CLI `--strict` > config ladder > defaults. Fire-time only:
+`hook install`/`delete`/`list` always operate. Written through the arbitrary-key
+facility as `hooks.strict`/`hooks.enabled`; `config get hooks.strict` reports
+exactly what firing would resolve.
+
 **Builtin hook / inline hook**:
 A **builtin** hook is a discovered `wtm-<event>` file (or `.d/*` entry); an
 **inline** hook is a command declared in config (`[...hooks.on] event = "..."`).
@@ -328,7 +337,12 @@ it lands in the entity dataclass's `extra` dict (the arbitrary-key payload);
 `config show` prints every arbitrary key along the shown branch. A KEY may be a
 **dotted path** (`ci.runner.image`) naming a cell inside a **section** (a TOML
 table); only the path's head segment is reserved-checked (deeper segments are
-harmless cells), and `validate_arbitrary_key_path` is the dotted-aware form. A
+harmless cells), and `validate_arbitrary_key_path` is the dotted-aware form. The
+one carve-out: the hook **fire-time policy** cells (`hooks.strict` /
+`hooks.enabled`, exactly two segments, boolean-valued) are writable here -- every
+other `hooks.*` path stays refused (`hooks.on.*` belongs to `hook set/unset`),
+and the read folds per-rung *inside* the container so `config get hooks.strict`
+answers what firing would resolve. A
 section **deep-merges** across tiers -- per cell, most-local wins, recursively
 for nested tables -- on both the locality and (for an inheritable section) the
 inheritance axes; a scalar-vs-table clash at any sub-path is a hard error. The
