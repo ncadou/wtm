@@ -1,0 +1,120 @@
+"""The single config authority for wtm: reads, writes, scoping, and discovery.
+
+``wtm`` manages git worktrees over one or more named **workspaces** (each a
+projects root ``<path>/<project>/.git`` + ``worktrees/``). Workspaces are
+*declared* in config; individual projects are *discovered* on disk and only
+*annotated* by config.
+
+Config lives in up to five scopes, most-general to most-specific::
+
+    system:    $WTM_SYSTEM_CONFIG or /etc/wtm/config.toml
+    user:      $WTM_CONFIG or $XDG_CONFIG_HOME/wtm/config.toml
+    workspace: <workspace>/.wtm/config.toml
+    project:   <project>/.wtm/config.toml
+    worktree:  <worktree>/.wtm/config.toml
+
+This package is the *only* place that reads or writes ``.wtm`` config -- no
+other part of the app touches ``tomlkit`` or builds a ``.wtm/config.toml``
+path. It offers three tiers, all on :class:`Config`:
+
+* an **arbitrary-key facility** -- :meth:`Config.get_value` /
+  :meth:`Config.set_value` / :meth:`Config.unset_value` -- addressing any
+  scope through a :class:`ConfigAddress` and a key. This is the substrate
+  every other tier is built on;
+* a **typed read view** (the dataclasses in :mod:`wtm.config.model`) resolving
+  scalars most-local-first via locality merges over the value facility;
+* a **structural write tier** -- the named registry mutations that own
+  cross-key invariants.
+
+Writes name their target scope explicitly; config-file scalars resolve
+most-local-first ``worktree > project > workspace > user > system > default``.
+Inline hooks *accumulate* across scopes on top of the builtin file hooks.
+``WTM_NO_CONFIG`` suppresses all config files (reads) and makes any write a
+hard error; it is the test/CI isolation knob.
+
+Import from this package root only: the submodules are internal layout, not
+API. The public contract is whatever this ``__init__`` re-exports.
+"""
+
+from __future__ import annotations
+
+from wtm.config.addressing import ConfigAddress, DepthTier, Key, Scope, Settings
+from wtm.config.config import Config, resolve_project_dir
+from wtm.config.entities import (
+    EntityHandle,
+    GlobalEntity,
+    ProjectEntity,
+    WorkspaceEntity,
+    WorktreeEntity,
+)
+from wtm.config.generic import (
+    validate_arbitrary_key,
+    validate_arbitrary_key_path,
+    validate_inheritable_element,
+)
+from wtm.config.model import (
+    INHERITABLE_KEYS,
+    NON_INHERITABLE_KEYS,
+    RESERVED_KEYS,
+    ConfigSlice,
+    HookSpec,
+    ProjectAnnotation,
+    ResolvedProject,
+    ResolvedWorkspace,
+    ResolvedWorktree,
+    SliceTarget,
+    SourceRung,
+    Workspace,
+)
+from wtm.config.slice import config_slice_json
+from wtm.config.targets import GenericTarget
+from wtm.config.writes import (
+    PROJECT_WRITE_SCOPES,
+    WORKSPACE_WRITE_SCOPES,
+    WORKTREE_WRITE_SCOPES,
+    check_write_scope,
+    project_default_scope,
+    scope_list,
+    workspace_default_scope,
+    worktree_default_scope,
+)
+
+__all__ = [
+    "Config",
+    "ConfigAddress",
+    "ConfigSlice",
+    "DepthTier",
+    "EntityHandle",
+    "GenericTarget",
+    "GlobalEntity",
+    "HookSpec",
+    "INHERITABLE_KEYS",
+    "Key",
+    "NON_INHERITABLE_KEYS",
+    "PROJECT_WRITE_SCOPES",
+    "ProjectAnnotation",
+    "ProjectEntity",
+    "RESERVED_KEYS",
+    "ResolvedProject",
+    "ResolvedWorkspace",
+    "ResolvedWorktree",
+    "Scope",
+    "Settings",
+    "SliceTarget",
+    "SourceRung",
+    "WORKSPACE_WRITE_SCOPES",
+    "WORKTREE_WRITE_SCOPES",
+    "Workspace",
+    "WorkspaceEntity",
+    "WorktreeEntity",
+    "check_write_scope",
+    "config_slice_json",
+    "project_default_scope",
+    "resolve_project_dir",
+    "scope_list",
+    "validate_arbitrary_key",
+    "validate_arbitrary_key_path",
+    "validate_inheritable_element",
+    "workspace_default_scope",
+    "worktree_default_scope",
+]

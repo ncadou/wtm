@@ -30,11 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wtm import git
-
-
-class WtmError(Exception):
-    """A fatal, user-facing error. Carries the message printed as ``wtm: ...``."""
-
+from wtm.exceptions import WtmError
 
 # --- path helpers ------------------------------------------------------------
 

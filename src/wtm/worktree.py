@@ -24,7 +24,15 @@ from enum import Enum
 from pathlib import Path
 
 from wtm import git
-from wtm.config import Config, ConfigAddress, Scope, Workspace, resolve_project_dir
+from wtm.config import (
+    WORKTREE_WRITE_SCOPES,
+    Config,
+    ConfigAddress,
+    Scope,
+    check_write_scope,
+    resolve_project_dir,
+    worktree_default_scope,
+)
 from wtm.core import (
     Context,
     WtmError,
@@ -245,12 +253,10 @@ class Worktree:
         ws = self.config.workspace_of(project_dir)
 
         if scope is None:
-            scope = self._default_worktree_scope(wt_dir, project_dir, ws)
-        if scope not in _WORKTREE_WRITE_SCOPES:
-            raise WtmError(
-                f"cannot write a worktree annotation at '{scope}' scope "
-                f"(choose one of {_scope_list(_WORKTREE_WRITE_SCOPES)})"
+            scope = worktree_default_scope(
+                wt_dir, project_dir, ws.path if ws is not None else None
             )
+        check_write_scope(scope, WORKTREE_WRITE_SCOPES, "worktree")
         if scope in (Scope.WORKSPACE, Scope.USER, Scope.SYSTEM) and ws is None:
             raise WtmError(f"project is not under a declared workspace: {project_dir}")
         if scope in (Scope.USER, Scope.SYSTEM) and scope not in self.config.declaring_scopes(
@@ -286,21 +292,6 @@ class Worktree:
                     return wt_dir, parent.parent, name
 
         raise WtmError(f"not a worktree under a project's worktrees/: {wt_dir}")
-
-    def _default_worktree_scope(
-        self, wt_dir: Path, project_dir: Path, ws: Workspace | None
-    ) -> Scope:
-        """The deepest scope whose directory exists (worktree > project > ws > user)."""
-        if wt_dir.is_dir():
-            return Scope.WORKTREE
-
-        if project_dir.is_dir():
-            return Scope.PROJECT
-
-        if ws is not None and ws.path.is_dir():
-            return Scope.WORKSPACE
-
-        return Scope.USER
 
     def enter(self, args: list[str], *, do_install: bool, strict: bool) -> Path:
         """Resolve a worktree (running install then enter hooks); return its dir.
@@ -549,20 +540,6 @@ class Worktree:
 
 
 # --- helpers -----------------------------------------------------------------
-
-
-_WORKTREE_WRITE_SCOPES = (
-    Scope.WORKTREE,
-    Scope.PROJECT,
-    Scope.WORKSPACE,
-    Scope.USER,
-    Scope.SYSTEM,
-)
-
-
-def _scope_list(scopes: tuple[Scope, ...]) -> str:
-    """Render a scope tuple as a ``worktree, project, ...`` string."""
-    return ", ".join(scope.value for scope in scopes)
 
 
 def _resolve_base_ref(git_dir: Path, base: str) -> str:

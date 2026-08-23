@@ -15,4 +15,16 @@ from __future__ import annotations
 
 __all__ = ["app", "main"]
 
-from wtm.cli import app, main
+
+def __getattr__(name: str):
+    """Lazily expose the CLI entry points without importing typer eagerly.
+
+    Importing :mod:`wtm.config` (or any other submodule) must not drag the CLI
+    stack in; ``wtm.app`` / ``wtm.main`` load :mod:`wtm.cli` on first access.
+    """
+    if name in __all__:
+        from wtm import cli
+
+        return getattr(cli, name)
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

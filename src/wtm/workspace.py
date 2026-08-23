@@ -29,7 +29,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from wtm import git
-from wtm.config import Config, ConfigAddress, Scope
+from wtm.config import (
+    WORKSPACE_WRITE_SCOPES,
+    Config,
+    ConfigAddress,
+    Scope,
+    check_write_scope,
+    workspace_default_scope,
+)
 from wtm.core import (
     WtmError,
     abspath,
@@ -237,12 +244,8 @@ class Workspaces:
         base_branch: str | None,
     ) -> Scope:
         """Place description/base_branch at *scope* (auto: deepest existing dir)."""
-        scope = scope if scope is not None else self._default_workspace_scope(ws_dir)
-        if scope not in _WORKSPACE_WRITE_SCOPES:
-            raise WtmError(
-                f"cannot write a workspace annotation at '{scope}' scope "
-                f"(choose one of {_scope_list(_WORKSPACE_WRITE_SCOPES)})"
-            )
+        scope = scope if scope is not None else workspace_default_scope(ws_dir)
+        check_write_scope(scope, WORKSPACE_WRITE_SCOPES, "workspace")
 
         # user / system land in the registry entry, which must already declare
         # the workspace at that scope (system-only is refused for a user write).
@@ -255,10 +258,6 @@ class Workspaces:
         self._write_scalars(address, prefix, description=description, base_branch=base_branch)
 
         return scope
-
-    def _default_workspace_scope(self, ws_dir: Path) -> Scope:
-        """The deepest scope whose directory exists (workspace > user)."""
-        return Scope.WORKSPACE if ws_dir.is_dir() else Scope.USER
 
     def _write_scalars(
         self,
@@ -436,14 +435,6 @@ class Workspaces:
 
 
 # --- module helpers ----------------------------------------------------------
-
-
-_WORKSPACE_WRITE_SCOPES = (Scope.WORKSPACE, Scope.USER, Scope.SYSTEM)
-
-
-def _scope_list(scopes: tuple[Scope, ...]) -> str:
-    """Render a scope tuple as a ``workspace, user, ...`` string."""
-    return ", ".join(scope.value for scope in scopes)
 
 
 def _valid_workspace_name(name: str) -> None:

@@ -189,9 +189,17 @@ not cascade: `project enter` fires `project-enter` across its scopes but never
 `workspace-enter`.
 
 **Config authority**:
-`wtm.config` is the single module that reads or writes any `.wtm` config -- no
-other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It
-loads a resolved read snapshot per invocation (`Config.load`) and exposes, all
+`wtm.config` is the single authority that reads or writes any `.wtm` config -- no
+other part of the app touches `tomlkit` or builds a `.wtm/config.toml` path. It is
+a *package* (`addressing`/`model`/`store`/`engine`/`registry`/`generic`/
+`targets`/`writes`/`slice`/`entities` behind a re-exporting `__init__`) importable
+without the CLI stack (the `wtm` root loads `typer` lazily), so external Python
+projects consume it as a library; its errors live in `wtm.exceptions`
+(`WtmError` plus `ReservedKeyError`/`KindConflictError`/
+`NoActiveWorkspaceError`/`WriteProhibitedError`, all caught by the app's
+`except WtmError`). It loads a resolved read snapshot per invocation
+(`Config.load`, knobs overridable by an explicit `Settings`; `reload()` re-reads
+under the same settings for long-lived holders) and exposes, all
 on `Config`, three write/read tiers: an **arbitrary-key facility**
 (`get_value`/`set_value`/`unset_value` plus element-wise
 `add_to_array`/`remove_from_array` and `set_table_value`/`unset_table_value`
@@ -199,7 +207,7 @@ over a `ConfigAddress` naming any scope
 plus a bare or tuple key -- the substrate everything else is built on), the
 **typed read view** (the `Workspace`/`ProjectAnnotation`/`ResolvedWorktree`/
 `HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
-key resolves by a single **uniform locality merge** -- `_merge_locality` folds a
+key resolves by a single **uniform locality merge** -- `merge_locality` folds a
 most-local-first probe table so increased locality always outranks lesser, the
 most-local *present* value wins, `hooks.on` accumulates, and **inheritance**
 climbs the **entity** chain for the few **inheritable keys**, only `base_branch`
@@ -214,7 +222,7 @@ round-trip with an atomic replace, serialised by a **per-directory lock**
 (`flock` on the file's containing dir -- stable, unlike the file, which
 `os.replace` swaps on every write, and leaving no lock artifact to clean up);
 every write (scalar or array, arbitrary-key or structural) funnels through one
-`_transaction` primitive that re-reads the file fresh under the lock and applies
+`Store._transaction` primitive that re-reads the file fresh under the lock and applies
 just its delta -- a read-modify-write, so a concurrent writer's *other* keys
 survive (and a no-op change is elided, neither creating an empty file nor
 churning an existing one). The load-time *resolution* snapshot
@@ -240,7 +248,20 @@ array -- the arbitrary-key read folds the entity's own cascade plus its ancestor
   `ConfigTree`/`resolve_tree`/`resolve_view` model. Workspace *declarations* (`add`/`set --path`/`rename`/
 `default`) stay user-file-only and refuse system-only names. `WTM_NO_CONFIG`
 suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
-`WTM_SYSTEM_CONFIG` at an absent path to skip system scope).
+`WTM_SYSTEM_CONFIG` at an absent path to skip system scope). The library surface
+is whatever `wtm.config.__all__` exports: reads are native-typed (TOML ints/bools
+come back as-is) while writes are string-only, `(unset)` remains a CLI rendering
+of a `None`. The **placement policy** ("deepest scope whose dir exists" + the
+per-tier write-scope allowlists) has one home in `wtm.config.writes`
+(`project_default_scope`/`workspace_default_scope`/`worktree_default_scope`,
+`check_write_scope`), used alike by `project set`/`workspace set`/
+`worktree set` and the generic-target builders. The embedder-facing sugar is
+`Config.entity(...)` -- count-based like the target grammar -- returning tiered
+`EntityHandle`s whose `get`/`set`/`unset`/array/table ops collapse the
+resolve-then-address dance; a handle binds its creation-time cascade, so writes
+that change inheritability need a rebind (the same snapshot contract as
+`Config`). The machine-readable tree contract lives at
+`wtm.config.slice.config_slice_json` (re-exported by `wtm.output`).
 
 **Scope**:
 Where a hook/config is discovered/declared, from most general to most specific:
@@ -272,7 +293,7 @@ ancestor entities.
 
 **Locality merge**:
 The most-local-file-wins fold collapsing one **entity**'s config across the
-**scope** files that describe it (`_merge_locality`). Presence-based: any present
+**scope** files that describe it (`merge_locality`). Presence-based: any present
 value at a more-local file overrides a less-local one, clearing removes the key,
 `hooks.on` accumulates. A plain *override* that runs strictly *within* a single
 entity -- contrast **inheritance**, which crosses entities.

@@ -14,7 +14,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wtm import git
-from wtm.config import Config, ConfigAddress, ProjectAnnotation, Scope, resolve_project_dir
+from wtm.config import (
+    PROJECT_WRITE_SCOPES,
+    Config,
+    ConfigAddress,
+    ProjectAnnotation,
+    Scope,
+    check_write_scope,
+    project_default_scope,
+    resolve_project_dir,
+)
 from wtm.core import (
     WtmError,
     current_dir,
@@ -178,12 +187,8 @@ class Project:
         if ws is None:
             raise WtmError(f"project is not under a declared workspace: {project_dir}")
 
-        scope = scope if scope is not None else self._default_project_scope(project_dir, ws.path)
-        if scope not in _PROJECT_WRITE_SCOPES:
-            raise WtmError(
-                f"cannot write a project annotation at '{scope}' scope "
-                f"(choose one of {_scope_list(_PROJECT_WRITE_SCOPES)})"
-            )
+        scope = scope if scope is not None else project_default_scope(project_dir, ws.path)
+        check_write_scope(scope, PROJECT_WRITE_SCOPES, "project")
         if scope in (Scope.USER, Scope.SYSTEM) and scope not in self.config.declaring_scopes(
             ws.name
         ):
@@ -196,16 +201,6 @@ class Project:
         self._write_scalars(address, prefix, base_branch=base_branch, description=description)
 
         return ProjectSet(name=project_dir.name, dir=project_dir, scope=scope, address=address)
-
-    def _default_project_scope(self, project_dir: Path, ws_path: Path) -> Scope:
-        """The deepest scope whose directory exists (project > workspace > user)."""
-        if project_dir.is_dir():
-            return Scope.PROJECT
-
-        if ws_path.is_dir():
-            return Scope.WORKSPACE
-
-        return Scope.USER
 
     def _write_scalars(
         self,
@@ -310,14 +305,6 @@ class Project:
 
 
 # --- helpers -----------------------------------------------------------------
-
-
-_PROJECT_WRITE_SCOPES = (Scope.PROJECT, Scope.WORKSPACE, Scope.USER, Scope.SYSTEM)
-
-
-def _scope_list(scopes: tuple[Scope, ...]) -> str:
-    """Render a scope tuple as a ``project, workspace, ...`` string."""
-    return ", ".join(scope.value for scope in scopes)
 
 
 def _scaffold_project(project_dir: Path) -> None:

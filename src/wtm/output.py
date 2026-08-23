@@ -28,13 +28,10 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wtm.config import config_slice_json
+
 if TYPE_CHECKING:
-    from wtm.config import (
-        ConfigSlice,
-        ResolvedProject,
-        ResolvedWorkspace,
-        ResolvedWorktree,
-    )
+    pass
 
 FlatRow = tuple[str, str, str, str, str]  # (project, name, path, branch, head)
 _FLAT_KEYS = ("project", "name", "path", "branch", "head")
@@ -188,65 +185,3 @@ def worktree_list_lines(rows: list[tuple[str, str]]) -> list[str]:
     width = max(len(name) for name, _ in rows)
 
     return [f"{name.ljust(width)}  {annotation}".rstrip() for name, annotation in rows]
-
-
-def config_slice_json(slice: ConfigSlice) -> str:
-    """Serialise a global-rooted pruned config slice as a nested JSON object.
-
-    The machine-readable counterpart of the text slice renderer: always rooted
-    at global (``default_base_branch`` / ``extra``), with workspaces, projects,
-    and worktrees nested as pruned by the slice. Effective values only -- no
-    provenance (``--origin``) and no hooks, per the JSON contract (``--json
-    --origin``/``--json --hooks`` error).
-    """
-    root: dict[str, object] = {}
-    if slice.default_base_branch:
-        root["default_base_branch"] = slice.default_base_branch
-    if slice.global_extra:
-        root["extra"] = dict(sorted(slice.global_extra.items()))
-    root["workspaces"] = {ws.entry.name: _workspace_node(ws) for ws in slice.workspaces}
-
-    return json.dumps(root, default=str)
-
-
-def _workspace_node(ws: ResolvedWorkspace) -> dict[str, object]:
-    """One workspace object: scalars, extra, and its projects keyed by name."""
-    node: dict[str, object] = {"name": ws.entry.name, "path": str(ws.entry.path)}
-    if ws.entry.description:
-        node["description"] = ws.entry.description
-    if ws.entry.base_branch:
-        node["base_branch"] = ws.entry.base_branch
-    if ws.entry.extra:
-        node["extra"] = dict(sorted(ws.entry.extra.items()))
-    node["projects"] = {p.name: _project_node(p) for p in ws.projects}
-
-    return node
-
-
-def _project_node(project: ResolvedProject) -> dict[str, object]:
-    """One project object: scalars, effective base_branch, extra, and worktrees."""
-    node: dict[str, object] = {
-        "name": project.name,
-        "dir": str(project.dir),
-        "exists": project.exists,
-    }
-    if project.description:
-        node["description"] = project.description
-    if project.effective_base_branch:
-        node["base_branch"] = project.effective_base_branch
-    if project.extra:
-        node["extra"] = dict(sorted(project.extra.items()))
-    node["worktrees"] = {w.name: _worktree_node(w) for w in project.worktrees}
-
-    return node
-
-
-def _worktree_node(worktree: ResolvedWorktree) -> dict[str, object]:
-    """One worktree object: name, dir, description, extra (no base_branch tier)."""
-    node: dict[str, object] = {"name": worktree.name, "dir": str(worktree.dir)}
-    if worktree.description:
-        node["description"] = worktree.description
-    if worktree.extra:
-        node["extra"] = dict(sorted(worktree.extra.items()))
-
-    return node
