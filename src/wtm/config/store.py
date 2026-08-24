@@ -218,7 +218,9 @@ class Store:
     """The comment-preserving ``tomlkit`` document cache backing every read/write.
 
     One document per file path, loaded lazily and cached; a write mutates the
-    cached document and rewrites the file atomically. ``no_config`` (the
+    cached document and rewrites the file atomically. Every flushed path is
+    recorded on :attr:`flushed` so the caller can fire the ``post-config``
+    hook event once, after the command succeeds. ``no_config`` (the
     ``WTM_NO_CONFIG`` knob) makes reads return an empty document and any write a
     hard error.
     """
@@ -226,6 +228,9 @@ class Store:
     def __init__(self, *, no_config: bool) -> None:
         self._no_config = no_config
         self._docs: dict[Path, tomlkit.TOMLDocument] = {}
+        # Absolute paths flushed (actually written) this invocation, in order --
+        # consumed by the post-config hook event after the command succeeds.
+        self.flushed: list[Path] = []
 
     def doc(self, path: Path) -> tomlkit.TOMLDocument:
         """Return the cached document for *path* (parsing it on first access)."""
@@ -429,6 +434,7 @@ class Store:
             os.close(fd)
 
     def _flush(self, path: Path, doc: tomlkit.TOMLDocument) -> None:
-        """Cache *doc* and write it to *path* atomically (call inside :meth:`_transaction`)."""
+        """Cache *doc*, record *path* as flushed, and write it atomically."""
         self._docs[path] = doc
+        self.flushed.append(path)
         _atomic_write(path, tomlkit.dumps(doc))

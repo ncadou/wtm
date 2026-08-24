@@ -26,6 +26,10 @@ scope ladder (one effective value per operation):
 - ``[hooks] enabled = false`` -- fire nothing for the operation.
 - ``[hooks] strict = true`` -- hook failures are fatal without ``--strict``.
 
+The fourteenth event, ``post-config``, stands outside that lifecycle scheme:
+it is a **broadcast** fired once per invocation, after any config file was
+written (see :func:`run_config_hooks`).
+
 The precedence tower is: ``WTM_NO_HOOKS`` (env, master off) > the CLI
 ``--strict`` flag (force-on only) > the config ladder > defaults
 (enabled, non-strict). Both knobs are fire-time only -- ``hook install`` /
@@ -71,12 +75,15 @@ returns data; :mod:`wtm.cli` renders it).
 from __future__ import annotations
 
 __all__ = [
+    "CONFIG_EVENTS",
     "EVENTS",
+    "HOOK_SENTINEL_VAR",
     "SETUP_EVENTS",
     "TEARDOWN_EVENTS",
     "Hooks",
     "Scope",
     "ScopeListing",
+    "run_config_hooks",
     "run_hooks",
     "run_project_hooks",
     "run_workspace_hooks",
@@ -85,7 +92,7 @@ __all__ = [
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -114,7 +121,9 @@ EVENTS = (
     "project-leave",
     "workspace-enter",
     "workspace-leave",
+    "post-config",
 )
+CONFIG_EVENTS = ("post-config",)
 SETUP_EVENTS = (
     "pre-create",
     "post-create",
@@ -126,6 +135,10 @@ SETUP_EVENTS = (
     "workspace-enter",
 )
 TEARDOWN_EVENTS = ("leave", "pre-delete", "post-delete", "project-leave", "workspace-leave")
+
+# Exported to hook subprocesses so a hook that itself writes config (or runs
+# wtm) never re-triggers the post-config event -- firing checks it on entry.
+HOOK_SENTINEL_VAR = "WTM_IN_HOOK"
 
 
 # Setup runs general->specific; teardown reverses to specific->general.
@@ -193,6 +206,10 @@ def _fire(
     if config.no_hooks:
         return
 
+    # Mark hook subprocesses: a nested wtm invocation from inside a hook sees
+    # this and suppresses its own post-config firing (no recursion).
+    env.setdefault(HOOK_SENTINEL_VAR, "1")
+
     order = _TEARDOWN_ORDER if event in TEARDOWN_EVENTS else _SETUP_ORDER
     selected = tuple(s for s in order if s in applicable)
 
@@ -209,6 +226,108 @@ def _fire(
             _run_hook_source(base, hcwd, arg1, env, strict=fatal)
         for command in spec.on.get(event, []):
             _run_inline_hook(command, hcwd, arg1, env, strict=fatal)
+
+
+def run_config_hooks(config: Config, files: Sequence[Path], *, strict: bool = False) -> None:
+    """Fire the ``post-config`` event for the config *files* an invocation wrote.
+
+    A tier of its own rather than a lifecycle moment: there is no subject
+    worktree or project, so the environment contract is minimal --
+    ``WTM_EVENT`` + ``WTM_CONFIG_FILES`` (newline-separated absolute paths)
+    plus the workspace pair when the changes imply one -- and both the hooks'
+    ``$1`` and working directory are the deepest common ancestor of the
+    changed files. Entity context for the scope ladder is *implied by the
+    changed paths themselves* (a ``<dir>/.wtm/config.toml`` names its entity:
+    a worktree when the dir sits under a project's ``worktrees/``, a project
+    when it holds a bare ``.git``, else a declared workspace); scopes that
+    cannot be resolved from that context are skipped silently.
+
+    Firing is suppressed entirely when already running inside a hook
+    subprocess (the :data:`HOOK_SENTINEL_VAR` environment sentinel), so a hook
+    that writes config never recurses; the outer invocation's own firing (see
+    :meth:`Config.flushed_config_files <wtm.config.Config.flushed_config_files>`)
+    covers those writes instead.
+    """
+    # The env master switch, then nothing to announce, then the re-entry guard.
+    if config.no_hooks or not files or os.environ.get(HOOK_SENTINEL_VAR):
+        return
+
+    anchor = _config_anchor(files)
+    project_dir, worktree_dir = _implied_dirs(files)
+    ws = config.workspace_of(worktree_dir or project_dir or anchor)
+
+    env = dict(os.environ)
+    for key in MANAGED_ENV_VARS:
+        env.pop(key, None)
+    env["WTM_EVENT"] = "post-config"
+    # A file written several times in one invocation is announced once.
+    env["WTM_CONFIG_FILES"] = "\n".join(str(f) for f in sorted(set(files)))
+    if ws is not None:
+        env["WTM_WORKSPACE"] = ws.name
+        env["WTM_WORKSPACE_DIR"] = str(ws.path)
+
+    selected = _SETUP_ORDER
+    specs: dict[Scope, HookSpec] = {
+        s: config.scope_hook_spec(s, project_dir or Path("/"), worktree_dir or Path("/"))
+        for s in selected
+    }
+    dirs: dict[Scope, Path] = {}
+    for scope in selected:
+        try:
+            dirs[scope] = config.hooks_dir(
+                scope,
+                ws=ws,
+                project_dir=project_dir,
+                worktree_dir=worktree_dir,
+            )
+        except WtmError:
+            # No implied entity dir for this scope -- point its builtin
+            # discovery at a path that cannot exist so nothing fires there.
+            dirs[scope] = Path("/wtm-unresolvable-hook-dir")
+
+    log("running post-config hooks")
+    _fire(
+        event="post-config",
+        applicable=selected,
+        config=config,
+        env=env,
+        hcwd=anchor,
+        arg1=anchor,
+        strict=strict,
+        specs=specs,
+        dir_of=dirs.__getitem__,
+    )
+
+
+def _config_anchor(files: Sequence[Path]) -> Path:
+    """The deepest common ancestor directory of *files*' parents (fallback cwd)."""
+    parents = [str(Path(f).absolute().parent) for f in files]
+    common = os.path.commonpath(parents)
+
+    return Path(common)
+
+
+def _implied_dirs(files: Sequence[Path]) -> tuple[Path | None, Path | None]:
+    """Best-effort ``(project_dir, worktree_dir)`` implied by changed config paths.
+
+    Each ``<dir>/.wtm/config.toml`` classifies its entity: a **worktree** when
+    the dir sits directly under a project's ``worktrees/``, a **project** when
+    the dir holds a bare ``.git``, anything else unclassified. The deepest
+    classification wins, so one invocation touching several entities reports
+    the most specific context to the scope ladder.
+    """
+    best: tuple[Path | None, Path | None] = (None, None)
+    for raw in files:
+        entity_dir = Path(raw).absolute().parent.parent
+        if Path(raw).absolute().parent.name != ".wtm":
+            continue
+        parent = entity_dir.parent
+        if parent.name == "worktrees" and (parent.parent / ".git").is_dir():
+            best = (parent.parent, entity_dir)  # deeper than any project match
+        elif best == (None, None) and (entity_dir / ".git").is_dir():
+            best = (entity_dir, None)
+
+    return best
 
 
 def run_hooks(

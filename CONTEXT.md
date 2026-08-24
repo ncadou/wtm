@@ -163,12 +163,16 @@ commands. Both accumulate across scopes.
 **Event**:
 A lifecycle point that fires hooks. Names follow a `pre-`/`post-` convention: a
 prefix marks the side of a state mutation, a bare name is a mutation-free
-moment. The thirteen events are `pre-create`, `post-create`, `install`, `enter`,
-`leave`, `pre-delete`, `post-delete`, `pre-rename`, `post-rename`,
-`project-enter`, `project-leave`, `workspace-enter`, `workspace-leave`. The two
-`workspace-*` events are workspace-scoped and the two `project-*` events are
-project-scoped (see **Workspace lifecycle** / **Project lifecycle**); the other
-nine are worktree events.
+moment. The thirteen lifecycle events are `pre-create`, `post-create`,
+`install`, `enter`, `leave`, `pre-delete`, `post-delete`, `pre-rename`,
+`post-rename`, `project-enter`, `project-leave`, `workspace-enter`,
+`workspace-leave`. The two `workspace-*` events are workspace-scoped and the
+two `project-*` events are project-scoped (see **Workspace lifecycle** /
+**Project lifecycle**); the other nine are worktree events. The fourteenth,
+`post-config`, stands outside the scheme: a **broadcast** fired once per
+invocation after any config write (`WTM_CONFIG_FILES`; scope context implied
+by the changed paths; suppressed under the `WTM_IN_HOOK` sentinel so hook
+writes never recurse), consumed by auto-commit tooling such as `wtm-git`.
 
 **Workspace lifecycle**:
 `wtm workspace enter`/`leave` operate at workspace granularity. `enter` cds into

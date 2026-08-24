@@ -36,8 +36,9 @@ from wtm.cli.worktree import (
 )
 from wtm.config import Config
 from wtm.core import WtmError
-from wtm.hooks import Hooks
+from wtm.hooks import Hooks, run_config_hooks
 from wtm.importer import Import
+from wtm.output import warn
 from wtm.project import Project
 from wtm.workspace import Workspaces
 from wtm.worktree import Worktree
@@ -127,6 +128,29 @@ def _bootstrap(ctx: typer.Context) -> None:
         importer=Import(config),
         hooks=Hooks(config),
     )
+    # After the command settles, fire post-config for whatever it wrote.
+    ctx.call_on_close(lambda: _fire_post_config(ctx))
+
+
+def _fire_post_config(ctx: typer.Context) -> None:
+    """Fire the ``post-config`` event for the config files this invocation wrote.
+
+    Runs from the root context's close callbacks, so it sees every flush a
+    successful (or failed-but-persisted) command made. Failures here are
+    warnings, never exit-code changers: the command itself already succeeded.
+    """
+    services: _Services | None = getattr(ctx, "obj", None)
+    if services is None:  # bootstrap never ran (e.g. --help short-circuit)
+        return
+
+    files = services.config.flushed_config_files
+    if not files:
+        return
+
+    try:
+        run_config_hooks(services.config, files)
+    except (WtmError, git.GitError) as exc:
+        warn(f"post-config hooks error, continuing: {exc}")
 
 
 # Command groups, registered in panel order so the "Command groups" panel lists

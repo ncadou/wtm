@@ -7,7 +7,8 @@ hooks.
 
 A hook is either a **builtin** discovered file or an **inline** `sh -c` command
 declared in config; explicit inline hooks *add to* the builtins. `wtm` fires
-thirteen **events** across five **scopes**.
+thirteen lifecycle **events** across five **scopes**, plus the fourteenth,
+`post-config`, a config-write broadcast described below.
 
 ## Events
 
@@ -26,9 +27,35 @@ state mutation, a bare name is a mutation-free moment.
 | `project-leave` | `wtm project leave` |
 | `workspace-enter` | `wtm workspace enter` |
 | `workspace-leave` | `wtm workspace leave` |
+| `post-config` | after a `wtm` invocation wrote one or more config files |
 
 Within a single `wtm create -c -i` the order is `pre-create` → `post-create` →
 `install` → `enter`; within `wtm enter -i` it is `install` → `enter`.
+
+### post-config
+
+The one event outside the lifecycle scheme: a **broadcast** fired once per
+invocation, after the command settles, whenever that invocation actually wrote
+(flushed) any config file — via management commands, annotations,
+`hook set/unset`, or structural registry mutations. Hand edits never fire
+anything.
+
+Its contract differs from the lifecycle events:
+
+- `WTM_EVENT=post-config` and `WTM_CONFIG_FILES` (newline-separated absolute
+  paths of every file written, sorted) replace the subject-based vars; the
+  workspace pair (`WTM_WORKSPACE`/`WTM_WORKSPACE_DIR`) is present when the
+  changed paths imply one. `$1` and the working directory are the deepest
+  common ancestor of the changed files.
+- Scope context is *implied by the changed paths*: a `<dir>/.wtm/config.toml`
+  names its entity (a worktree when under a project's `worktrees/`, a project
+  when it holds a bare `.git`, else a declared workspace). Scopes that cannot
+  be resolved from it are skipped silently.
+- Firing is suppressed inside hook subprocesses (`WTM_IN_HOOK=1`): a hook
+  that writes config never recurses; the outer invocation's own firing covers
+  those writes.
+- The natural consumer is an auto-commit hook (e.g. from `wtm-git`), which
+  reads `WTM_CONFIG_FILES` and syncs the repos tracking them.
 
 Nine of the events are worktree events. The two `project-enter` /
 `project-leave` events are project-scoped: fired by `wtm project enter`/`leave`,

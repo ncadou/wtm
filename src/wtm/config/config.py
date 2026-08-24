@@ -150,6 +150,15 @@ class Config:
         """Whether hook firing is disabled for this invocation (``WTM_NO_HOOKS``)."""
         return self._settings.no_hooks
 
+    @property
+    def flushed_config_files(self) -> list[Path]:
+        """The config files this invocation actually wrote, in flush order.
+
+        Feeds the ``post-config`` hook event (see
+        :func:`wtm.hooks.run_config_hooks`); empty for read-only invocations.
+        """
+        return list(self._store.flushed)
+
     # --- builtin hook-discovery dirs -----------------------------------------
 
     def hooks_dir(
