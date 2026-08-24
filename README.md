@@ -1,14 +1,23 @@
 # wtm — a git worktree manager
 
-If you're not working with git worktrees yet, you probably should. They let you
-have multiple branches checked out at once, making it easy to switch between them
-without stashing or juggling a single working directory.
+Git [worktrees](https://git-scm.com/docs/git-worktree) are a great way to work on
+multiple branches at once, but they can also be a hassle to work with.
 
-But worktree management is a chore in itself. The `git worktree` CLI interface is a
-bit cumbersome to use. And even when you have your worktree, is your project
-functional? Most likely, you need to run some setup commands to get your environment
-ready, maybe copy some files in it. This things are entirely outside of git's scope,
-so you have to remember to do them every time you create a new worktree.
+Beyond the basic `git worktree` commands, you have to remember to set up your
+environment, run install scripts, and copy files into the worktree.
+
+At its heart, `wtm` is a *worktree management tool* with which you can quickly create,
+work in, and dispose of worktrees, but it goes beyond that by providing means to
+organize your repos, and any related custom scripts or datasets, in groups
+("workspaces") and offering various extensibility options:
+
+- *Hooks* let you run arbitrary commands at various points in the worktree lifecycle,
+  so you can set up your environment, install dependencies, or copy files into the
+  worktree automatically.
+- The *config* system lets you declare workspaces, and annotate the projects
+  and worktrees it discovers with arbitrary metadata.
+- *Plugins* (still in design) will let you extend `wtm` with your own commands and
+  workflows by registering additional hooks and config.
 
 `wtm` turns worktrees into a smooth daily workflow: a single command creates a
 worktree, puts it on the right branch, cds your shell into it, and fires
@@ -23,42 +32,45 @@ Then it scales the idea outward with workspaces:
 
 ## Main Concepts
 
-`wtm` is built around four ideas, each wrapping the previous one:
+`wtm` is built around five ideas: three *structural*, each wrapping the previous
+one, plus two layers for *extensibility* over the whole structure:
 
-1. **Working with code** happens in a *checkout*: a directory of files sitting
-   on one branch. That's the thing you actually edit, build, and test.
-
-2. A **worktree** is one such checkout. The point of `wtm` is that a single
-   repository can have *many* worktrees at once — one per branch you care about
-   — living side by side in their own directories. No stashing, no
+1. A **worktree** is a checkout: a directory of files sitting on one branch,
+   the thing you actually edit, build, and test. The point of `wtm` is that a
+   single repository can have *many* worktrees at once — one per branch you
+   care about — living side by side in their own directories. No stashing, no
    checkout-dance: to switch tasks you just `cd` to another worktree.
 
-3. A **project** is a repository together with all of its worktrees, laid out
+2. A **project** is a repository together with all of its worktrees, laid out
    tidily on disk: a bare `.git` (the shared git data, with no working files of
    its own) plus a `worktrees/` directory holding the checkouts.
 
-  - You can also add anything else you want to the project: a `data/` directory,
-   scripts, etc. Anything outsite of `.git` and `worktrees/` is just a normal file or
-   directory, completely ignored by git, they won't even appear as untracked files in
-   `git status`, and `wtm` won't care about them either.
+    You can also add anything else you want to the project: a `data/` directory,
+    scripts, etc. Anything outside of `.git` and `worktrees/` is just a normal
+    file or directory, completely ignored by git, it won't even appear as
+    untracked files in `git status` — and `wtm` ignores all of it too, except
+    its own `.wtm/`.
 
-   ```
+    ```
    <project>/
        .git/                 bare repository (shared history, no checkout)
        worktrees/
            main/             a worktree on branch 'main'
+               .wtm/         this worktree's own config.toml and hooks/
            feature-x/        a worktree on branch 'feature-x'
+       .wtm/                 project-wide config.toml and hooks/
        my-stuff/             any file or directory you want to add to the project
        ...
    ```
 
-4. A **workspace** is a named home for a bunch of projects — a *projects root*.
+3. A **workspace** is a named home for a bunch of projects — a *projects root*.
    You might have one workspace for work and another for open source. Every
    `wtm` command runs against one **active workspace**, so your projects stay
    grouped and you can jump between collections deliberately.
 
    ```
    <workspace>/              e.g. ~/work
+       .wtm/                 workspace-wide config.toml and hooks/
        api/                  a project
            .git/
            worktrees/...
@@ -68,11 +80,25 @@ Then it scales the idea outward with workspaces:
            worktrees/...
    ```
 
-Workspaces are the only thing you *declare* (in config). Projects are simply
-*discovered* on disk — any `<name>/.git` under a workspace is a project — and
-config only annotates them. `wtm` itself knows only this structure; anything
-project-specific (shared data dirs, `direnv`, tmux/`sesh`) lives in
-[hooks](docs/hooks.md), not in `wtm`.
+4. A **config** describes that structure in small TOML files. Every tier can have
+   one — system, user, workspace, project, worktree — and when several define
+   the same key, the most local one wins. Workspaces are the only thing you
+   *declare* here (name + path); projects and worktrees are *discovered* on
+   disk and merely *annotated*: a description, a base branch, or any
+   arbitrary keys of your own.
+
+5. **Hooks** attach behavior to the lifecycle. Thirteen events — around
+   create/install/enter/leave/delete/rename, plus the project- and
+   workspace-level enter/leave pairs — each fire your commands: either a
+   script dropped into a `.wtm/hooks/` directory, or an inline command
+   written in config. They run through `sh -c` with a `WTM_*` environment
+   contract naming the exact worktree/project/workspace they fire for, which
+   is how `.venv` setup, `direnv allow`, tmux sessions can happen by themselves.
+
+`wtm` itself knows only this structure; anything project-specific (shared
+data dirs, `direnv`, tmux/`sesh`) lives in [hooks](docs/hooks.md), not in
+`wtm`. See [docs/configuration.md](docs/configuration.md) for the config
+scopes and resolution rules.
 
 ## Install
 
@@ -205,21 +231,24 @@ Commands are grouped; each worktree verb also has a top-level alias
 (`wtm create ...` == `wtm worktree create ...`).
 
 - **worktree** — `create`, `enter`, `leave`, `delete`, `rename`, `list`,
-  `resolve` (day-to-day work)
-- **project** — `new`, `clone`, `import`, `list`, `resolve`
+  `resolve`, `set` (day-to-day work)
+- **project** — `new`, `clone`, `import`, `set`, `list`, `resolve`, `show`,
+  `enter`, `leave`
 - **workspace** — `add`, `set`, `rename`, `delete`, `default`, `list`, `show`,
   `resolve`, `enter`, `leave`
-- **hook** — `install`, `run`, `delete`, `list`
-- **config** — `show`
+- **hook** — `install`, `run`, `delete`, `set`, `unset`, `list`
+- **config** — `show`, `set`, `get`, `unset`, `base-branch`
+- **plugin** — `add`, `remove`, `list`, `show`
 
 Run `wtm --help` or `wtm COMMAND --help` for authoritative, always-current
 usage.
 
 ## Documentation
 
-- [docs/commands.md](docs/commands.md) — every command and flag, plus the
-  worktree **targeting grammar** and `create`/`resolve`/`rename` rules
-- [docs/hooks.md](docs/hooks.md) — the eleven lifecycle events, five scopes,
+- [docs/commands.md](docs/commands.md) — command groups and common options
+- [docs/targeting.md](docs/targeting.md) — worktree **targeting grammar**,
+  locators, pins, and ambiguity rules
+- [docs/hooks.md](docs/hooks.md) — the thirteen lifecycle events, five scopes,
   firing order, and the `WTM_*` contract
 - [docs/configuration.md](docs/configuration.md) — config scopes, resolution
   precedence, the TOML schema, and environment variables

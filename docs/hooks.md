@@ -10,6 +10,34 @@ declared in config; explicit inline hooks *add to* the builtins. `wtm` fires
 thirteen lifecycle **events** across five **scopes**, plus the fourteenth,
 `post-config`, a config-write broadcast described below.
 
+## A first hook
+
+Drop an executable file named after an event into a scope's hooks directory —
+here, the project's:
+
+```sh
+mkdir -p <project>/.wtm/hooks
+cat > <project>/.wtm/hooks/post-create <<'EOF'
+#!/bin/sh
+echo "new worktree: $1 (branch $WTM_BRANCH)"
+EOF
+chmod +x <project>/.wtm/hooks/post-create
+wtm create alpha feature-x             # fires post-create for this project
+```
+
+Or declare the same thing inline in config (each command runs via `/bin/sh -c`
+with the same `$1` + [`WTM_*` contract](#the-wtm_-contract)):
+
+```toml
+# <project>/.wtm/config.toml
+[hooks.on]
+post-create = "uv sync"
+enter = ["direnv allow"]               # a list = several commands, in order
+```
+
+Confirm what will fire with `wtm hook list` (grouped by event, across every
+scope). Everything below is detail.
+
 ## Events
 
 Event names follow a `pre-`/`post-` convention: a prefix marks the side of a
@@ -17,7 +45,7 @@ state mutation, a bare name is a mutation-free moment.
 
 | event | fires on |
 |---|---|
-| `pre-create` / `post-create` | `wtm create` |
+| `pre-create` / `post-create` | `wtm create`, `wtm import` (per recreated worktree) |
 | `install` | `wtm create -i`, `wtm enter -i`, or `wtm hook run install` |
 | `enter` | whenever `wtm` cds you into a worktree (`wtm enter`, `wtm create -c`) |
 | `leave` | `wtm leave` |
@@ -31,6 +59,26 @@ state mutation, a bare name is a mutation-free moment.
 
 Within a single `wtm create -c -i` the order is `pre-create` → `post-create` →
 `install` → `enter`; within `wtm enter -i` it is `install` → `enter`.
+
+### Event tiers
+
+Nine of the thirteen lifecycle events are worktree events: they fire for one
+worktree across all five scopes, with the full
+[`WTM_*` contract](#the-wtm_-contract) and the worktree directory as `$1`
+(two exceptions under [timing](#timing-relative-to-the-state-change)). The four
+others are the project- and workspace-lifecycle pairs:
+
+| pair | fired by | scopes fired | `$1` / working dir | env contract |
+|---|---|---|---|---|
+| `project-enter` / `project-leave` | `wtm project enter` / `leave` | system → user → workspace → project (never worktree) | the project dir | `WTM_EVENT` plus `WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; no `WTM_WORKTREE_DIR`/`WTM_BRANCH` |
+| `workspace-enter` / `workspace-leave` | `wtm workspace enter` / `leave` | system → user → workspace only | the projects root | `WTM_EVENT`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR` |
+
+The teardown side cascades inside-out. `wtm project leave`, run from inside one
+of the project's worktrees, fires that worktree's `leave` first, then
+`project-leave` (worktree → project). `wtm workspace leave`, run from inside a
+worktree, fires the full chain: that worktree's `leave`, then the containing
+project's `project-leave`, then `workspace-leave` (worktree → project →
+workspace).
 
 ### post-config
 
@@ -57,24 +105,6 @@ Its contract differs from the lifecycle events:
 - The natural consumer is an auto-commit hook (e.g. from `wtm-git`), which
   reads `WTM_CONFIG_FILES` and syncs the repos tracking them.
 
-Nine of the events are worktree events. The two `project-enter` /
-`project-leave` events are project-scoped: fired by `wtm project enter`/`leave`,
-across the system/user/workspace/project scopes only (never worktree), with the
-project-level `WTM_*` contract (`WTM_EVENT` plus `WTM_PROJECT`,
-`WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
-`WTM_WORKSPACE_DIR`; no `WTM_WORKTREE_DIR`/`WTM_BRANCH`; their `$1` is the project
-dir). The two `workspace-enter` / `workspace-leave` events are workspace-scoped:
-fired by `wtm workspace enter`/`leave`, across the system/user/workspace scopes
-only, with a workspace-only `WTM_*` contract (`WTM_EVENT`, `WTM_WORKSPACE`,
-`WTM_WORKSPACE_DIR`; their `$1` is the projects root).
-
-The teardown side cascades inside-out. `wtm project leave`, run from inside one
-of the project's worktrees, fires that worktree's `leave` first, then
-`project-leave` (worktree → project). `wtm workspace leave`, run from inside a
-worktree, fires the full chain: that worktree's `leave`, then the containing
-project's `project-leave`, then `workspace-leave` (worktree → project →
-workspace).
-
 ## Scopes and discovery
 
 Builtin file discovery per scope (a bare `<event>` file plus a
@@ -83,21 +113,29 @@ Builtin file discovery per scope (a bare `<event>` file plus a
 - **system**    — `/etc/wtm/hooks` (override: `$WTM_SYSTEM_HOOKS_DIR`, or config `[hooks] dir`)
 - **user**      — `$XDG_CONFIG_HOME/wtm/hooks` (override: `$WTM_USER_HOOKS_DIR`, or config `[hooks] dir`)
 - **workspace** — `<workspace>/.wtm/hooks` (override: workspace config `[hooks] dir`)
-- **project**   — `<project>/.wtm/hooks` (override: project config `[project.hooks] dir`)
+- **project**   — `<project>/.wtm/hooks` (override: project config `[hooks] dir`)
 - **worktree**  — `<worktree>/.wtm/hooks` (override: worktree config `[hooks] dir`)
 
 Every `[hooks] dir` override applies to firing *and* management alike —
 `hook install` / `delete` / `list` resolve through the same directory authority,
 so what you install is where firing looks.
 
-Inline hooks are declared as an event→command(s) map in the matching config
-scope (see [configuration.md](configuration.md)): a scope's own `[hooks.on]`, a
-workspace entry's `[workspaces.NAME.hooks.on]`, a project's `[project.hooks.on]`
-/ `[workspaces.NAME.projects.PNAME.hooks.on]`. A command may be a string or a
-list of strings; each runs via `/bin/sh -c` with the same `$1` + `WTM_*`
-contract and strict semantics as file hooks. Set `builtins = false` in a
-scope's `[hooks]` table to disable *that scope's* builtin file discovery (inline
-hooks still fire).
+Inline hooks are declared as an event→command(s) map (`[hooks.on]`) in the
+matching config scope (see [configuration.md](configuration.md)), following the
+usual nesting rule: an entity's own file keeps the table top level, a
+containing file nests it under `<child-plural>.<name>`:
+
+| written in | inline-hook tables |
+|---|---|
+| system / user file | `[hooks.on]` (that file's own scope), `[workspaces.W.hooks.on]` |
+| workspace file | `[hooks.on]` (the workspace itself), `[projects.P.hooks.on]`, `[projects.P.worktrees.T.hooks.on]` |
+| project file | `[hooks.on]` (the project itself), `[worktrees.T.hooks.on]` |
+| worktree file | `[hooks.on]` (the worktree itself) |
+
+A command may be a string or a list of strings; each runs via `/bin/sh -c` with
+the same `$1` + `WTM_*` contract and strict semantics as file hooks. Set
+`builtins = false` in a scope's `[hooks]` table to disable *that scope's*
+builtin file discovery (inline hooks still fire).
 
 ## Fire-time policy
 
@@ -115,7 +153,10 @@ strict = true     # hook failures are fatal without --strict
 The precedence tower, high to low:
 
 1. `WTM_NO_HOOKS` (env) — master off switch, wins over everything;
-2. the CLI `--strict` flag — force-on only (it can never un-strict);
+2. the CLI `--strict` flag (accepted by every firing command: `create`, `enter`,
+   `leave`, `delete`, `rename`, `project enter`/`leave`,
+   `workspace enter`/`leave`, `import`, `hook run`) — force-on only (it can
+   never un-strict);
 3. the config ladder (`[hooks] enabled` / `[hooks] strict`);
 4. defaults — enabled, non-strict.
 
@@ -168,7 +209,8 @@ Hooks receive the worktree directory as `$1` plus a `WTM_*` environment
 contract:
 
 `WTM_EVENT`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
-`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`.
+`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`
+(what each holds: [shell-integration.md](shell-integration.md#the-wtm_-variables)).
 
 `WTM_WORKSPACE` is the active workspace name (empty when the project is not
 under a declared workspace); `WTM_WORKSPACE_DIR` is its path (the projects
@@ -180,8 +222,10 @@ can reconcile path-keyed state, e.g.
 
 Failures are logged but non-fatal unless the operation is strict — the CLI
 `--strict` flag, or a ladder-resolved `[hooks] strict = true` (see
-[Fire-time policy](#fire-time-policy)) — under which a failing `pre-*` hook
-aborts its operation. `wtm` does not track or ignore
+[Fire-time policy](#fire-time-policy)) — under which *any* failing hook raises
+and aborts the command (so a failing `pre-*` hook vetoes its operation before
+the state change). A builtin file that exists but is not executable is skipped
+with a warning — fatal under strict. `wtm` does not track or ignore
 `$WTM_WORKTREE_DIR/.wtm/` — whether per-worktree hooks are committed to the
 branch is left to you.
 
@@ -189,10 +233,13 @@ branch is left to you.
 
 ```
 install FILE|DIR [TARGET] [-s SCOPE] [-e EVENT] [-l] [-f]  install a hook into a scope
-run     HOOK [TARGET] [-s SCOPE] [--strict]                run an event's hooks (all scopes by default)
-delete  HOOK [TARGET] [-s SCOPE] [-r]                      delete a hook (event, or event/entry)
+run     [TARGET...] HOOK [-s SCOPE] [--strict]             run an event's hooks (all scopes by default)
+delete  [TARGET...] HOOK [-s SCOPE] [-r]                   delete a hook (event, or event/entry)
 list    [TARGET] [--types]                                 list installed hooks, grouped by event across scopes
 ```
+
+`HOOK` (the event) is the **last** positional for `run` and `delete`; anything
+before it targets the worktree.
 
 - `wtm hook install FILE|DIR [TARGET] [--scope system|user|workspace|project|worktree] [--event E] [--link] [--force]`
   installs a hook (default scope `project`). The event is inferred from a
@@ -215,7 +262,7 @@ list    [TARGET] [--types]                                 list installed hooks,
   builtin files and inline config hooks alike (inline ones marked `(config)`);
   `--types` prints a compact per-event summary. Being read-only over an existing
   worktree, its `TARGET` is a **locator** pinned to the worktree tier (see
-  [commands.md](commands.md#the-locator)): a bare name reaches another
+  [targeting.md](targeting.md#locators)): a bare name reaches another
   workspace's worktree, and a name matching none is an error. `hook install`
   writes into a `--scope` and `hook delete` is destructive, so those two keep the
   positional target grammar.
@@ -225,3 +272,24 @@ list    [TARGET] [--types]                                 list installed hooks,
   replaces the command in that one file; commands still accumulate across scopes
   at read time. `hook install`/`delete` manage builtin files; `hook set`/`unset`
   manage inline commands.
+
+## When a hook doesn't fire
+
+Worked through in order, this finds most causes:
+
+- **Disabled up the ladder** — `[hooks] enabled = false` at any scope on the
+  fired ladder kills the whole operation;
+  `wtm config get hooks.enabled` reports what firing would resolve.
+- **Executable bit** — a builtin file without one is skipped with a warning
+  (`chmod +x`). Inline commands don't need it.
+- **Event name** — must be exactly one of the fourteen; `wtm hook list` shows
+  what exists, and `wtm hook install` infers the event from the source name.
+- **Wrong scope's directory** — firing resolves each scope's dir through the
+  same authority as management ([above](#scopes-and-discovery)), so a
+  `[hooks] dir` override moves both.
+- **Master switch** — is `WTM_NO_HOOKS` set?
+- **Ran but failed quietly** — non-strict failures print a warning and
+  continue; rerun with `wtm hook run … --strict` to make them fatal and see the
+  exit codes.
+- **`post-config` specifically** — hand edits never fire it, and neither does a
+  write made from inside another hook (the `WTM_IN_HOOK` sentinel).

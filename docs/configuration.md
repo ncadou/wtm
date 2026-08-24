@@ -12,13 +12,14 @@
 | worktree | `<worktree>/.wtm/config.toml` |
 
 Config resolves by a single, uniform rule: **increased locality always
-outranks lesser locality**. Every scope is folded by a locality-ordered,
-recursive merge (`CLI flag > env > worktree > project > workspace > user >
-system > built-in default`); the most-local *present* value of a key wins
-(`false`/`0`/`""` are real values — clearing a key *removes* it rather than
-writing an empty string). Inline hooks (`hooks.on`) are the one exception: they
-*accumulate* across scopes. Workspace **paths** are `~`/`$VAR`-expanded and must
-be absolute after expansion.
+outranks lesser locality** — the precedence rule behind every read. What config
+describes is an **entity**: a workspace, a project, or a worktree, plus the
+implicit **global** root above them all. Each entity's values fold across the
+scope files that describe it by a locality-ordered, recursive merge; the
+most-local *present* value of a key wins (`false`/`0`/`""` are real values —
+clearing a key *removes* it rather than writing an empty string). Inline hooks
+(`hooks.on`) are the one exception: they *accumulate* across scopes. Workspace
+**paths** are `~`/`$VAR`-expanded and must be absolute after expansion.
 
 An entity stores its *own* config at the **top level** of its own file; a
 containing file nests a child under `<child-plural>.<name>`. So the same key —
@@ -34,14 +35,21 @@ scope above the project:
 Worktrees add one more rung (`[worktrees.T]` project-local,
 `[projects.P.worktrees.T]` workspace-local, and so on).
 
-Most config is hand-edited; management commands write it for you (a
-comment-preserving `tomlkit` round-trip with an atomic replace). All reads and
-writes go through one authority — `wtm.config` — the only module that touches a
-`.wtm/config.toml` file. It offers an arbitrary-key facility (read/write any
-scalar at any named scope), a typed read view, and named structural registry
-mutations (`add`/`set`/`rename`/`delete` workspace, `default-workspace`, global
-`base-branch`) that write the **user file** and own their cross-key fixups (a
-rename follows a dangling `default-workspace`).
+A taste — the [arbitrary-key facility](#arbitrary-keys-config-setgetunset)
+writes any key at the entity your cwd infers (details below):
+
+```sh
+wtm config set ci.runner.image ubuntu   # lands in <project>/.wtm/config.toml
+wtm config get ci.runner.image          # ubuntu
+```
+
+Most config is hand-edited; management commands write it for you — through one
+authority, `wtm.config`, with a comment-preserving `tomlkit` round-trip and an
+atomic replace (see [Concurrency](#concurrency)). It offers an arbitrary-key
+facility (read/write any scalar at any named scope), a typed read view, and
+named structural registry mutations (`add`/`set`/`rename`/`delete` workspace,
+`default-workspace`, global `base-branch`) that write the **user file** and own
+their cross-key fixups (a rename follows a dangling `default-workspace`).
 
 ## Write placement (`-s/--scope`)
 
@@ -63,9 +71,21 @@ user-file-only. `WTM_NO_CONFIG` refuses all writes. Because a workspace-local
 value *wins* on merge, clearing it there (`set -b ""`) lets a lesser-locality
 value (e.g. the user-file registry annotation) resurface.
 
+## Concurrency
+
+Every config write — scalar, array element, table cell, structural mutation —
+is serialised by a **per-directory lock** (`flock` on the config file's
+containing dir, which is stable — unlike the file, replaced on every write) and
+is a **read-modify-write**: it re-reads the file fresh under the lock and
+applies just its delta, so a concurrent writer's *other* keys survive (no
+clobber when two invocations touch the same file, and no lost element when they
+mutate the same array). A write that changes nothing (e.g. removing an absent
+key) is elided — it neither creates an empty file nor churns an existing one.
+
 ## Arbitrary keys (`config set/get/unset`)
 
-Any arbitrary key cascades too. `wtm config set/get/unset KEY [VALUE]` acts
+Any arbitrary key resolves by the same locality merge.
+`wtm config set/get/unset KEY [VALUE]` acts
 on the **cwd-inferred entity** (the deepest one the cwd sits inside — worktree,
 else project, else the active workspace); `-s/--scope` picks the file tier the
 same way annotations do. An optional **locator** prefix names another entity
@@ -73,8 +93,8 @@ instead; `-g/--global` skips entities entirely and targets the global tier
 (see [Global tier](#global-tier--g) below).
 
 - `wtm config set KEY VALUE [-s SCOPE]` — write an arbitrary key. `KEY` may be a
-  dotted path (`ci.runner.image`) naming a nested cell; see [Sections](#sections)
-  below.
+  dotted path (`ci.runner.image`) naming a nested cell; see
+  [Sections](#sections-dotted-paths-and-deep-merge) below.
 - `wtm config get KEY [SUBKEY] [--origin] [--json]` — resolve it (most-local wins). A
   scalar prints bare, an array one element per line, a table `subkey = value` per
   line (sorted, nested sub-tables indented); pass `SUBKEY` to read a single table
@@ -82,7 +102,14 @@ instead; `-g/--global` skips entities entirely and targets the global tier
   TOML-faithfully (booleans lower-case, dates ISO-8601). `--origin` lists where each
   value is defined: per-cell (`path = value  [source]  file`) for a table, or one
   line per carrying rung for a scalar/array — its scope, or its definition level
-  (`project`/`workspace`/`global`) for an inherited key — and the file it lives in.
+  (`project`/`workspace`/`global`) for an inherited key — and the file it lives in:
+
+  ```text
+  $ wtm config get port --origin
+  3001  [worktree]  ~/work/api/worktrees/feat-42/.wtm/config.toml
+  8080  [project]  ~/work/api/.wtm/config.toml
+  ```
+
   `--json` instead emits the effective value as bare JSON (`8080`, `true`, a nested
   object, `null` when unset); mutually exclusive with `--origin`.
 - `wtm config unset KEY [-s SCOPE]` — remove it from one tier.
@@ -91,9 +118,10 @@ instead; `-g/--global` skips entities entirely and targets the global tier
 
 `-g/--global` on all three verbs targets the **global tier**: top-level keys of
 the user file (`-s system`: the system file), with no `[workspaces…]` nesting —
-the same slots `config show -g` renders and `config base-branch` writes.
-Mutually exclusive with a locator (and with SUBKEY on `get`; a dotted `KEY`
-still reads a nested cell). A global-tier key is still **entity-local by
+the same slots `config show -g` renders and `config base-branch` writes. Reads
+probe both files with the user file winning. Mutually exclusive with a locator
+(and with SUBKEY on `get`; a dotted `KEY` still reads a nested cell). A
+global-tier key is still **entity-local by
 default**: until the key is also named in an `inheritable` array, no descendant
 entity resolves it.
 
@@ -133,7 +161,7 @@ element-wise, instead of writing a scalar:
   (**set semantics**: idempotent, a value already present is a no-op); creates
   the array on first add. `KEY` may be dotted (`ci.ports`).
 - `wtm config unset KEY VALUE -a [-s SCOPE]` — strip every occurrence of `VALUE`
-  from that array (matching by native equality; see [Typed values](#typed-values) below).
+  from that array (matching by native equality; see **Typed values** below).
 - `wtm config set KEY SUBKEY VALUE -t [-s SCOPE]` — set `SUBKEY = VALUE` in the
   table at `KEY`; creates the table on first set. `KEY` may be dotted, so this is
   the one-level form of a dotted write.
@@ -190,14 +218,7 @@ wtm config set -g since 1979-05-27T07:32:00Z -x # a real TOML datetime
 wtm config get -g port --json                   # 8080
 ```
 
-Every config write is serialised by a **per-directory lock** (`flock` on the
-config file's containing dir, which is stable — unlike the file, replaced on
-every write) and is a **read-modify-write**: it re-reads the file fresh under
-the lock and applies just its delta, so a concurrent writer's *other* keys
-survive (no clobber when two invocations touch the same file, and no lost
-element when they mutate the same array). A write that changes nothing (e.g.
-removing an absent key) is elided — it neither creates an empty file nor churns
-an existing one.
+### Inheritance (the `inheritable` axis)
 
 An **inheritable** key resolves up the containment chain rather than staying
 entity-local — it is a *non-entity-specific* key: a shared default describing a
@@ -256,8 +277,9 @@ your own keys the same shape: `{ key = "region", floor = "workspace" }` makes
 A floor on `base-branch` itself is refused — it owns a typed surface whose
 resolution is fixed.
 
-Reserved names (`hooks`, `projects`, `worktrees`, `path`, `default-workspace`,
-`inheritable`) have their own surfaces and are refused as arbitrary keys.
+Reserved names (`hooks`, `projects`, `worktrees`, `workspaces`, `path`,
+`default-workspace`, `inheritable`) have their own surfaces and are refused as
+arbitrary keys.
 
 ## Inline hooks (`hook set/unset`)
 
@@ -268,12 +290,12 @@ that one file; commands still accumulate across scopes at read time.
 
 ## Showing the effective config
 
-`wtm config show` renders the effective merge as one **global-rooted pruned
-tree**. A single optional locator (or the cwd) resolves a target entity; the
-branch from global down to that target is always shown, and `-r` extends
-downward into the target's subtree.
+`wtm config show` renders the resolved config as one **global-rooted pruned
+tree**. A single optional locator (one or more positional tokens), or the cwd,
+resolves a target entity; the branch from global down to that target is always
+shown, and `-r` extends downward into the target's subtree.
 
-```
+```text
 wtm config show [LOCATOR...] [-g] [-r] [-d TIER] [-o/--origin] [--hooks] [-j/--json]
 ```
 
@@ -314,10 +336,30 @@ ancestor and its own descendants) up to the depth cap.
 | `config show -g -r -d project` | every workspace and project, no worktrees |
 | `config show myws -r -d project` | global → workspace + all its projects, no worktrees |
 
+A run against the [example config](#example) below (with a `feat-42` worktree
+checked out), from inside that worktree:
+
+```text
+$ wtm config show
+default base-branch: main
+workspace work: /home/nia/work
+  description: day job
+  project api: /home/nia/work/api
+    base-branch: develop
+    worktree feat-42: /home/nia/work/api/worktrees/feat-42
+```
+
+The text view shows each value **once, at its defining tier**: an inherited
+value is suppressed at descendants, whose defining ancestor is always rendered
+above on the same branch — here the global `base-branch: main` prints once at
+the root even though `api` and `feat-42` both resolve to it (`api`'s own
+`develop` overrides it for the project subtree). Arbitrary keys follow the same
+rule. `--json` is the counterpart view: full *effective* merged values,
+inherited values repeated at every descendant.
+
 On-disk entities are unioned with declared ones, so annotated-but-inert
 projects and declared-but-absent worktrees still surface (an inert project is
-marked `(no .git on disk)`). Arbitrary keys resolved along the
-shown branch are always printed.
+marked `(no .git on disk)`).
 
 `--origin` tags each value with its **winning** scope, arbitrary keys
 included: a section is labelled per cell (each leaf its own carrier, e.g.
@@ -328,10 +370,11 @@ hooks per scope. Both are **ungated** — they apply in every mode, with or
 without `-r` or `-g` (the former subtree-only restriction is gone).
 
 `-j`/`--json` emits the result as a nested JSON object instead of text, always
-rooted at global (`default-base-branch`, `base-branch-source`, `extra`, then
+rooted at global (`default-base-branch`, `extra`, then
 `workspaces` → `projects` → `worktrees`, pruned exactly as the text form).
-Effective values only — `--json` combined with `--origin` or `--hooks` is an
-error (use `config get KEY --origin` for structured provenance).
+Effective values only — inherited values appear at every descendant — and no
+provenance: `--json` combined with `--origin` or `--hooks` is an error (use
+`config get KEY --origin` for structured provenance).
 
 The **workspace registry** (name → path) lives at system/user scope; a
 workspace's own metadata and its projects' annotations may also live in its
