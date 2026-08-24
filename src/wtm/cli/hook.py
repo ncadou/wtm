@@ -125,22 +125,35 @@ def hook_list(
     the cwd worktree, as before.
     """
     grouped = ctx.obj.hooks.list(_locate_worktree_args(ctx, args or [], command="hook list"))
-    for line in _render_hook_list(grouped, types=types):
+    plugin = ctx.obj.hooks.plugin_rows(args or [])
+    for line in _render_hook_list(grouped, types=types, plugin=plugin):
         print(line)
 
 
-def _render_hook_list(grouped: dict[str, list], *, types: bool) -> list[str]:
-    """Render the grouped hook listing (full tree, or a compact per-event summary)."""
+def _render_hook_list(
+    grouped: dict[str, list],
+    *,
+    types: bool,
+    plugin: dict[str, list[tuple[str, str]]] | None = None,
+) -> list[str]:
+    """Render the grouped hook listing (full tree, or a compact per-event summary).
+
+    *plugin* carries the active plugins' contributed commands (the pseudo-tier
+    alongside the five scopes), rendered as ``(plugin:<name>)`` rows after the
+    scopes -- setup-first/teardown-last placement noted in the docs.
+    """
+    plugin = plugin or {}
     lines: list[str] = []
     for event, listings in grouped.items():
+        plugin_rows = plugin.get(event, [])
         if types:
             count = sum(
                 (1 if lst.file else 0) + len(lst.entries) + len(lst.inline) for lst in listings
-            )
+            ) + len(plugin_rows)
             scopes = ",".join(lst.scope.value for lst in listings) or "-"
             lines.append(f"{event}: {count} hook(s) [{scopes}]")
             continue
-        if not listings:
+        if not listings and not plugin_rows:
             continue
         lines.append(f"{event}:")
         for lst in listings:
@@ -151,6 +164,10 @@ def _render_hook_list(grouped: dict[str, list], *, types: bool) -> list[str]:
                 lines.append(f"    {entry}")
             for command in lst.inline:
                 lines.append(f"    (config) {command}")
+        if plugin_rows:
+            lines.append("  plugin:")
+            for name, command in plugin_rows:
+                lines.append(f"    (plugin:{name}) {command}")
 
     return lines
 

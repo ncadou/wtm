@@ -37,7 +37,16 @@ from wtm.core import expand_path
 from wtm.exceptions import KindConflictError, WtmError
 
 RESERVED_KEYS = frozenset(
-    {"hooks", "projects", "worktrees", "workspaces", "path", "default-workspace", "inheritable"}
+    {
+        "hooks",
+        "projects",
+        "worktrees",
+        "workspaces",
+        "path",
+        "default-workspace",
+        "inheritable",
+        "plugins",
+    }
 )
 # Keys whose tables are pure containers of named children.
 CONTAINER_KEYS = frozenset({"hooks", "projects", "worktrees"})
@@ -76,6 +85,10 @@ NON_INHERITABLE_KEYS = frozenset({"description"})
 # is a TOML array of key names; it accumulates (unions) across scopes like
 # `hooks.on`, and never appears in an entity's `extra` payload.
 INHERITABLE_DECL_KEY = "inheritable"
+# The reserved key naming the plugin activation table: ``[plugins] NAME = bool``
+# at any scope file's top level, folded per-plugin-cell most-local-wins (so a
+# deeper scope may enable or disable a single plugin without touching others).
+PLUGINS_DECL_KEY = "plugins"
 
 
 # --- data model --------------------------------------------------------------

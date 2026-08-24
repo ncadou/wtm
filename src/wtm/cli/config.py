@@ -8,6 +8,7 @@ from pathlib import Path
 
 import typer
 
+from wtm import plugins as plugin_api
 from wtm.cli.common import _GENERIC_SCOPE_HELP, _generic_scope, _rung_label
 from wtm.cli.completions.config import (
     _complete_config_get,
@@ -21,7 +22,9 @@ from wtm.cli.completions.config import (
 from wtm.cli.locator import _locate_one, _locate_optional
 from wtm.config import (
     HOOKS_POLICY_CELLS,
+    RESERVED_KEYS,
     TYPED_VALUE_FORMATS,
+    Config,
     ConfigSlice,
     DepthTier,
     GenericTarget,
@@ -29,6 +32,7 @@ from wtm.config import (
     ResolvedProject,
     ResolvedWorkspace,
     ResolvedWorktree,
+    Scope,
     SliceTarget,
     SourceRung,
     TomlValue,
@@ -42,8 +46,8 @@ from wtm.config import (
     validate_arbitrary_key_path,
 )
 from wtm.core import WtmError, current_dir
-from wtm.hooks import HookSpec, Scope
-from wtm.output import config_slice_json, log
+from wtm.hooks import HookSpec
+from wtm.output import config_slice_json, log, warn
 
 
 def _is_policy_key(key: str) -> bool:
@@ -51,6 +55,60 @@ def _is_policy_key(key: str) -> bool:
     parts = key.split(".")
 
     return len(parts) == 2 and parts[0] == "hooks" and parts[1] in HOOKS_POLICY_CELLS
+
+
+def _norm_head(head: str) -> str:
+    """Normalize a key head for plugin-identity comparison (case, ``_``/``-``)."""
+    return head.strip().lower().replace("_", "-")
+
+
+def _target_dirs(target: GenericTarget) -> tuple[Path | None, Path | None]:
+    """Best-effort ``(project_dir, worktree_dir)`` off *target*'s probes.
+
+    The first PROJECT/WORKTREE probe's file is ``<dir>/.wtm/config.toml``, so
+    the entity dir is two levels up -- enough context for the plugin
+    activation fold at an arbitrary-key write site.
+    """
+    wt_dir: Path | None = None
+    project_dir: Path | None = None
+    for probe in target.probes:
+        if probe.scope is Scope.WORKTREE and wt_dir is None:
+            wt_dir = probe.file.parent.parent
+        elif probe.scope is Scope.PROJECT and project_dir is None:
+            project_dir = probe.file.parent.parent
+
+    return project_dir, wt_dir
+
+
+def _warn_inactive_plugin_namespace(config: Config, target: GenericTarget, key: str) -> None:
+    """Warn when *key*'s head belongs to a known plugin inactive at this site.
+
+    Ownership attribution compares the head against registered names (any
+    scope's ``[plugins]`` cell) plus entry-point-visible plugin names,
+    normalized for case and ``-``/``_``. An active owner stays silent (that
+    is the normal use); an unknown head stays silent too -- only the
+    known-but-inactive case warns, on writes only.
+    """
+    head = _norm_head(key.split(".", 1)[0])
+    if not head or head in RESERVED_KEYS:
+        return
+
+    project_dir, wt_dir = _target_dirs(target)
+    ws = config.workspace_of(project_dir) if project_dir is not None else None
+    active = config.active_plugins(ws=ws, project_dir=project_dir, worktree_dir=wt_dir)
+    if any(_norm_head(m.name) == head for m in active):
+        return
+
+    known = set(config.plugin_registry(ws=ws, project_dir=project_dir, worktree_dir=wt_dir))
+    known.update(plugin_api.entry_point_names())
+    for name in sorted(known):
+        if _norm_head(name) == head:
+            warn(
+                f"'{head}.*' keys belong to plugin '{name}', which is not active "
+                f"here; register it (wtm plugin add {name}) or ignore"
+            )
+
+            return
 
 
 config_app = typer.Typer(
@@ -524,6 +582,8 @@ def config_set(
     full_key = _join_key(prefix, key)
     head = key.split(".", 1)[0]
     check_key_floor(target.floors.get(head), head, scope, (*prefix, *key.split(".")))
+    if not (key == "inheritable" and array):
+        _warn_inactive_plugin_namespace(config, target, key)
     if array:
         written: TomlValue | dict[str, str] = coerced if key != "inheritable" else element
         config.add_to_array(address, full_key, written)

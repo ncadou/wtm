@@ -19,6 +19,13 @@ overridden by its config ``[hooks] dir`` -- resolved through the single
 firing and management consult.) Inline hooks come from the matching config
 scope's ``[hooks.on]`` / entity ``hooks.on`` maps and accumulate across scopes.
 
+A sixth, plugin tier rides alongside: every active plugin (a ``[plugins]``
+registry cell naming a resolvable manifest -- see :mod:`wtm.plugins`)
+contributes shell commands per event, fired first on setup events and last on
+teardown (the plugin is machine-global like the system scope), each under the
+same env contract, policy answer, and strict/non-fatal rules as an inline
+hook.
+
 Fire-time policy resolves through config too. Two tri-state booleans live in
 each scope's ``[hooks]`` table and fold most-local-present-wins down the fired
 scope ladder (one effective value per operation):
@@ -185,6 +192,7 @@ def _fire(
     strict: bool,
     specs: dict[Scope, HookSpec],
     dir_of: Callable[[Scope], Path],
+    plugin_cmds: Sequence[tuple[str, str]] = (),
 ) -> None:
     """The one fire loop behind every event tier.
 
@@ -201,6 +209,11 @@ def _fire(
         knows the target's dirs).
     :param dir_of: scope -> builtin discovery dir (delegates to
         :meth:`Config.hooks_dir <wtm.config.Config.hooks_dir>`).
+    :param plugin_cmds: ``(plugin name, command)`` rows contributed by the
+        active plugins -- a pseudo-tier alongside the five scopes, fired first
+        on setup events and last on teardown (the plugin is machine-global),
+        each command executed exactly like an inline hook under the same
+        policy answer.
     """
     # The env master switch wins over everything, config included.
     if config.no_hooks:
@@ -219,13 +232,26 @@ def _fire(
         return
 
     fatal = strict or config_strict
-    for scope in selected:
-        spec = specs[scope]
-        if spec.run_builtins:
-            base = dir_of(scope) / event
-            _run_hook_source(base, hcwd, arg1, env, strict=fatal)
-        for command in spec.on.get(event, []):
+
+    def _fire_plugins() -> None:
+        for _name, command in plugin_cmds:
             _run_inline_hook(command, hcwd, arg1, env, strict=fatal)
+
+    def _fire_scopes() -> None:
+        for scope in selected:
+            spec = specs[scope]
+            if spec.run_builtins:
+                base = dir_of(scope) / event
+                _run_hook_source(base, hcwd, arg1, env, strict=fatal)
+            for command in spec.on.get(event, []):
+                _run_inline_hook(command, hcwd, arg1, env, strict=fatal)
+
+    if event in TEARDOWN_EVENTS:
+        _fire_scopes()
+        _fire_plugins()
+    else:
+        _fire_plugins()
+        _fire_scopes()
 
 
 def run_config_hooks(config: Config, files: Sequence[Path], *, strict: bool = False) -> None:
@@ -296,6 +322,9 @@ def run_config_hooks(config: Config, files: Sequence[Path], *, strict: bool = Fa
         strict=strict,
         specs=specs,
         dir_of=dirs.__getitem__,
+        plugin_cmds=config.plugin_commands(
+            "post-config", ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ),
     )
 
 
@@ -394,6 +423,9 @@ def run_hooks(
         dir_of=lambda scope: config.hooks_dir(
             scope, ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
         ),
+        plugin_cmds=config.plugin_commands(
+            event, ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ),
     )
 
 
@@ -445,6 +477,7 @@ def run_workspace_hooks(
         strict=strict,
         specs=specs,
         dir_of=lambda scope: config.hooks_dir(scope, ws=ws),
+        plugin_cmds=config.plugin_commands(event, ws=ws),
     )
 
 
@@ -497,6 +530,7 @@ def run_project_hooks(
         strict=strict,
         specs=specs,
         dir_of=lambda scope: config.hooks_dir(scope, ws=ws, project_dir=project_dir),
+        plugin_cmds=config.plugin_commands(event, ws=ws, project_dir=project_dir),
     )
 
 
@@ -724,6 +758,26 @@ class Hooks:
             return context.project_dir, context.dir
         except (WtmError, git.GitError):
             return None, None
+
+    def plugin_rows(self, args: list[str]) -> dict[str, list[tuple[str, str]]]:
+        """Per-event ``(plugin name, command)`` rows contributed by active plugins.
+
+        The listing-side view of the plugin pseudo-tier: best-effort like
+        :meth:`list` -- when the target cannot be resolved, the context dirs
+        are ``None`` and only the workspace/global tiers answer.
+        """
+        project_dir, worktree_dir = self._target_dirs(args)
+        ws = self.config.workspace_of(project_dir) if project_dir is not None else None
+
+        rows: dict[str, list[tuple[str, str]]] = {}
+        for event in EVENTS:
+            found = self.config.plugin_commands(
+                event, ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+            )
+            if found:
+                rows[event] = found
+
+        return rows
 
     def _inline_for(
         self, scope: Scope, event: str, project_dir: Path | None, worktree_dir: Path | None

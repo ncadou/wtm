@@ -19,8 +19,10 @@ import typer
 from typer.core import TyperGroup
 
 from wtm import git
+from wtm import plugins as plugin_api
 from wtm.cli.config import config_app
 from wtm.cli.hook import hook_app
+from wtm.cli.plugin import plugin_app
 from wtm.cli.project import _clone, import_, project_app
 from wtm.cli.workspace import workspace_app
 from wtm.cli.worktree import (
@@ -120,6 +122,9 @@ app = typer.Typer(
 def _bootstrap(ctx: typer.Context) -> None:
     """Load config once and bind the operation objects onto the context."""
     config = Config.load()
+    # Plugin manifests resolve fresh per invocation and attach post-load; a
+    # resolution failure is a warning, never an abort (warn-and-skip).
+    config = plugin_api.attach_active_plugins(config)
     ctx.obj = _Services(
         config=config,
         project=Project(config),
@@ -154,12 +159,13 @@ def _fire_post_config(ctx: typer.Context) -> None:
 
 
 # Command groups, registered in panel order so the "Command groups" panel lists
-# worktree first, then project, workspace, config, hook.
+# worktree first, then project, workspace, config, hook, plugin.
 app.add_typer(worktree_app, name="worktree", rich_help_panel="Command groups")
 app.add_typer(project_app, name="project", rich_help_panel="Command groups")
 app.add_typer(workspace_app, name="workspace", rich_help_panel="Command groups")
 app.add_typer(config_app, name="config", rich_help_panel="Command groups")
 app.add_typer(hook_app, name="hook", rich_help_panel="Command groups")
+app.add_typer(plugin_app, name="plugin", rich_help_panel="Command groups")
 
 
 # Worktree handlers, registered in one ordered block so the help ordering lives

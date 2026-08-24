@@ -135,13 +135,16 @@ section — a TOML table. `config set ci.runner.image ubuntu` writes
 identical to `config set ci.runner.image ubuntu`. A bare `KEY` keeps its
 top-level meaning. Only the **head** segment of a dotted path is checked against
 the reserved names (`hooks` / `projects` / `worktrees` / `workspaces` / `path` /
-`default-workspace` / `inheritable`) — deeper segments are harmless cells, so
+`default-workspace` / `inheritable` / `plugins`) — deeper segments are harmless
+cells, so
 `ci.workspaces` is allowed (a cell named `workspaces` inside your `ci` section),
 but `hooks.on.x` is refused. The one carve-out: the hook policy cells
 `hooks.strict` and `hooks.enabled` (exactly two segments, boolean values) are
 writable here — they have no dedicated verb (see
 [hooks.md](hooks.md#fire-time-policy)); every other `hooks.*` path stays
-reserved (`hooks.on.*` belongs to `hook set/unset`).
+reserved (`hooks.on.*` belongs to `hook set/unset`). Writing into a key head
+owned by a known-but-inactive [plugin](plugins.md) succeeds with a warning;
+while the plugin is active it is silent and normal.
 
 A section **deep-merges** across tiers — per cell, most-local wins. If a project
 sets `[ci] registry` and the workspace sets `[ci] runner`, `config get ci` yields
@@ -255,7 +258,11 @@ clash. The `inheritable` declaration **accumulates** (unions) across scopes like
 `hooks.on`: a workspace may name a key to opt it in for all its projects, even
 if the global file does not. When several scopes declare floors for the same
 key, the most-local declaration wins. Membership is always a curated decision —
-hardcoded (builtins) or declared by you — never inferred from a key's name,
+hardcoded (builtins), declared by you, or declared by an active
+[plugin](plugins.md) (whose elements form a baseline that travels with the
+plugin's activation: your explicit `inheritable` entries outrank a plugin's
+floor for the same key, and deactivating the plugin removes its baseline) —
+never inferred from a key's name,
 type, or value.
 
 ### Floors
@@ -278,8 +285,24 @@ A floor on `base-branch` itself is refused — it owns a typed surface whose
 resolution is fixed.
 
 Reserved names (`hooks`, `projects`, `worktrees`, `workspaces`, `path`,
-`default-workspace`, `inheritable`) have their own surfaces and are refused as
-arbitrary keys.
+`default-workspace`, `inheritable`, `plugins`) have their own surfaces and are
+refused as arbitrary keys.
+
+## Plugins (`[plugins]`)
+
+Plugin activation is a reserved table at any scope file's top level — one
+boolean per plugin, deep-merged per cell most-local-wins like any section (so
+a workspace may disable one plugin without touching the others):
+
+```toml
+[plugins]
+wtm-git = true
+wtm-server = false      # a deeper scope can shadow an outer true, per plugin
+```
+
+Manage it with `wtm plugin add/remove/list/show` rather than by hand; what the
+activation buys and how manifests are resolved is [plugins.md](plugins.md)'s
+subject.
 
 ## Inline hooks (`hook set/unset`)
 

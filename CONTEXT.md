@@ -143,7 +143,28 @@ new-branch base ref only (`--base/--off` > configured > `origin/HEAD` > `HEAD`
 
 **Hook**:
 An executable (builtin file) or `sh -c` command (inline config) fired on a
-lifecycle event, discovered/declared across scopes.
+lifecycle event, discovered/declared across scopes. A **plugin** contributes a
+third source of commands (see **Plugin**).
+
+**Plugin**:
+An installed tool registered by *activation alone*: a `[plugins] NAME = true`
+cell at any scope file's top level (`false` disables; cells deep-merge
+per-plugin most-local-wins across scopes). Everything the plugin contributes
+lives in its **manifest**, resolved fresh per invocation -- `wtm.plugins` entry
+point first, else `NAME wtm-manifest --json` on PATH (an entry point commits
+the resolution: present-but-broken beats a stale command) -- declaring hook
+commands per event, owned key **namespaces**, declared inheritable elements,
+and seed defaults. Manifest contributions merge dynamically into the resolved
+snapshot; registration writes nothing but the cell. Hook commands form a sixth
+tier beside the five scopes: first on setup events, last on teardown, same
+env/policy/strict contract as inline hooks. An active plugin's namespaces own
+their keys' head segments (silent writes); a known-but-inactive owner's
+namespace warns on write. Its inheritable elements are a baseline under
+explicit user declarations and vanish with deactivation. A registered-but-
+unresolvable name is warn-and-skip, flagged by `plugin list`. Managed by
+`wtm plugin add/remove/list/show`; `add --seed` materializes manifest defaults
+once (user-owned afterwards). _Avoid_: extension, add-on (registration is
+declarative, not code loaded into wtm).
 
 **Fire-time policy**:
 The per-operation hook knobs `enabled` / `strict`, tri-state booleans in any

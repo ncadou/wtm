@@ -10,6 +10,7 @@ from __future__ import annotations
 
 __all__ = [
     "KindConflictError",
+    "ManifestError",
     "NoActiveWorkspaceError",
     "ReservedKeyError",
     "WriteProhibitedError",
@@ -35,3 +36,7 @@ class NoActiveWorkspaceError(WtmError):
 
 class WriteProhibitedError(WtmError):
     """A config write was refused (``WTM_NO_CONFIG``)."""
+
+
+class ManifestError(WtmError):
+    """A plugin manifest is missing, malformed, or unsupported."""

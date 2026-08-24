@@ -16,7 +16,7 @@ __all__ = [
     "resolve_project_dir",
 ]
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -50,12 +50,14 @@ from wtm.config.entities import (
     build_global_entity,
 )
 from wtm.config.generic import parse_inheritable_element
+from wtm.config.manifest import PluginManifest
 from wtm.config.model import (
     FLOOR_TIERS,
     HOOKS_POLICY_CELLS,
     INHERIT_FLOORS,
     INHERITABLE_DECL_KEY,
     INHERITABLE_KEYS,
+    PLUGINS_DECL_KEY,
     RESERVED_KEYS,
     TYPED_INHERITABLE_KEYS,
     ConfigSlice,
@@ -86,7 +88,7 @@ from wtm.core import (
     within,
     worktree_name,
 )
-from wtm.exceptions import NoActiveWorkspaceError, WtmError
+from wtm.exceptions import KindConflictError, NoActiveWorkspaceError, WtmError
 
 # --- config ------------------------------------------------------------------
 
@@ -105,6 +107,7 @@ class Config:
     default_base_branch: str | None = None
     default_workspace: str | None = None
     _settings: Settings = field(default_factory=Settings.from_env)
+    _plugins: tuple[PluginManifest, ...] = ()
 
     # --- active workspace ----------------------------------------------------
 
@@ -211,6 +214,291 @@ class Config:
         spec = self.scope_hook_spec(scope, project_dir, worktree_dir)
 
         return spec.dir or worktree_dir / ".wtm" / "hooks"
+
+    # --- plugins -------------------------------------------------------------
+
+    def attach_plugins(self, manifests: Sequence[PluginManifest]) -> Config:
+        """Bind resolved plugin *manifests* onto this snapshot (a replaced copy).
+
+        The CLI resolves manifests once per invocation (entry point first, then
+        the ``<command> wtm-manifest`` subprocess) right after :meth:`load` and
+        attaches them here, so hook firing, namespace ownership, and the
+        inheritable union all see the active set. Library users who never
+        attach get today's behavior unchanged.
+        """
+        return replace(self, _plugins=tuple(sorted(manifests, key=lambda m: m.name)))
+
+    def _plugin_probes(
+        self,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> list[Probe]:
+        """The top-level probe chain for plugin activation, most-local-first.
+
+        Unlike entity cascades these probes never descend into a registry
+        table: a ``[plugins]`` cell is meaningful only at a scope file's top
+        level. The worktree/project rungs appear only when the caller supplies
+        those dirs.
+        """
+        probes: list[Probe] = []
+        if worktree_dir is not None:
+            probes.append(Probe(Scope.WORKTREE, worktree_dir / ".wtm" / "config.toml", ()))
+        if project_dir is not None:
+            probes.append(Probe(Scope.PROJECT, project_dir / ".wtm" / "config.toml", ()))
+        if ws is not None:
+            probes.append(Probe(Scope.WORKSPACE, ws.path / ".wtm" / "config.toml", ()))
+        probes.append(Probe(Scope.USER, user_config_path(), ()))
+        probes.append(Probe(Scope.SYSTEM, system_config_path(), ()))
+
+        return probes
+
+    def plugin_registry(
+        self,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> dict[str, bool]:
+        """The ``[plugins]`` activation table folded most-local-wins per cell.
+
+        Each scope file's top-level ``[plugins]`` table answers one boolean per
+        plugin name; the most-local scope carrying a cell wins for that name
+        (so a workspace may enable or disable one plugin without touching the
+        others declared above it). A non-table ``[plugins]`` or a non-boolean
+        cell is a hard error, matching the read-side kind rules.
+        """
+        registry: dict[str, bool] = {}
+        probes = self._plugin_probes(ws=ws, project_dir=project_dir, worktree_dir=worktree_dir)
+        for probe in probes:
+            node = read_table(self._store, probe).get(PLUGINS_DECL_KEY)
+            if node is None:
+                continue
+            if not isinstance(node, dict):
+                raise KindConflictError(
+                    f"config key '{PLUGINS_DECL_KEY}' must be a table ({probe.file})"
+                )
+            for name, value in node.items():
+                if name in registry:
+                    continue
+
+                if not isinstance(value, bool):
+                    raise WtmError(
+                        f"[{PLUGINS_DECL_KEY}] '{name}' must be a boolean ({probe.file})"
+                    )
+                registry[name] = value
+
+        return registry
+
+    def active_plugins(
+        self,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> tuple[PluginManifest, ...]:
+        """The attached manifests whose activation cell is true for this context."""
+        registry = self.plugin_registry(ws=ws, project_dir=project_dir, worktree_dir=worktree_dir)
+
+        return tuple(m for m in self._plugins if registry.get(m.name) is True)
+
+    def plugin_namespaces(
+        self,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> frozenset[str]:
+        """The arbitrary-key heads owned by plugins active in this context."""
+        heads: set[str] = set()
+        for manifest in self.active_plugins(
+            ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ):
+            heads.update(manifest.namespaces)
+
+        return frozenset(heads)
+
+    def plugin_commands(
+        self,
+        event: str,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> list[tuple[str, str]]:
+        """Hook commands the active plugins declare for *event*, ``(name, cmd)``.
+
+        Manifests run in sorted-name order; within a manifest, declared order.
+        The firing engine treats each command exactly like an inline config
+        hook (same env contract, same strict/non-fatal rules).
+        """
+        rows: list[tuple[str, str]] = []
+        for manifest in self.active_plugins(
+            ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ):
+            rows.extend((manifest.name, cmd) for cmd in manifest.hooks.get(event, ()))
+
+        return rows
+
+    def registered_plugin_names(self) -> list[str]:
+        """Every plugin named by any known scope's ``[plugins]`` table (union).
+
+        The management-surface view: scans the system and user files plus the
+        active workspace's (and, when inferrable, the cwd's project/worktree)
+        files, so ``plugin list`` sees registrations regardless of where they
+        sit. Activation still resolves per context via :meth:`plugin_registry`.
+        """
+        names: set[str] = set()
+        for _scope, probe in self._known_plugin_probes():
+            node = read_table(self._store, probe).get(PLUGINS_DECL_KEY)
+            if isinstance(node, dict):
+                names.update(node)
+
+        return sorted(names)
+
+    def registration_sites(self, name: str) -> dict[Scope, bool]:
+        """Where *name* has an activation cell among known scopes, mapped to its value."""
+        sites: dict[Scope, bool] = {}
+        for scope, probe in self._known_plugin_probes():
+            node = read_table(self._store, probe).get(PLUGINS_DECL_KEY)
+            if isinstance(node, dict) and name in node:
+                sites[scope] = bool(node[name])
+
+        return sites
+
+    def _known_plugin_probes(self) -> list[tuple[Scope, Probe]]:
+        """(scope, top-level probe) for every file a plugin cell may sit in."""
+        probes: list[tuple[Scope, Probe]] = [
+            (Scope.SYSTEM, Probe(Scope.SYSTEM, system_config_path(), ())),
+            (Scope.USER, Probe(Scope.USER, user_config_path(), ())),
+        ]
+        ws = self._active_ws_or_none()
+        if ws is not None:
+            probe = Probe(Scope.WORKSPACE, ws.path / ".wtm" / "config.toml", ())
+            probes.append((Scope.WORKSPACE, probe))
+
+        location = slice_view.cwd_location(self)
+        if location is not None:
+            loc_ws = self.workspaces.get(location.workspace)
+            if loc_ws is not None and location.project is not None:
+                project_dir = loc_ws.path / location.project
+                proj_probe = Probe(Scope.PROJECT, project_dir / ".wtm" / "config.toml", ())
+                probes.append((Scope.PROJECT, proj_probe))
+                if location.name is not None:
+                    wt_file = project_dir / "worktrees" / location.name / ".wtm" / "config.toml"
+                    probes.append((Scope.WORKTREE, Probe(Scope.WORKTREE, wt_file, ())))
+
+        return probes
+
+    def set_plugin_cell(self, name: str, value: bool, scope: Scope) -> ConfigAddress:
+        """Write *name*'s activation cell into *scope*'s file top level."""
+        address = self._plugin_address(scope)
+        self.set_value(address, (PLUGINS_DECL_KEY, name), value)
+
+        return address
+
+    def unset_plugin_cell(self, name: str, scope: Scope) -> ConfigAddress:
+        """Remove *name*'s activation cell from *scope*'s file (no-op if absent)."""
+        address = self._plugin_address(scope)
+        self.unset_value(address, (PLUGINS_DECL_KEY, name))
+
+        return address
+
+    def unset_plugin_cell_found(
+        self,
+        name: str,
+        *,
+        ws: Workspace | None = None,
+        project_dir: Path | None = None,
+        worktree_dir: Path | None = None,
+    ) -> Scope:
+        """Remove *name*'s cell from the most-local scope carrying it.
+
+        :raises WtmError: when no known scope declares the plugin.
+        """
+        probes = self._plugin_probes(ws=ws, project_dir=project_dir, worktree_dir=worktree_dir)
+        for probe in probes:
+            node = read_table(self._store, probe).get(PLUGINS_DECL_KEY)
+            if not (isinstance(node, dict) and name in node):
+                continue
+
+            if probe.scope in (Scope.USER, Scope.SYSTEM):
+                address = global_address(probe.scope)
+            else:
+                address = ConfigAddress(probe.scope, probe.file.parent.parent)
+            self.unset_value(address, (PLUGINS_DECL_KEY, name))
+
+            return probe.scope
+
+        raise WtmError(f"plugin '{name}' is not registered in any known scope")
+
+    def seed_plugin_defaults(
+        self, manifest: PluginManifest, scope: Scope
+    ) -> list[tuple[str, object]]:
+        """Write *manifest*'s default values at *scope*'s file top level.
+
+        Returns the ``(dotted key, value)`` pairs written so the caller can
+        report them. Seeding is a one-time materialization: afterwards the
+        values are ordinary user-owned config, untouched by ``plugin remove``.
+        """
+        address = self._plugin_address(scope)
+        written: list[tuple[str, object]] = []
+        for parts, value in manifest.defaults:
+            self.set_value(address, parts, value)
+            written.append((".".join(parts), value))
+
+        return written
+
+    def _plugin_address(self, scope: Scope) -> ConfigAddress:
+        """The top-level file address for a plugin cell at *scope*."""
+        if scope is Scope.SYSTEM or scope is Scope.USER:
+            return global_address(scope)
+        if scope is Scope.WORKSPACE:
+            return ConfigAddress.workspace(self.active_workspace.path)
+        if scope is Scope.PROJECT:
+            return ConfigAddress.project(resolve_project_dir(self, None, None))
+        location = slice_view.cwd_location(self)
+        if (
+            location is not None
+            and location.name is not None
+            and (ws := self.workspaces.get(location.workspace)) is not None
+            and location.project is not None
+        ):
+            wt_dir = ws.path / location.project / "worktrees" / location.name
+
+            return ConfigAddress.worktree(wt_dir)
+
+        raise WtmError(f"'{scope.value}' scope needs an entity dir for plugin cells")
+
+    def _active_ws_or_none(self) -> Workspace | None:
+        """The active workspace when one resolves, else ``None`` (never raises)."""
+        try:
+            return self.active_workspace
+        except NoActiveWorkspaceError:
+            return None
+
+    def cwd_plugin_dirs(self) -> tuple[Path | None, Path | None]:
+        """Best-effort ``(project_dir, worktree_dir)`` for the cwd's plugin context.
+
+        The default activation context for whole-invocation concerns (the CLI
+        bootstrap): the cwd-inferred project and worktree, or ``None``s when
+        the cwd sits outside any project/worktree.
+        """
+        location = slice_view.cwd_location(self)
+        if location is None:
+            return None, None
+
+        ws = self.workspaces.get(location.workspace)
+        if ws is None or location.project is None:
+            return None, None
+
+        project_dir = ws.path / location.project
+
+        return (
+            project_dir,
+            project_dir / "worktrees" / location.name if location.name else None,
+        )
 
     # --- arbitrary-key facility ----------------------------------------------
 
@@ -435,9 +723,9 @@ class Config:
             ),
             default_scope=default,
             inherit=self._inherit_map(
-                ws, project_dir.name, own=self._worktree_probes(project_dir, name)
+                ws, project_dir.name, own=self._worktree_probes(project_dir, name), worktree=name
             ),
-            floors=self.inheritable_floors(ws, project_dir.name),
+            floors=self.inheritable_floors(ws, project_dir.name, worktree=name),
         )
 
     def _project_generic_target(self, ws: Workspace, project_dir: Path) -> GenericTarget:
@@ -469,7 +757,12 @@ class Config:
         )
 
     def _inherit_map(
-        self, ws: Workspace, project: str | None, *, own: list[Probe] | None
+        self,
+        ws: Workspace,
+        project: str | None,
+        *,
+        own: list[Probe] | None,
+        worktree: str | None = None,
     ) -> dict[str, list[TierProbe]]:
         """The tier-tagged inherit chain for every inheritable key of an entity.
 
@@ -484,10 +777,10 @@ class Config:
         """
         ancestors = self._ancestor_tiers(ws, project)
         own_rungs = [TierProbe(None, p) for p in own] if own else []
-        floors = self.inheritable_floors(ws, project)
+        floors = self.inheritable_floors(ws, project, worktree=worktree)
 
         mapping: dict[str, list[TierProbe]] = {}
-        for key in self.inheritable_keys(ws, project):
+        for key in self.inheritable_keys(ws, project, worktree=worktree):
             chain: tuple[TierProbe, ...] = (*own_rungs, *ancestors)
             floor = floors.get(key)
             if floor is not None:
@@ -516,31 +809,50 @@ class Config:
 
         return rungs
 
-    def inheritable_keys(self, ws: Workspace | None, project: str | None) -> frozenset[str]:
+    def inheritable_keys(
+        self, ws: Workspace | None, project: str | None, *, worktree: str | None = None
+    ) -> frozenset[str]:
         """The effective non-entity-specific key set for an entity's resolution.
 
-        The builtin :data:`INHERITABLE_KEYS` unioned with every user-declared
+        The builtin :data:`INHERITABLE_KEYS`, unioned with every active
+        plugin's declared elements, unioned with every user-declared
         ``inheritable`` array found along the entity's containment chain: the
         project cascade (when a *project* is given), the workspace-own cascade,
-        and the global top-level. The declaration *accumulates* across scopes
+        and the global top-level. The declaration *accumulates* across sources
         (a workspace may opt a key in for all its projects), so a key is
-        inheritable for an entity if any relevant scope names it.
+        inheritable for an entity if any source names it.
         """
-        return frozenset(self.inheritable_decls(ws, project))
+        return frozenset(self.inheritable_decls(ws, project, worktree=worktree))
 
     def inheritable_decls(
-        self, ws: Workspace | None, project: str | None
+        self,
+        ws: Workspace | None,
+        project: str | None,
+        *,
+        worktree: str | None = None,
     ) -> dict[str, str | None]:
         """The effective inheritable keys mapped to their floors (``None`` = none).
 
         Same accumulation as :meth:`inheritable_keys`, but each element may
         carry a floor (an ``{ key = ..., floor = ... }`` entry). A malformed or
         refused element raises at read time (the same hard-error treatment a
-        kind clash gets). When several scopes declare floors for the same key,
-        the most-local declaration wins -- the probes are scanned
-        most-local-first, so the first sighting sticks.
+        kind clash gets). Precedence per key: builtin floors first, then the
+        active plugins' declarations (a baseline that travels with the
+        plugin's activation), then explicit user declarations -- the probe
+        scan below is most-local-first and its first sighting sticks, so a
+        user-declared floor always outranks a plugin's.
         """
         decls: dict[str, str | None] = {k: INHERIT_FLOORS.get(k) for k in INHERITABLE_KEYS}
+
+        # Explicit user declarations, most-local-first with first sighting
+        # sticking -- they outrank everything below.
+        user_decls: dict[str, str | None] = {}
+        project_dir = ws.path / project if ws is not None and project is not None else None
+        worktree_dir = (
+            project_dir / "worktrees" / worktree
+            if worktree is not None and project_dir is not None
+            else None
+        )
         probes: list[Probe] = []
         if ws is not None:
             if project is not None:
@@ -554,16 +866,29 @@ class Config:
 
             for element in declared:
                 decl = parse_inheritable_element(element, file=probe.file)
-                if decl.key not in decls:
+                if decl.key not in user_decls:
+                    user_decls[decl.key] = decl.floor
+
+        # Plugin baseline: fills the gaps neither the builtins nor the user
+        # named; it travels with the plugin's activation.
+        for manifest in self.active_plugins(
+            ws=ws, project_dir=project_dir, worktree_dir=worktree_dir
+        ):
+            for decl in manifest.inheritable:
+                if decl.key not in user_decls and decl.key not in decls:
                     decls[decl.key] = decl.floor
+
+        decls.update(user_decls)
 
         return decls
 
-    def inheritable_floors(self, ws: Workspace | None, project: str | None) -> dict[str, str]:
+    def inheritable_floors(
+        self, ws: Workspace | None, project: str | None, *, worktree: str | None = None
+    ) -> dict[str, str]:
         """The effective floors only: inheritable keys that declare one."""
         return {
             key: floor
-            for key, floor in self.inheritable_decls(ws, project).items()
+            for key, floor in self.inheritable_decls(ws, project, worktree=worktree).items()
             if floor is not None
         }
 
@@ -574,12 +899,13 @@ class Config:
         project: str | None,
         *,
         own_tier: str,
+        worktree: str | None = None,
     ) -> dict[str, object]:
         """Fold inherited ancestor values into an entity's own ``extra`` payload.
 
         Starts from *local* (the entity's locality-merged arbitrary keys);
         *own_tier* names the calling entity's tier (``project`` / ``worktree``).
-        For every user-declared inheritable key (see :meth:`inheritable_keys`,
+        For every effective inheritable key (see :meth:`inheritable_keys`,
         excluding the typed-surface :data:`TYPED_INHERITABLE_KEYS` --
         ``base-branch`` owns its provenance method) folds the ancestor chain,
         pruned of every rung below the key's floor (see
@@ -596,9 +922,9 @@ class Config:
             return local
 
         ancestors = self._ancestor_tiers(ws, project)
-        floors = self.inheritable_floors(ws, project)
+        floors = self.inheritable_floors(ws, project, worktree=worktree)
         merged = dict(local)
-        for key in self.inheritable_keys(ws, project):
+        for key in self.inheritable_keys(ws, project, worktree=worktree):
             if key in TYPED_INHERITABLE_KEYS:
                 continue
 
@@ -1085,7 +1411,11 @@ class Config:
         payload, hooks = merge_locality(self._store, self._worktree_probes(project_dir, name))
         local = {k: v for k, v in payload.items() if k != "description"}
         extra = self._inherited_extra(
-            local, self.workspace_of(project_dir), project_dir.name, own_tier="worktree"
+            local,
+            self.workspace_of(project_dir),
+            project_dir.name,
+            own_tier="worktree",
+            worktree=name,
         )
 
         return ResolvedWorktree(

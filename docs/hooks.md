@@ -6,9 +6,11 @@ knows only the workspace/project/worktree structure; everything else lives in
 hooks.
 
 A hook is either a **builtin** discovered file or an **inline** `sh -c` command
-declared in config; explicit inline hooks *add to* the builtins. `wtm` fires
-thirteen lifecycle **events** across five **scopes**, plus the fourteenth,
-`post-config`, a config-write broadcast described below.
+declared in config; explicit inline hooks *add to* the builtins. A third,
+declarative source rides alongside: the hook commands a [plugin](plugins.md)
+manifest contributes. `wtm` fires thirteen lifecycle **events** across five
+**scopes**, plus the fourteenth, `post-config`, a config-write broadcast
+described below.
 
 ## A first hook
 
@@ -178,10 +180,15 @@ Across scopes, order depends on the phase:
 - **Setup events** (`pre-create`, `post-create`, `install`, `enter`,
   `pre-rename`, `post-rename`, `project-enter`, `workspace-enter`) run
   most-general first:
-  **system → user → workspace → project → worktree**.
+  **plugin → system → user → workspace → project → worktree**.
 - **Teardown events** (`leave`, `pre-delete`, `post-delete`, `project-leave`,
   `workspace-leave`) reverse to
-  most-specific first: **worktree → project → workspace → user → system**.
+  most-specific first: **worktree → project → workspace → user → system → plugin**.
+
+The **plugin tier** holds the hook commands declared by every active [plugin](plugins.md):
+fired first on setup and last on teardown (a plugin is machine-global like the
+system scope), each command under the same contract, policy, and strict rules
+as an inline hook. It appears in `wtm hook list` as `(plugin:<name>)` rows.
 
 ## Timing relative to the state change
 
