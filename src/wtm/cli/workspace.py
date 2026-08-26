@@ -1,4 +1,4 @@
-"""Workspace commands: list, resolve, show, add, set, rename, delete, default, enter, leave."""
+"""Workspace commands: list, resolve, show, add, set, rename, remove, default, enter, leave."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from wtm.output import emit_env_line, emit_shell, log, warn
 workspace_app = typer.Typer(
     help=(
         "Workspace-level operations (list, resolve, show, add, set, rename, "
-        "delete, default, enter, leave)."
+        "remove, default, enter, leave)."
     ),
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -91,7 +91,7 @@ def workspace_add(
     ),
     create: bool = typer.Option(False, "-c", "--create", help="mkdir -p the path if absent"),
 ) -> None:
-    """Register a workspace in the user config (PATH defaults to the cwd)."""
+    """Add a workspace declaration to the user config (PATH defaults to the cwd)."""
     result = ctx.obj.workspaces.add(
         name, path, description=description, base_branch=base_branch, create=create
     )
@@ -155,14 +155,14 @@ def workspace_rename(
         log(f"default-workspace updated to '{result.new}'")
 
 
-@workspace_app.command(name="delete")
-def workspace_delete(
+@workspace_app.command(name="remove")
+def workspace_remove(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Workspace name", autocompletion=_complete_workspace),
 ) -> None:
-    """Unregister a workspace from the user config (never touches the projects root)."""
-    result = ctx.obj.workspaces.delete(name)
-    log(f"unregistered '{result.name}'")
+    """Remove a workspace's declaration from the user config (never touches the projects root)."""
+    result = ctx.obj.workspaces.remove(name)
+    log(f"removed '{result.name}'")
     if result.cleared_default:
         log("cleared default-workspace (it pointed here)")
     if result.remains_at_system:

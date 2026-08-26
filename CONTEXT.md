@@ -10,7 +10,7 @@ repo + `worktrees/<name>/`).
 A named projects root, *declared* in config (path + name + description +
 hooks). Every command operates within one **active** workspace. Also the name
 of the projects-root-wide hook/config scope. The `wtm workspace` verbs
-`add`/`set`/`rename`/`delete`/`default` *write* these declarations (user scope
+`add`/`set`/`rename`/`remove`/`default` *write* these declarations (user scope
 only); `enter`/`leave` fire its lifecycle hooks (see **Workspace lifecycle**).
 _Avoid_: root (say "workspace path" or "projects root of the workspace")
 

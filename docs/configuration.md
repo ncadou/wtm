@@ -47,7 +47,7 @@ Most config is hand-edited; management commands write it for you — through one
 authority, `wtm.config`, with a comment-preserving `tomlkit` round-trip and an
 atomic replace (see [Concurrency](#concurrency)). It offers an arbitrary-key
 facility (read/write any scalar at any named scope), a typed read view, and
-named structural registry mutations (`add`/`set`/`rename`/`delete` workspace,
+named structural registry mutations (`add`/`set`/`rename`/`remove` workspace,
 `default-workspace`, global `base-branch`) that write the **user file** and own
 their cross-key fixups (a rename follows a dangling `default-workspace`).
 

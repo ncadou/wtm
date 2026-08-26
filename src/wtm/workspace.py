@@ -1,8 +1,8 @@
-"""Workspace-level operations for wtm: add, delete, set, rename, default, show, enter, leave.
+"""Workspace-level operations for wtm: add, remove, set, rename, default, show, enter, leave.
 
 CLI-agnostic orchestration, like :mod:`wtm.project` / :mod:`wtm.worktree`: methods
 return result objects and never print, log, or drive the shell (that is
-:mod:`wtm.cli`'s job). Registry-mutating verbs (add/delete/set/rename/default)
+:mod:`wtm.cli`'s job). Registry-mutating verbs (add/remove/set/rename/default)
 delegate every write to :mod:`wtm.config` (the single config authority); the
 lifecycle verbs (enter/leave) fire the ``workspace-enter`` / ``workspace-leave``
 events via :func:`wtm.hooks.run_workspace_hooks`.
@@ -15,9 +15,9 @@ from __future__ import annotations
 
 __all__ = [
     "WorkspaceAdded",
-    "WorkspaceDeleted",
     "WorkspaceEntered",
     "WorkspaceLeft",
+    "WorkspaceRemoved",
     "WorkspaceRenamed",
     "WorkspaceSet",
     "WorkspaceShown",
@@ -65,8 +65,8 @@ class WorkspaceAdded:
 
 
 @dataclass(frozen=True)
-class WorkspaceDeleted:
-    """Result of :meth:`Workspaces.delete`."""
+class WorkspaceRemoved:
+    """Result of :meth:`Workspaces.remove`."""
 
     name: str
     cleared_default: bool  # default-workspace pointed here and was cleared
@@ -139,7 +139,7 @@ class Workspaces:
         base_branch: str | None,
         create: bool,
     ) -> WorkspaceAdded:
-        """Register a new workspace in the user-scope config.
+        """Add a new workspace to the user-scope config.
 
         *path* defaults to the cwd. The persisted string keeps a ``~``/``$VAR``
         form; a bare relative arg is made absolute. Hard-errors on a name
@@ -151,7 +151,7 @@ class Workspaces:
         if Scope.USER in scopes:
             raise WtmError(
                 f"workspace '{name}' already declared (user scope); "
-                "edit it with 'wtm workspace set' or delete it first"
+                "edit it with 'wtm workspace set' or remove it first"
             )
 
         persist, resolved = _prepare_path(path)
@@ -170,8 +170,8 @@ class Workspaces:
             duplicate_of=duplicate_of,
         )
 
-    def delete(self, name: str) -> WorkspaceDeleted:
-        """Unregister a workspace from the user-scope config (never touches disk)."""
+    def remove(self, name: str) -> WorkspaceRemoved:
+        """Remove a workspace's declaration from the user-scope config (never touches disk)."""
         scopes = self.config.declaring_scopes(name)
         if not scopes:
             raise WtmError(f"workspace '{name}' is not declared")
@@ -183,7 +183,7 @@ class Workspaces:
 
         cleared = self.config.remove_workspace(name)
 
-        return WorkspaceDeleted(
+        return WorkspaceRemoved(
             name=name,
             cleared_default=cleared,
             remains_at_system=Scope.SYSTEM in scopes,

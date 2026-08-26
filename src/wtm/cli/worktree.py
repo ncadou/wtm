@@ -201,7 +201,7 @@ def create(
     ),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Add a worktree (and branch) to a project.
+    """Create a worktree (and branch) in a project.
 
     NAME is invented, so only its leading PROJECT qualifier is resolved -- as a
     project-pinned locator, so ``wtm create otherproj feat`` reaches another
@@ -257,7 +257,7 @@ def delete(
     del_branch: bool = typer.Option(False, "-D", "--delete-branch", help="Delete the branch too"),
     strict: bool = typer.Option(False, "--strict", help="Hook failures are fatal"),
 ) -> None:
-    """Remove a worktree (requires an explicit target)."""
+    """Delete a worktree (requires an explicit target)."""
     # Capture cwd before the destructive delete so a shell standing in the
     # doomed worktree can be sent somewhere that still exists afterwards.
     cwd = current_dir()

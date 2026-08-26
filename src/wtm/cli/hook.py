@@ -104,7 +104,7 @@ def hook_delete(
         raise WtmError("hook delete requires an event (HOOK) as the last argument")
     *target, hook = args
     for path in ctx.obj.hooks.delete(hook, target, scope=scope, recursive=recursive):
-        log(f"removed {path}")
+        log(f"deleted {path}")
 
 
 @hook_app.command(name="list")

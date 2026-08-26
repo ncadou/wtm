@@ -39,7 +39,7 @@ The following commands also have top-level aliases, except `set`.
 | `create [[WORKSPACE] PROJECT] NAME` | Create a worktree and branch. Use `-b/--branch`, `--base/--off`, `-d/--dir`, `-c/--cd`, `-i/--install`, `-f/--fetch`, or `--strict`. |
 | `enter [TARGET]` | Enter a worktree, project, or workspace. Use `-i/--install` or `--strict`. Names use a [locator](targeting.md#locators); a directory is also accepted. |
 | `leave [TARGET]` | Run leave hooks and leave the target. Use `-C/--no-cd` to stay in place or `--strict`. |
-| `delete WORKSPACE PROJECT NAME \| PROJECT NAME \| DIR` | Remove a worktree. The target is required. Use `-f/--force`, `-D/--delete-branch`, or `--strict`. |
+| `delete WORKSPACE PROJECT NAME \| PROJECT NAME \| DIR` | Delete a worktree. The target is required. Use `-f/--force`, `-D/--delete-branch`, or `--strict`. |
 | `rename [[WORKSPACE] PROJECT] [OLDNAME] NEWNAME` | Move a worktree. Use `-b/--branch` to rename its branch too, or `--strict`. Positionals are parsed right-to-left. |
 | `list [[WORKSPACE] PROJECT]` | List a project's worktrees. The project is inferred from the cwd or resolved with a project-pinned locator. |
 | `resolve [LOCATOR]` | Print a worktree, project, or workspace path. Use `-e/--env` for the corresponding `WTM_*` contract. No argument resolves the cwd worktree. |
@@ -65,6 +65,10 @@ leading project qualifier uses a [qualifier-only locator](targeting.md#qualifier
 Projects are discovered on disk (`<workspace>/<project>/.git`). Config only
 annotates them. See [configuration](configuration.md) for write placement.
 
+There is deliberately no removal command for projects: worktrees are removed
+with `wtm delete`, but an empty project root is removed by hand
+(`git worktree remove ...` first, then delete `<workspace>/<project>/`).
+
 ## Workspaces (`wtm workspace ...`)
 
 | Command | Purpose |
@@ -72,10 +76,10 @@ annotates them. See [configuration](configuration.md) for write placement.
 | `list` | List declared workspaces, paths, active marker, and descriptions. |
 | `resolve [NAME]` | Print a workspace path. Use `-e/--env` for `WTM_WORKSPACE` and `WTM_WORKSPACE_DIR`. |
 | `show [NAME]` | Show workspace path, description, base branch, scope, and project count. |
-| `add NAME [PATH]` | Register a workspace in user config. Use `-d/--description`, `-b/--base-branch`, or `-c/--create`. |
+| `add NAME [PATH]` | Add a workspace declaration to the user config. Use `-d/--description`, `-b/--base-branch`, or `-c/--create`. |
 | `set NAME` | Edit a workspace. Use `-p/--path`, `-d/--description`, `-b/--base-branch`, and `-s/--scope`. |
 | `rename OLD NEW` | Rename a workspace registry key without moving its directory. |
-| `delete NAME` | Unregister a workspace without touching its projects root. |
+| `remove NAME` | Remove a workspace's user-config declaration without touching its projects root. |
 | `default [NAME]` | Get or set the default workspace. Use `--clear` to remove it. |
 | `enter [NAME]` | Enter a workspace's projects root and fire `workspace-enter` hooks. Use `--strict`. |
 | `leave [NAME]` | Fire `workspace-leave` hooks and leave the workspace. Use `-C/--no-cd` or `--strict`. |
@@ -91,7 +95,7 @@ to another allowed scope with `-s/--scope`; see [configuration](configuration.md
 | `run [TARGET] HOOK` | Run an event's hooks. Use `-s/--scope` to restrict the scope or `--strict`. |
 | `list [TARGET]` | List installed hooks by event. Use `-t/--types` for a compact summary. |
 | `set EVENT CMD` | Set an inline hook at the cwd-inferred entity. Use `-s/--scope`. |
-| `unset EVENT` | Remove an inline hook at the cwd-inferred entity. Use `-s/--scope`. |
+| `unset EVENT` | Unset an inline hook at the cwd-inferred entity. Use `-s/--scope`. |
 | `delete [TARGET] HOOK` | Delete an event hook or an event entry. Use `-s/--scope` or `-r/--recursive`. |
 
 `run` and `list` use a worktree-pinned locator. `install` and `delete` write
@@ -105,7 +109,7 @@ builtin files; `set` and `unset` write inline config hooks. See
 | `show [LOCATOR]` | Show effective config as a global-rooted tree. Use `-g/--global`, `-r/--recurse`, `-d/--depth`, `-o/--origin`, `--hooks`, or `-j/--json`. |
 | `get [LOCATOR] KEY [SUBKEY]` | Read an arbitrary key. Use `-o/--origin`, `-j/--json`, or `-g/--global`. |
 | `set [LOCATOR] KEY [SUBKEY] VALUE` | Write an arbitrary key. Use `-a/--array`, `-t/--table`, `-f/--floor`, `-x/--toml`, `--type`, `-s/--scope`, or `-g/--global`. |
-| `unset [LOCATOR] KEY [SUBKEY] [VALUE]` | Remove a key, array element, or table cell. Use `-a/--array`, `-t/--table`, `-x/--toml`, `--type`, `-s/--scope`, or `-g/--global`. |
+| `unset [LOCATOR] KEY [SUBKEY] [VALUE]` | Unset a key, array element, or table cell. Use `-a/--array`, `-t/--table`, `-x/--toml`, `--type`, `-s/--scope`, or `-g/--global`. |
 | `base-branch [VALUE]` | Get, set, or clear the global default base branch. Use `--clear`. |
 
 Without a locator, `get`, `set`, and `unset` use the entity inferred from the
@@ -117,8 +121,8 @@ and examples.
 
 | Command | Purpose |
 |---|---|
-| `add NAME` | Register a plugin. Use `--seed` to write its declared defaults or `-s/--scope` to choose the activation scope. |
-| `remove NAME` | Unregister a plugin by clearing its most-local activation cell. |
+| `add NAME` | Add (register) a plugin. Use `--seed` to write its declared defaults or `-s/--scope` to choose the activation scope. |
+| `remove NAME` | Remove (unregister) a plugin by clearing its most-local activation cell. |
 | `list` | List registered plugins and resolution status. Use `-j/--json`. |
 | `show NAME` | Show a plugin manifest and its registration sites. |
 

@@ -4655,7 +4655,7 @@ def test_no_hooks_env_disables_firing(root: Path, tmp_path: Path) -> None:
     assert not out.exists()  # WTM_NO_HOOKS suppressed the builtin hook
 
 
-# --- workspace add / set / rename / delete / default / show (CLI wiring) ------
+# --- workspace add / set / rename / remove / default / show (CLI wiring) ------
 #
 # The run() harness rewrites WTM_CONFIG on every call, so these assert the
 # single-invocation effect by reading that file back after the call. The file
@@ -6364,8 +6364,8 @@ def test_workspace_rename_moves_key(root: Path) -> None:
     assert "[workspaces.renamed]" in text and "[workspaces.ws]" not in text
 
 
-def test_workspace_delete_unregisters(root: Path) -> None:
-    res = run("workspace", "delete", "ws", root=root)
+def test_workspace_remove_unregisters(root: Path) -> None:
+    res = run("workspace", "remove", "ws", root=root)
     assert res.returncode == 0, res.stderr
     assert "[workspaces.ws]" not in _config_text(root)
 

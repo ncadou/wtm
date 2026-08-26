@@ -52,7 +52,7 @@ def plugin_add(
     ),
     scope: Scope = typer.Option(Scope.USER, "-s", "--scope", help=_PLUGIN_SCOPE_HELP),
 ) -> None:
-    """Register NAME: write its activation cell; optionally --seed its defaults.
+    """Add NAME: write its activation cell; optionally --seed its defaults.
 
     The plugin is resolved eagerly so a missing install warns now rather than
     on every later invocation -- but registration proceeds either way, and an
@@ -84,7 +84,7 @@ def plugin_remove(
         ..., metavar="NAME", help="Plugin name", autocompletion=_complete_registered
     ),
 ) -> None:
-    """Unregister NAME: clear its activation cell from the most-local scope.
+    """Remove NAME: clear its activation cell from the most-local scope.
 
     Seeded values are ordinary user-owned config afterwards and stay put;
     pass them to ``config unset`` by hand if unwanted.

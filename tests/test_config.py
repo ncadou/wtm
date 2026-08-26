@@ -1822,41 +1822,41 @@ def test_rename_system_only_refused(
         _ops().rename("s", "t")
 
 
-# --- delete ------------------------------------------------------------------
+# --- remove ------------------------------------------------------------------
 
 
-def test_delete_removes_entry_and_clears_default(user_cfg: Path, tmp_path: Path) -> None:
+def test_remove_removes_entry_and_clears_default(user_cfg: Path, tmp_path: Path) -> None:
     ws = tmp_path / "w"
     ws.mkdir()
     user_cfg.write_text(f'default-workspace = "w"\n[workspaces.w]\npath = "{ws}"\n')
-    result = _ops().delete("w")
+    result = _ops().remove("w")
     assert result.cleared_default and not result.remains_at_system
     text = user_cfg.read_text()
     assert "[workspaces.w]" not in text
     assert "default-workspace" not in text
 
 
-def test_delete_unknown_errors(user_cfg: Path) -> None:
+def test_remove_unknown_errors(user_cfg: Path) -> None:
     with pytest.raises(WtmError, match="not declared"):
-        _ops().delete("ghost")
+        _ops().remove("ghost")
 
 
-def test_delete_system_only_refused(
+def test_remove_system_only_refused(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _system(monkeypatch, tmp_path, f'[workspaces.s]\npath = "{tmp_path}"\n')
     with pytest.raises(WtmError, match="only at system scope"):
-        _ops().delete("s")
+        _ops().remove("s")
 
 
-def test_delete_both_scopes_warns_system_remains(
+def test_remove_both_scopes_warns_system_remains(
     user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ws = tmp_path / "w"
     ws.mkdir()
     _system(monkeypatch, tmp_path, f'[workspaces.w]\npath = "{ws}"\n')
     _seed_user(user_cfg, "w", ws)
-    result = _ops().delete("w")
+    result = _ops().remove("w")
     assert result.remains_at_system
     assert "[workspaces.w]" not in user_cfg.read_text()
 

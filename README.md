@@ -234,7 +234,7 @@ Commands are grouped; each worktree verb also has a top-level alias
   `resolve`, `set` (day-to-day work)
 - **project** — `new`, `clone`, `import`, `set`, `list`, `resolve`, `show`,
   `enter`, `leave`
-- **workspace** — `add`, `set`, `rename`, `delete`, `default`, `list`, `show`,
+- **workspace** — `add`, `set`, `rename`, `remove`, `default`, `list`, `show`,
   `resolve`, `enter`, `leave`
 - **hook** — `install`, `run`, `delete`, `set`, `unset`, `list`
 - **config** — `show`, `set`, `get`, `unset`, `base-branch`
