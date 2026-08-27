@@ -2198,6 +2198,56 @@ def test_enter_ambiguous_still_errors_out_of_context(root: Path) -> None:
     assert "matches 2 worktrees" in res.stderr
 
 
+def test_enter_no_arg_from_worktree_exports_full_contract(root: Path, tmp_path: Path) -> None:
+    # Bare 'wtm enter' from inside a worktree (even a subdir of it) enters the
+    # worktree root and exports the full session contract, name included.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    sub = wt / "sub"
+    sub.mkdir()
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", root=root, cwd=sub, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(wt)
+    exports = _shell_exports(shell_file)
+    assert exports["WTM_WORKTREE"] == "feat"
+    assert exports["WTM_BRANCH"] == "feat"
+    assert set(exports) == set(MANAGED_ENV_VARS)
+
+
+def test_enter_no_arg_from_project_dir_fires_project_enter(root: Path, tmp_path: Path) -> None:
+    # Not standing in a worktree: the cwd's project tier answers -- project-enter
+    # fires with the project contract (no worktree vars), and the session
+    # exports the project subset.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    _write_hook(
+        hooks / "project-enter",
+        f'printf "%s|%s\\n" "$WTM_PROJECT" "$WTM_WORKTREE_DIR" > "{out}"\n',
+    )
+    res = run("enter", root=root, cwd=root / "alpha", hooks_dir=hooks, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    project, wt_dir = out.read_text().strip().split("|")
+    assert project == "alpha"
+    assert wt_dir == ""  # the project contract carries no worktree vars
+    assert _shell_cd(shell_file) == str(root / "alpha")
+    exports = _shell_exports(shell_file)
+    assert exports["WTM_PROJECT"] == "alpha"
+    assert "WTM_WORKTREE_DIR" not in exports
+    assert "WTM_WORKTREE" not in exports
+
+
+def test_enter_no_arg_outside_workspace_errors(root: Path, tmp_path: Path) -> None:
+    res = run("enter", root=root, cwd=tmp_path)  # outside every declared workspace
+    assert res.returncode == 1
+    assert "not inside a declared workspace" in res.stderr
+
+
 # --- resolve -----------------------------------------------------------------
 
 
@@ -2267,10 +2317,10 @@ def test_resolve_no_arg_from_subdir_gives_worktree_root(root: Path) -> None:
     assert res.stdout.strip() == str(wt)
 
 
-def test_resolve_no_arg_outside_worktree_errors(root: Path, tmp_path: Path) -> None:
-    res = run("resolve", root=root, cwd=tmp_path)  # not inside a worktree
+def test_resolve_no_arg_outside_workspace_errors(root: Path, tmp_path: Path) -> None:
+    res = run("resolve", root=root, cwd=tmp_path)  # outside every declared workspace
     assert res.returncode == 1
-    assert "not inside a worktree" in res.stderr
+    assert "not inside a declared workspace" in res.stderr
 
 
 def test_resolve_no_arg_env_emits_full_contract(root: Path) -> None:
@@ -2280,9 +2330,67 @@ def test_resolve_no_arg_env_emits_full_contract(root: Path) -> None:
     res = run("resolve", "--env", root=root, cwd=wt)  # no target, cwd worktree
     assert res.returncode == 0, res.stderr
     lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_WORKTREE='feat'") for line in lines)
     assert any(line.startswith("export WTM_WORKTREE_DIR='") for line in lines)
     assert any(line.startswith("export WTM_BRANCH='feat'") for line in lines)
     assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+
+
+def test_resolve_no_arg_env_emits_nested_worktree_name(root: Path) -> None:
+    # The worktree name is the worktrees/-relative path, nested names whole.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "release/2.0", root=root)
+    wt = root / "alpha" / "worktrees" / "release" / "2.0"
+    res = run("resolve", "--env", root=root, cwd=wt)
+    assert res.returncode == 0, res.stderr
+    assert "export WTM_WORKTREE='release/2.0'" in res.stdout
+
+
+def test_resolve_no_arg_from_project_dir_prints_project(root: Path) -> None:
+    # Not standing in a worktree: the nearest upward entity (the project) answers.
+    _seed_repo(root, "alpha")
+    res = run("resolve", root=root, cwd=root / "alpha")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha")
+
+
+def test_resolve_no_arg_from_worktrees_dir_prints_project(root: Path) -> None:
+    # The worktrees/ container is not a worktree; the project answers.
+    _seed_repo(root, "alpha")
+    res = run("resolve", root=root, cwd=root / "alpha" / "worktrees")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root / "alpha")
+
+
+def test_resolve_no_arg_env_from_project_dir_emits_project_subset(root: Path) -> None:
+    # The bare-repo dir itself: project contract, no worktree keys (the bare
+    # repo's HEAD leaks no WTM_BRANCH).
+    _seed_repo(root, "alpha")
+    res = run("resolve", "--env", root=root, cwd=root / "alpha")
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_PROJECT='alpha'") for line in lines)
+    assert any(line.startswith("export WTM_WORKSPACE='ws'") for line in lines)
+    assert not any(line.startswith("export WTM_WORKTREE=") for line in lines)
+    assert not any(line.startswith("export WTM_BRANCH=") for line in lines)
+
+
+def test_resolve_no_arg_from_workspace_root_prints_workspace(root: Path) -> None:
+    # The projects root itself is not a project: the workspace tier answers.
+    res = run("resolve", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(root)
+
+
+def test_resolve_no_arg_env_from_workspace_root_emits_workspace_subset(root: Path) -> None:
+    res = run("resolve", "--env", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    lines = res.stdout.splitlines()
+    assert any(line.startswith("export WTM_WORKSPACE='ws'") for line in lines)
+    assert any(line.startswith("export WTM_WORKSPACE_DIR='") for line in lines)
+    assert not any("WTM_PROJECT" in line for line in lines)
+    assert not any(line.startswith("export WTM_WORKTREE") for line in lines)
+    assert not any(line.startswith("export WTM_BRANCH=") for line in lines)
 
 
 def test_resolve_single_name_resolves_project(root: Path) -> None:
@@ -3949,6 +4057,28 @@ def test_enter_leave_round_trip_by_the_same_name(root: Path, tmp_path: Path) -> 
     left = run("leave", "feat", root=root, cwd=root, shell_file=shell_file)
     assert left.returncode == 0, left.stderr
     assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
+
+
+def test_leave_no_arg_from_project_dir_fires_project_leave(root: Path, tmp_path: Path) -> None:
+    # Bare 'wtm leave' from the project dir (not a worktree) leaves the project.
+    _seed_repo(root, "alpha")
+    hooks = tmp_path / "hooks"
+    out = tmp_path / "ran"
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    _write_hook(hooks / "project-leave", f'printf "%s\\n" "$WTM_PROJECT" > "{out}"\n')
+    res = run("leave", root=root, cwd=root / "alpha", hooks_dir=hooks, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert out.read_text().strip() == "alpha"
+    # Leaving ends the session: the whole managed contract is unset.
+    assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
+    assert _shell_exports(shell_file) == {}
+
+
+def test_leave_no_arg_outside_workspace_errors(root: Path, tmp_path: Path) -> None:
+    res = run("leave", root=root, cwd=tmp_path)  # outside every declared workspace
+    assert res.returncode == 1
+    assert "not inside a declared workspace" in res.stderr
 
 
 def test_leave_cross_workspace_worktree(tmp_path: Path) -> None:
@@ -6239,6 +6369,7 @@ def test_config_set_inheritable_floor_declares_and_enforces(root: Path) -> None:
     cfg.write_text(f'[workspaces.ws]\npath = "{root}"\nregion = "ws-val"\n')
     wt = root / "proj" / "worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: elsewhere\n")
     add = run(
         "config",
         "set",
@@ -6325,6 +6456,36 @@ def test_config_set_workspace_entity_from_root_cwd(root: Path) -> None:
     assert res.returncode == 0, res.stderr
     assert "workspace 'ws'" in res.stderr
     assert 'editor = "nvim"' in (root / ".wtm" / "config.toml").read_text()
+
+
+def test_config_set_get_from_nested_worktree_cwd(root: Path) -> None:
+    """The cwd-inferred entity reads a nested worktree name whole."""
+    _seed_repo(root, "proj")
+    wt = root / "proj" / "worktrees" / "release" / "2.0"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: elsewhere\n")
+
+    res = run("config", "set", "region", "x", root=root, cwd=wt)
+    assert res.returncode == 0, res.stderr
+    assert "worktree 'release/2.0'" in res.stderr
+    assert 'region = "x"' in (wt / ".wtm" / "config.toml").read_text()
+
+    got = run("config", "get", "region", root=root, cwd=wt)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.strip() == "x"
+
+
+def test_config_set_from_container_dir_targets_project(root: Path) -> None:
+    """A container dir under worktrees/ is not a worktree: the floor is the project."""
+    _seed_repo(root, "proj")
+    container = root / "proj" / "worktrees" / "release"
+    container.mkdir()
+
+    res = run("config", "set", "region", "x", root=root, cwd=container)
+    assert res.returncode == 0, res.stderr
+    assert "project 'proj'" in res.stderr
+    assert 'region = "x"' in (root / "proj" / ".wtm" / "config.toml").read_text()
+    assert not (container / ".wtm").exists()
 
 
 def test_config_set_rejects_reserved_key(root: Path) -> None:
@@ -6614,10 +6775,11 @@ def test_workspace_enter_emits_cd_and_fires_hook(root: Path, tmp_path: Path) -> 
     )
     assert res.returncode == 0, res.stderr
     assert _shell_cd(shell_file) == str(root)
-    # Workspace-level session: only the workspace vars are exported; the six
+    # Workspace-level session: only the workspace vars are exported; the
     # worktree/project vars are unset.
     assert _shell_exports(shell_file) == {"WTM_WORKSPACE": "ws", "WTM_WORKSPACE_DIR": str(root)}
     assert _shell_unsets(shell_file) == {
+        "WTM_WORKTREE",
         "WTM_WORKTREE_DIR",
         "WTM_BRANCH",
         "WTM_PROJECT",
@@ -6697,7 +6859,7 @@ def test_project_enter_emits_cd_and_project_contract(root: Path, tmp_path: Path)
     res = run("project", "enter", "alpha", root=root, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert _shell_cd(shell_file) == str(root / "alpha")
-    # Project-level session: the six project vars are exported; the two worktree
+    # Project-level session: the six project vars are exported; the worktree
     # vars are unset.
     assert _shell_exports(shell_file) == {
         "WTM_PROJECT": "alpha",
@@ -6707,7 +6869,7 @@ def test_project_enter_emits_cd_and_project_contract(root: Path, tmp_path: Path)
         "WTM_WORKSPACE": "ws",
         "WTM_WORKSPACE_DIR": str(root),
     }
-    assert _shell_unsets(shell_file) == {"WTM_WORKTREE_DIR", "WTM_BRANCH"}
+    assert _shell_unsets(shell_file) == {"WTM_WORKTREE", "WTM_WORKTREE_DIR", "WTM_BRANCH"}
     event, project, arg1, workspace, wtdir = out.read_text().strip().split("|")
     assert event == "project-enter"
     assert project == "alpha"

@@ -43,9 +43,9 @@ silent.
 The contract follows a **session** model: entering sets it, leaving clears it.
 
 - `enter` / `create -c` / `import -c` — `cd` into the worktree and export the
-  full contract: `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`,
-  `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
-  `WTM_WORKSPACE_DIR`.
+  full contract: `WTM_WORKTREE`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`,
+  `WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`,
+  `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`.
 - `rename` (when you are standing in the moved worktree) — follow it and re-sync
   the contract to the new path and branch.
 - `leave` — `cd` out (`$OLDPWD` or the project dir) and **unset** the whole
@@ -55,12 +55,12 @@ The contract follows a **session** model: entering sets it, leaving clears it.
   unset the contract.
 - `project enter` — `cd` into the project dir and export the project-level
   contract (`WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`,
-  `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; the two worktree
-  vars `WTM_WORKTREE_DIR`/`WTM_BRANCH` are unset). `project leave` `cd`s out
-  (`$OLDPWD`, the projects root when it cascaded out of a worktree, or stays put)
-  and unsets everything (even with `-C`).
+  `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; the three worktree
+  vars `WTM_WORKTREE`/`WTM_WORKTREE_DIR`/`WTM_BRANCH` are unset). `project leave`
+  `cd`s out (`$OLDPWD`, the projects root when it cascaded out of a worktree, or
+  stays put) and unsets everything (even with `-C`).
 - `workspace enter` — `cd` into the projects root and export only
-  `WTM_WORKSPACE` / `WTM_WORKSPACE_DIR` (the six worktree/project vars are
+  `WTM_WORKSPACE` / `WTM_WORKSPACE_DIR` (the seven worktree/project vars are
   unset). `workspace leave` unsets everything (even with `-C`).
 
 Because `WTM_WORKSPACE` is exported on `enter`, it **pins the active workspace**
@@ -76,6 +76,7 @@ shell always reflects the current session. Hooks receive the same variables
 
 | variable | holds |
 |---|---|
+| `WTM_WORKTREE` | the worktree's name, relative to `worktrees/` (nested names whole, e.g. `release/2.0`) |
 | `WTM_WORKTREE_DIR` | the worktree checkout you are standing in |
 | `WTM_BRANCH` | the branch checked out in that worktree |
 | `WTM_PROJECT` | the project's name |
@@ -84,3 +85,6 @@ shell always reflects the current session. Hooks receive the same variables
 | `WTM_GIT_COMMON_DIR` | the project's bare repository, `<WTM_PROJECT_DIR>/.git` |
 | `WTM_WORKSPACE` | the active workspace's name (empty when the project sits outside any declared workspace) |
 | `WTM_WORKSPACE_DIR` | the projects root of that workspace |
+
+The worktree vars (`WTM_WORKTREE`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`) are
+worktree-tier only: a project or workspace session unsets them.

@@ -72,8 +72,8 @@ others are the project- and workspace-lifecycle pairs:
 
 | pair | fired by | scopes fired | `$1` / working dir | env contract |
 |---|---|---|---|---|
-| `project-enter` / `project-leave` | `wtm project enter` / `leave` | system → user → workspace → project (never worktree) | the project dir | `WTM_EVENT` plus `WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; no `WTM_WORKTREE_DIR`/`WTM_BRANCH` |
-| `workspace-enter` / `workspace-leave` | `wtm workspace enter` / `leave` | system → user → workspace only | the projects root | `WTM_EVENT`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR` |
+| `project-enter` / `project-leave` | `wtm project enter` / `leave`; also a no-target `wtm enter`/`leave` landing on the project tier | system → user → workspace → project (never worktree) | the project dir | `WTM_EVENT` plus `WTM_PROJECT`, `WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`; no worktree vars (`WTM_WORKTREE`/`WTM_WORKTREE_DIR`/`WTM_BRANCH`) |
+| `workspace-enter` / `workspace-leave` | `wtm workspace enter` / `leave`; also a no-target `wtm enter`/`leave` landing on the workspace tier | system → user → workspace only | the projects root | `WTM_EVENT`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR` |
 
 The teardown side cascades inside-out. `wtm project leave`, run from inside one
 of the project's worktrees, fires that worktree's `leave` first, then
@@ -215,8 +215,9 @@ live worktree to hold `.wtm/hooks`.
 Hooks receive the worktree directory as `$1` plus a `WTM_*` environment
 contract:
 
-`WTM_EVENT`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`, `WTM_PROJECT_DIR`,
-`WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`, `WTM_WORKSPACE_DIR`
+`WTM_EVENT`, `WTM_WORKTREE`, `WTM_WORKTREE_DIR`, `WTM_BRANCH`, `WTM_PROJECT`,
+`WTM_PROJECT_DIR`, `WTM_WORKTREES_DIR`, `WTM_GIT_COMMON_DIR`, `WTM_WORKSPACE`,
+`WTM_WORKSPACE_DIR`
 (what each holds: [shell-integration.md](shell-integration.md#the-wtm_-variables)).
 
 `WTM_WORKSPACE` is the active workspace name (empty when the project is not

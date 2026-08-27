@@ -62,9 +62,10 @@ wtm config get project port
 wtm config set ws project ci.runner.image ubuntu
 ```
 
-`enter` and `leave` also accept no argument for the cwd worktree. `hook list`
-and `hook run` resolve their target the same way; no target means the cwd
-worktree.
+`enter`, `leave`, and `resolve` also accept no argument: the cwd itself then
+rides the locator as a path, so the nearest upward entity answers (worktree >
+project > workspace). `hook list` and `hook run` pin their no-arg cwd to the
+worktree tier.
 
 ## Paths
 

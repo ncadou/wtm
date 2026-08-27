@@ -291,7 +291,8 @@ class Context:
     Derived from a worktree's git common dir so the layout works regardless of
     the active workspace or a ``--dir`` override, and remains valid after the
     worktree directory has been removed (delete event). The bare repo lives at
-    ``<project_dir>/.git``, which is the git common dir itself.
+    ``<project_dir>/.git``, which is the git common dir itself. The worktree's
+    ``worktrees/``-relative name rides along as ``WTM_WORKTREE`` in ``env()``.
 
     ``workspace`` / ``workspace_dir`` are the active workspace this project
     belongs to. :func:`derive_context` leaves them empty (it is config-free);
@@ -326,6 +327,9 @@ class Context:
             "WTM_GIT_COMMON_DIR": str(self.git_common_dir),
             "WTM_WORKSPACE": self.workspace,
         }
+        name = worktree_name(self.dir, self.worktrees_dir)
+        if name is not None:
+            env["WTM_WORKTREE"] = name
         if self.workspace_dir is not None:
             env["WTM_WORKSPACE_DIR"] = str(self.workspace_dir)
 

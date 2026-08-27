@@ -614,6 +614,7 @@ def test_user_declared_key_worktree_local_honoured(
     ws = tmp_path / "w"
     wt = ws / "proj" / "worktrees" / "feat"
     (wt / ".wtm").mkdir(parents=True)
+    (wt / ".git").touch()  # a linked worktree's .git is a file; cwd inference keys on it
     (wt / ".wtm" / "config.toml").write_text('deploy_env="scratch"\n')
     body = f'inheritable = ["deploy_env"]\n[workspaces.a]\npath="{ws}"\ndeploy_env="staging"\n'
     cfg = _load(monkeypatch, tmp_path, body, cwd=wt)
@@ -2369,6 +2370,31 @@ def test_resolve_slice_cwd_inference_container_dir_falls_to_project(tmp_path, mo
     assert target is not None
     assert target.tier == "project"
     assert target.project == "api"
+
+
+def test_resolve_generic_target_cwd_infers_nested_name(tmp_path, monkeypatch) -> None:
+    """The arbitrary-key cwd inference reads a nested worktree whole, not parts[0]."""
+    wt_dir = tmp_path / "w" / "api" / "worktrees" / "release" / "1.12" / "docs"
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    _nested_worktree_fixture(tmp_path)
+    target = cfg.resolve_generic_target(cwd=wt_dir)
+    assert target.label == "worktree 'release/1.12'"
+
+
+def test_resolve_generic_target_container_dir_falls_to_project(tmp_path, monkeypatch) -> None:
+    """A cwd under worktrees/ but inside no .git-rooted dir targets the project."""
+    container = tmp_path / "w" / "api" / "worktrees" / "release"
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    _nested_worktree_fixture(tmp_path)
+    target = cfg.resolve_generic_target(cwd=container)
+    assert target.label == "project 'api'"
+
+
+def test_resolve_generic_target_none_cwd_falls_to_workspace(tmp_path, monkeypatch) -> None:
+    """A None cwd (a stranded shell) stays at the active-workspace tier."""
+    cfg = _slice_setup(tmp_path, monkeypatch)
+    target = cfg.resolve_generic_target(cwd=None)
+    assert target.label == "workspace 'w'"
 
 
 def test_resolve_slice_global_extra_and_hooks(tmp_path, monkeypatch) -> None:

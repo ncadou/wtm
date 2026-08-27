@@ -112,6 +112,44 @@ def _locate_one(
     return resolution.location
 
 
+def _locate_cwd(ctx: typer.Context, *, command: str) -> Location:
+    """Resolve the cwd itself as a PATH locator to exactly one :class:`Location`.
+
+    The no-args edge shared by the tier-polymorphic commands (``enter``,
+    ``leave``, ``resolve``): standing anywhere inside a declared workspace
+    answers with the nearest upward entity (worktree > project > workspace) --
+    the same path geometry an explicit PATH arg rides. Outside every declared
+    workspace it raises the dedicated no-target message, and a removed cwd the
+    shell-directory-gone one.
+
+    :param command: the ``wtm`` sub-command name, so an ambiguity prints choices
+        that can be pasted straight back.
+    """
+    cwd = current_dir(resolve=False)
+    if cwd is None:
+        raise WtmError(
+            "cwd is unavailable (the directory was removed); "
+            "pass an explicit target (WORKSPACE PROJECT NAME | PROJECT NAME | NAME | DIR)"
+        )
+
+    resolution = _resolve_tokens(ctx, [str(cwd)])
+    if isinstance(resolution, NotFound):
+        raise WtmError(
+            "no NAME given and cwd is not inside a declared workspace "
+            "(pass WORKSPACE PROJECT NAME, PROJECT NAME, or NAME)"
+        )
+    if isinstance(resolution, Mismatch):
+        raise WtmError(_mismatch_message(resolution, str(cwd)))
+    if isinstance(resolution, Ambiguous):
+        picked = _context_pick(ctx, resolution.candidates)
+        if picked is None:
+            raise WtmError(_ambiguous_message([str(cwd)], resolution.candidates, command))
+
+        return picked
+
+    return resolution.location
+
+
 def _locate_optional(
     ctx: typer.Context,
     args: list[str],

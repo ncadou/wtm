@@ -37,12 +37,12 @@ The following commands also have top-level aliases, except `set`.
 | Command | Purpose |
 |---|---|
 | `create [[WORKSPACE] PROJECT] NAME` | Create a worktree and branch. Use `-b/--branch`, `--base/--off`, `-d/--dir`, `-c/--cd`, `-i/--install`, `-f/--fetch`, or `--strict`. |
-| `enter [TARGET]` | Enter a worktree, project, or workspace. Use `-i/--install` or `--strict`. Names use a [locator](targeting.md#locators); a directory is also accepted. |
-| `leave [TARGET]` | Run leave hooks and leave the target. Use `-C/--no-cd` to stay in place or `--strict`. |
+| `enter [TARGET]` | Enter a worktree, project, or workspace. No target enters the cwd's nearest upward entity. Use `-i/--install` or `--strict`. Names use a [locator](targeting.md#locators); a directory is also accepted. |
+| `leave [TARGET]` | Run leave hooks and leave the target. No target leaves the cwd's nearest upward entity. Use `-C/--no-cd` to stay in place or `--strict`. |
 | `delete WORKSPACE PROJECT NAME \| PROJECT NAME \| DIR` | Delete a worktree. The target is required. Use `-f/--force`, `-D/--delete-branch`, or `--strict`. |
 | `rename [[WORKSPACE] PROJECT] [OLDNAME] NEWNAME` | Move a worktree. Use `-b/--branch` to rename its branch too, or `--strict`. Positionals are parsed right-to-left. |
 | `list [[WORKSPACE] PROJECT]` | List a project's worktrees. The project is inferred from the cwd or resolved with a project-pinned locator. |
-| `resolve [LOCATOR]` | Print a worktree, project, or workspace path. Use `-e/--env` for the corresponding `WTM_*` contract. No argument resolves the cwd worktree. |
+| `resolve [LOCATOR]` | Print a worktree, project, or workspace path. Use `-e/--env` for the corresponding `WTM_*` contract. No argument resolves the cwd's nearest upward entity. |
 | `set [[[WORKSPACE] PROJECT] NAME]` | Set a worktree description. Use `-d/--description` and `-s/--scope`. This command has no top-level alias. |
 
 `create` and `worktree set` can name a worktree that does not exist yet. Their
@@ -145,9 +145,10 @@ branch regardless of any configured base.
 
 `resolve` is the read-only twin of `enter`: the same unpinned
 [locator](targeting.md#locators) cascade resolves the target, and the resolved
-tier's path is printed. With no argument it resolves the worktree containing
-the cwd. With `--env` it emits `export KEY='value'` lines for
-`eval "$(wtm resolve --env ...)"`.
+tier's path is printed. With no argument the cwd itself rides the locator, so
+the nearest upward entity answers (worktree > project > workspace); outside
+every declared workspace it errors. With `--env` it emits `export KEY='value'`
+lines for `eval "$(wtm resolve --env ...)"` — that tier's `WTM_*` contract.
 
 ### `rename` (right-to-left positionals)
 

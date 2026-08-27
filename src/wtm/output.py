@@ -45,6 +45,7 @@ _FLAT_ALL_KEYS = ("workspace", "project", "name", "path", "branch", "head")
 # active workspace until leave -- the session contract); the wrapper never sets
 # any var outside this tuple.
 MANAGED_ENV_VARS = (
+    "WTM_WORKTREE",
     "WTM_WORKTREE_DIR",
     "WTM_BRANCH",
     "WTM_PROJECT",

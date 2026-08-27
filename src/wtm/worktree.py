@@ -37,7 +37,6 @@ from wtm.core import (
     Context,
     WtmError,
     abspath,
-    current_dir,
     derive_context,
     reject_traversal,
     worktree_name,
@@ -484,53 +483,18 @@ class Worktree:
         """Compute a worktree path for ``PROJECT NAME`` or ``NAME`` (no git).
 
         The ``NAME_ONLY`` target mode: rejects ``DIR`` targets and the cwd
-        default so only the create-style grammar is accepted. Shared by
-        :meth:`resolve_path` and the ``create`` command.
+        default so only the create-style grammar is accepted. Shared by the
+        ``create`` command and the explicit-target ``resolve``.
         """
         return resolve_target(self.config, TargetMode.NAME_ONLY, args)
-
-    def resolve_path(self, args: list[str]) -> Path:
-        """Return a worktree's computed path.
-
-        With an explicit target (``PROJECT NAME`` or ``NAME``; no ``DIR``) this
-        is pure path math, so it works for a not-yet-created worktree. With no
-        target it resolves the worktree the cwd is in (inspecting git for the
-        toplevel); absent a worktree it asks for a NAME.
-        """
-        if not args:
-            # No target: resolve the worktree we're standing in (touches git,
-            # unlike the explicit-NAME forms). Absent a worktree, ask for a NAME.
-            cwd = current_dir(resolve=False)
-            if cwd is None:
-                raise WtmError(
-                    "cwd is unavailable (the directory was removed); pass PROJECT NAME or NAME"
-                )
-            if not git.is_repo(cwd):
-                raise WtmError(
-                    "no NAME given and cwd is not inside a worktree (pass PROJECT NAME or NAME)"
-                )
-
-            return derive_context(cwd).dir
-
-        return self.target_path(args)
-
-    def resolve_env(self, args: list[str]) -> dict[str, str]:
-        """Return the ``WTM_*`` contract for a worktree.
-
-        Inspects git, so the worktree must already exist (unlike
-        :meth:`resolve_path`). The active workspace (name + dir) is folded in so
-        the emitted contract matches what hooks receive.
-        """
-        return self.env_for_dir(self.resolve_path(args))
 
     def env_for_dir(self, directory: Path) -> dict[str, str]:
         """Return the ``WTM_*`` contract for an existing worktree *directory*.
 
-        The dir-keyed core of :meth:`resolve_env`: derives the context from
-        *directory* (must be inside the worktree) and folds in the active
-        workspace, so the shell wrapper's session env matches what hooks and
-        ``resolve --env`` emit. Used by the movers (enter/create/rename) that
-        already know their destination dir.
+        Derives the context from *directory* (must be inside the worktree) and
+        folds in the active workspace, so the shell wrapper's session env
+        matches what hooks and ``resolve --env`` emit. Used by the movers
+        (enter/create/rename) that already know their destination dir.
         """
         context = derive_context(directory)
         ws = self.config.workspace_of(context.project_dir)

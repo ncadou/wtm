@@ -85,7 +85,6 @@ from wtm.core import (
     current_dir,
     project_dir_for,
     valid_project_name,
-    within,
     worktree_name,
 )
 from wtm.exceptions import KindConflictError, NoActiveWorkspaceError, WtmError
@@ -640,20 +639,25 @@ class Config:
         else the active workspace -- and returns a :class:`GenericTarget` naming
         it: its label, its locality probe cascade (most-local-first), the
         per-scope write-target resolver, its allowed write scopes, and the
-        auto-default scope (the deepest whose dir exists). The active workspace
-        is the floor; with none resolved this raises the no-active-workspace
-        error.
+        auto-default scope (the deepest whose dir exists). Inference is
+        delegated to the canonical :func:`wtm.config.slice.cwd_location`, so a
+        nested worktree name (``release/1.12``) comes back whole and a container
+        dir under ``worktrees/`` (no ``.git``) falls to the project tier. A
+        ``None`` cwd (a stranded shell) stays at the workspace tier: it is
+        guarded before ``cwd_location``, which would otherwise fall back to the
+        process cwd. The active workspace is the floor; with none resolved this
+        raises the no-active-workspace error.
         """
         ws = self.active_workspace
-        project_dir = project_dir_for(ws.path, abspath(str(cwd))) if cwd is not None else None
-        if project_dir is not None:
-            wt_name = self._cwd_worktree_name(project_dir, abspath(str(cwd)))
-            if wt_name is not None:
-                return self._worktree_generic_target(ws, project_dir, wt_name)
+        location = slice_view.cwd_location(self, cwd=cwd) if cwd is not None else None
+        if location is None or location.tier == "workspace":
+            return self._workspace_generic_target(ws)
 
+        project_dir = ws.path / (location.project or "")
+        if location.tier == "project":
             return self._project_generic_target(ws, project_dir)
 
-        return self._workspace_generic_target(ws)
+        return self._worktree_generic_target(ws, project_dir, location.name)
 
     def global_generic_target(self) -> GenericTarget:
         """Resolve the global-tier :class:`GenericTarget` (top-level user/system keys).
@@ -691,17 +695,6 @@ class Config:
             return self._project_generic_target(ws, ws.path / project)
 
         return self._workspace_generic_target(ws)
-
-    def _cwd_worktree_name(self, project_dir: Path, cwd: Path) -> str | None:
-        """Return the worktree name if *cwd* sits inside one under *project_dir*."""
-        worktrees_dir = project_dir / "worktrees"
-        if not within(cwd, worktrees_dir) or cwd == worktrees_dir:
-            return None
-
-        rel = cwd.relative_to(worktrees_dir)
-        wt_dir = worktrees_dir / rel.parts[0]
-
-        return worktree_name(wt_dir, worktrees_dir) or wt_dir.name
 
     def _worktree_generic_target(
         self, ws: Workspace, project_dir: Path, name: str

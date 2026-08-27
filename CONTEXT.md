@@ -78,8 +78,12 @@ caller's pin (`Mismatch` errors shallower landings), and absent or out-of-tree
 paths error. Lives in `wtm.locator`: `locate` is the
 pure cascade over a `LocationIndex` snapshot, `build_index` the filesystem-bound
 (git-free) edge. The CLI-side edge (`_locate_one` and its `_locate_project` /
-`_locate_worktree_args` / `_locate_parent_args` shapes) is command-agnostic and
-shared by every consumer.
+`_locate_worktree_args` / `_locate_parent_args` / `_locate_cwd` shapes) is
+command-agnostic and shared by every consumer. The **no-target edge**
+(`_locate_cwd`) feeds the cwd itself through that same path geometry for the
+tier-polymorphic movers: `enter`/`leave`/`resolve` with no argument answer with
+the nearest upward entity (worktree > project > workspace) -- git no longer
+decides the tier -- and error outside every declared workspace.
 
 **Qualifier-only locator**:
 A **Locator** applied to a target's *leading* tokens alone, the trailing `NAME`
@@ -224,8 +228,9 @@ unpinned `wtm enter`/`wtm leave` cascade. `enter` cds into the project dir
 (`<workspace>/<project>`, beside `.git`/`worktrees`) and fires `project-enter`;
 `leave` fires `project-leave` and cds out. These two events fire across the
 `system`/`user`/`workspace`/`project` scopes (never worktree -- there is no live
-worktree) with the project-level contract (the six project vars, no
-`WTM_WORKTREE_DIR`/`WTM_BRANCH`). `leave` cascades: standing inside a worktree of
+worktree) with the project-level contract (the six project vars, no worktree
+vars `WTM_WORKTREE`/`WTM_WORKTREE_DIR`/`WTM_BRANCH`). `leave` cascades: standing
+inside a worktree of
 the target project, it fires that worktree's `leave` first
 (worktree->project teardown order), then `project-leave`. The enter side does
 not cascade: `project enter` fires `project-enter` across its scopes but never
@@ -438,12 +443,12 @@ layout (the *target* project) of the active workspace.
 **Shell session**:
 The `WTM_*` context the shell wrapper carries between an `enter` and a `leave`.
 Movers that cd the shell also emit shell directives (a `cd` plus `export`/`unset`
-of the eight-var contract) out-of-band via the `WTM_SHELL_FILE` temp file, which
+of the nine-var contract) out-of-band via the `WTM_SHELL_FILE` temp file, which
 the wrapper *sources*. Set on enter/`create -c`/`import -c` (full contract), on
-`project enter` (the six project vars, no `WTM_WORKTREE_DIR`/`WTM_BRANCH`), and
-on `workspace enter` (workspace vars only); *updated* on `rename` when standing
-in the moved worktree; *unset* on `leave`/`delete`-of-current/`project
-leave`/`workspace leave` (even with `-C`, which suppresses only the cd). Because
-the exported `WTM_WORKSPACE` also *selects* the active workspace, entering
-**pins** it (over cwd inference) until leave -- the session is deliberately
-sticky.
+`project enter` (the six project vars, no worktree vars
+`WTM_WORKTREE`/`WTM_WORKTREE_DIR`/`WTM_BRANCH`), and on `workspace enter`
+(workspace vars only); *updated* on `rename` when standing in the moved
+worktree; *unset* on `leave`/`delete`-of-current/`project leave`/`workspace
+leave` (even with `-C`, which suppresses only the cd). Because the exported
+`WTM_WORKSPACE` also *selects* the active workspace, entering **pins** it (over
+cwd inference) until leave -- the session is deliberately sticky.
