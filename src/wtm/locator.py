@@ -32,6 +32,17 @@ a current context may first collapse an ambiguity with :func:`narrow_by_context`
 (current project, then current workspace); only a unique in-context match resolves,
 otherwise the tie stands and is reported as before.
 
+    A locator also accepts a **path**: a user-typed path under a declared workspace's
+    tree names an entity by geometry instead of by name. :func:`locate_path` expands
+    and absolutizes the input (:func:`interpret_path`), finds every entity dir that
+    contains it, and lands on the deepest such entity -- *any* depth is accepted, the
+    result truncated to the most local, tier-appropriate entity. The typed path must
+    exist on disk (a typo must not teleport onto a parent entity); anything outside
+    every declared workspace is not-found, as is any absent path; and a path naming
+    a tier *shallower* than a caller's leaf-tier pin is a :class:`Mismatch`
+    (truncation only climbs). Like :func:`locate`
+    it is pure over the index snapshot; :func:`interpret_path` is its cwd/env-bound edge.
+
 :func:`locate` is pure -- it takes a :class:`LocationIndex` snapshot explicitly, so
 the cascade is the test surface without a subprocess or git. :func:`build_index`
 is the one config-bound edge: it enumerates the tree from the filesystem (no git),
@@ -44,21 +55,25 @@ __all__ = [
     "Ambiguous",
     "Location",
     "LocationIndex",
+    "Mismatch",
     "NotFound",
     "Resolution",
     "Resolved",
     "Tier",
     "build_index",
+    "interpret_path",
     "locate",
+    "locate_path",
     "narrow_by_context",
 ]
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from wtm.config import Config
-from wtm.core import child_dirs, worktree_names_under
+from wtm.core import abspath, child_dirs, worktree_names_under
 
 
 class Tier(Enum):
@@ -110,7 +125,20 @@ class NotFound:
     """A locator that matched nothing at any tier."""
 
 
-Resolution = Resolved | Ambiguous | NotFound
+@dataclass(frozen=True)
+class Mismatch:
+    """A path that names a tier shallower than the caller's leaf-tier pin.
+
+    Truncation only climbs: a path landing on (or inside) a project cannot
+    answer a WORKTREE-pinned caller, so the resolution reports both tiers and
+    the cli layer renders it as a hard error.
+    """
+
+    natural: Tier
+    wanted: Tier
+
+
+Resolution = Resolved | Ambiguous | NotFound | Mismatch
 
 
 @dataclass(frozen=True)
@@ -193,6 +221,194 @@ def narrow_by_context(
             return hits[0]
 
     return None
+
+
+# --- path reading -------------------------------------------------------------
+
+# Deepest-first ordering of the tiers, for the containment cascade and pins.
+_TIER_RANK = {Tier.WORKSPACE: 0, Tier.PROJECT: 1, Tier.WORKTREE: 2}
+
+
+def interpret_path(value: str) -> Path:
+    """Expand ``~`` and ``$VAR``/``${VAR}``, then anchor a relative *value* on the cwd.
+
+    The cwd/env-bound edge of :func:`locate_path`: like :func:`build_index`
+    belongs to :func:`locate`, this is the input normalisation the pure core
+    assumes done. A relative value resolves against the live cwd; a removed
+    cwd surfaces as a clear :class:`wtm.exceptions.WtmError`.
+    """
+    return abspath(os.path.expandvars(os.path.expanduser(value)))
+
+
+def locate_path(
+    value: str | Path, index: LocationIndex, *, tier: Tier | None = None
+) -> Resolution:
+    """Resolve a user-typed *path* to its most local entity (pure over *index*).
+
+    :param value: the typed path (absolute, ``~/...``, or relative to the cwd).
+    :param index: the enumerated tree snapshot.
+    :param tier: an optional **leaf-tier pin** -- with a pin the deepest natural
+        entity may be deeper than it but never shallower; deeper is truncated up
+        to the pin tier, shallower yields :class:`Mismatch`.
+    :returns: a :class:`Resolved`, :class:`Ambiguous`, :class:`Mismatch`, or
+        :class:`NotFound` -- not-found meaning *outside every declared
+        workspace*.
+
+    Every entity dir derived from the index (the roots themselves, each project
+    dir, each worktree dir) is tested for containing the path; the deepest
+    containing entity answers. Any depth below an entity is accepted and
+    truncates to that entity. The typed path must exist on disk first -- a
+    nonexistent leaf errors rather than truncating onto an enclosing entity.
+    Matching tries raw paths first, then realpath'd
+    ones against realpath'd entity dirs (a shell standing under a symlinked
+    root still matches), so either path convention works.
+    """
+    path = interpret_path(str(value))
+    if not _exists(path):
+        return NotFound()
+
+    natural = _natural_path_hits(path, index)
+    if not natural:
+        return NotFound()
+
+    best_rank = max(rank for rank, _ in natural)
+    pin_rank = _TIER_RANK[tier] if tier is not None else None
+
+    if pin_rank is not None:
+        if best_rank < pin_rank:
+            return Mismatch(natural=_TIER_BY_RANK[best_rank], wanted=tier)
+
+        # Truncate every deep-enough hit up to the pin tier.
+        winners: list[Location] = []
+        for rank, location in natural:
+            if rank == _TIER_RANK[Tier.WORKSPACE]:
+                continue  # no descent info to truncate into a pinned child tier
+            winners.append(location if rank == pin_rank else _climb_to(location, tier))
+        distinct = list(dict.fromkeys(winners))
+
+        return _finish(distinct)
+
+    winners = [location for rank, location in natural if rank == best_rank]
+    distinct = list(dict.fromkeys(winners))
+
+    return _finish(distinct)
+
+
+_TIER_BY_RANK = {rank: tier for tier, rank in _TIER_RANK.items()}
+
+
+def _exists(path: Path) -> bool:
+    """Whether *path* exists on disk; unreadable/unresolvable paths simply miss."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _entity_dirs(index: LocationIndex) -> list[tuple[int, Location, Path]]:
+    """Every (rank, entity, dir) derived mechanically from *index*, shallowest first.
+
+    The single derivation of the geometry both :func:`locate_path` and the shell
+    completer read: a workspace's root itself, each project dir (its project),
+    each worktree dir. No extra filesystem walk -- names come from the snapshot.
+    """
+    entries: list[tuple[int, Location, Path]] = []
+
+    for name in index.workspaces:
+        workspace = Location(tier=Tier.WORKSPACE, workspace=name)
+        entries.append((_TIER_RANK[Tier.WORKSPACE], workspace, index.roots[name]))
+
+    for project in index.projects:
+        project_dir = index.roots[project.workspace] / project.project
+        entries.append((_TIER_RANK[project.tier], project, project_dir))
+
+    for worktree in index.worktrees:
+        entries.append(
+            (
+                _TIER_RANK[worktree.tier],
+                worktree,
+                index.roots[worktree.workspace] / worktree.project / "worktrees" / worktree.name,
+            )
+        )
+
+    return entries
+
+
+def _natural_path_hits(path: Path, index: LocationIndex) -> list[tuple[int, Location]]:
+    """Every (rank, entity) whose dir contains *path*, deepest tie kept.
+
+    Each candidate's dir derives mechanically from the index (see
+    :func:`_entity_dirs`). Duplicates from the dual raw-vs-realpath matching
+    collapse via field equality upstream.
+    """
+    hits: dict[Location, int] = {}
+
+    for rank, location, directory in _entity_dirs(index):
+        if _path_contains(directory, path):
+            hits.setdefault(location, rank)
+
+    # Deepest first, stable within a rank by first insertion order.
+    ordered = sorted(hits.items(), key=lambda item: -item[1])
+
+    return [(rank, location) for location, rank in ordered]
+
+
+def _geometry_relation(holder: Path, inner: Path) -> str | None:
+    """Where *inner* sits relative to *holder*: ``equal``, ``inside``, or ``None``.
+
+    Dual-mode like :func:`_path_contains`: raw forms first, then realpath'd,
+    so an entity reached through a symlink boundary still classifies. This is
+    the predicate the path-mode completer scores each candidate dir with.
+    """
+    try:
+        return "equal" if inner.relative_to(holder) == Path(".") else "inside"
+    except ValueError:
+        pass
+
+    try:
+        rel = inner.resolve().relative_to(holder.resolve())
+    except (ValueError, OSError):
+        return None
+
+    return "equal" if str(rel) == "." else "inside"
+
+
+def _path_contains(directory: Path, path: Path) -> bool:
+    """Whether *directory* equals or contains *path*: raw forms first, then realpath.
+
+    The dual check covers both conventions config keeps paths under (raw,
+    symlink-unresolved) and shells report them under (symlink-resolved), so a
+    match across a symlink boundary still lands.
+    """
+    if _within_raw_or_error(directory, path):
+        return True
+
+    try:
+        real_dir, real_path = directory.resolve(), path.resolve()
+    except OSError:
+        return False
+
+    try:
+        real_path.relative_to(real_dir)
+    except ValueError:
+        return False
+
+    return True
+
+
+def _within_raw_or_error(directory: Path, path: Path) -> bool:
+    """Raw-containment half of :func:`_path_contains`; unreadable paths simply miss."""
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+
+    return True
+
+
+def _climb_to(location: Location, tier: Tier) -> Location:
+    """Map a WORKTREE hit onto its PROJECT (the only climb that carries information)."""
+    return Location(tier=Tier.PROJECT, workspace=location.workspace, project=location.project)
 
 
 # --- helpers -----------------------------------------------------------------

@@ -1136,6 +1136,122 @@ def test_locate_completion_context_with_shadow(
     assert _labels(_complete_locate(_Ctx(()), ""))["beta"] == "worktree in alpha (also project)"
 
 
+# --- locator completion: path mode --------------------------------------------
+
+
+def test_locate_completion_path_offers_entity_children(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One level at a time: the project dir is offered (labelled by tier), a
+    # childless stray under the root is not.
+    _seed_repo(root, "alpha")
+    (root / "_noise").mkdir()
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _labels(_complete_locate(_Ctx(()), f"{root}/")) == {f"{root}/alpha/": "project"}
+
+
+def test_locate_completion_path_extends_the_typed_prefix(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Mid-word: values reproduce the typed text verbatim so the shell keeps
+    # completing what is already on the line.
+    _seed_repo(root, "alpha")
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _labels(_complete_locate(_Ctx(()), f"{root}/al")) == {f"{root}/alpha/": "project"}
+
+
+def test_locate_completion_path_walks_to_a_worktree(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unpinned descent: workspace root -> project (itself a valid landing, so
+    # labelled by tier) -> worktrees/ (waypoint 'dir') -> worktree (arrival).
+    # Inside it: nothing further.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _labels(_complete_locate(_Ctx(()), f"{root}/a")) == {f"{root}/alpha/": "project"}
+    step2 = _labels(_complete_locate(_Ctx(()), f"{root}/alpha/w"))
+    assert step2 == {f"{root}/alpha/worktrees/": "dir"}
+    step3 = _labels(_complete_locate(_Ctx(()), f"{root}/alpha/worktrees/f"))
+    assert step3 == {f"{root}/alpha/worktrees/feat/": "worktree in alpha"}
+    assert _complete_locate(_Ctx(()), f"{root}/alpha/worktrees/feat/") == []
+
+
+def test_project_pinned_path_completion_stops_at_the_project(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 'wtm list' pins PROJECT: reaching the pin yields nothing further -- deep
+    # worktree paths are for manual typing, never for completion to suggest.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate_project
+
+    assert _labels(_complete_locate_project(_Ctx(()), f"{root}/")) == {f"{root}/alpha/": "project"}
+    assert _complete_locate_project(_Ctx(()), f"{root}/alpha/") == []
+
+
+def test_worktree_pinned_path_completion_labels_waypoints(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A WORKTREE pin turns the project dir into a waypoint ('dir'), since the
+    # answer lies deeper; only the worktree itself arrives as its own tier.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate_worktree
+
+    labels = _labels(_complete_locate_worktree(_Ctx(()), f"{root}/"))
+    assert labels[f"{root}/alpha/"] == "dir"
+    arrival = _labels(_complete_locate_worktree(_Ctx(()), f"{root}/alpha/worktrees/f"))
+    assert arrival == {f"{root}/alpha/worktrees/feat/": "worktree in alpha"}
+
+
+def test_hook_run_path_completion_never_suggests_events(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A WORKTREE pin: the project dir is a waypoint ('dir') en route to the
+    # worktree, and no event name ever appears mid-path.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate_hook_target
+
+    out = _complete_locate_hook_target(_Ctx(()), f"{root}/a")
+    assert out == [(f"{root}/alpha/", "dir")]
+
+
+def test_path_completion_out_of_tree_base_yields_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_config(monkeypatch, tmp_path / "ws-root")
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _complete_locate(_Ctx(()), "/definitely/not/a/workspace/") == []
+
+
+def test_multi_workspace_path_completion_carries_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, roots = _multi_workspace_config(tmp_path, ["dev", "prod"])
+    _seed_index_worktree(roots[0], "datactl", "feat")  # dev/datactl
+    _seed_index_worktree(roots[1], "api", "feat")  # prod/api
+    monkeypatch.setenv("WTM_CONFIG", str(config))
+    monkeypatch.setenv("WTM_SYSTEM_CONFIG", str(tmp_path / "_no_system_config.toml"))
+    monkeypatch.delenv("WTM_WORKSPACE", raising=False)
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _labels(_complete_locate(_Ctx(()), f"{roots[0]}/")) == {
+        f"{roots[0]}/datactl/": "project in dev"
+    }
+
+
 def test_hook_target_labels_event(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
@@ -1982,7 +2098,8 @@ def test_enter_no_match_errors(root: Path) -> None:
 
 
 def test_enter_dir_arg_still_a_path(root: Path, tmp_path: Path) -> None:
-    # A path-looking single arg keeps the classic worktree-path behavior.
+    # A path-looking single arg resolves geometrically; '.' stands in the
+    # worktree itself, so the truncation lands on exactly where you are.
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     shell_file = tmp_path / "cd"
@@ -1991,6 +2108,38 @@ def test_enter_dir_arg_still_a_path(root: Path, tmp_path: Path) -> None:
     res = run("enter", ".", root=root, cwd=wt, shell_file=shell_file)
     assert res.returncode == 0, res.stderr
     assert _shell_cd(shell_file) == str(wt)
+
+
+def test_enter_path_inside_the_worktree_truncates_to_it(root: Path, tmp_path: Path) -> None:
+    # Any depth is accepted: an interior file truncates up to its worktree.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    wt = root / "alpha" / "worktrees" / "feat"
+    deep = wt / "src" / "pkg"
+    deep.mkdir(parents=True)
+    (deep / "mod.py").write_text("")
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run(
+        "enter", "alpha/worktrees/feat/src/pkg/mod.py", root=root, cwd=root, shell_file=shell_file
+    )
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(wt)
+
+
+def test_enter_relative_path_from_projects_root_enters_project(root: Path, tmp_path: Path) -> None:
+    # A project dir entered by path gets the project-tier contract (no
+    # WTM_WORKTREE_DIR/WTM_BRANCH), same as entering the project by name.
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    shell_file = tmp_path / "cd"
+    shell_file.touch()
+    res = run("enter", "./alpha", root=root, cwd=root, shell_file=shell_file)
+    assert res.returncode == 0, res.stderr
+    assert _shell_cd(shell_file) == str(root / "alpha")
+    exports = _shell_exports(shell_file)
+    assert exports["WTM_PROJECT"] == "alpha"
+    assert "WTM_WORKTREE_DIR" not in exports
 
 
 def test_enter_cross_workspace_worktree(tmp_path: Path) -> None:
@@ -2067,10 +2216,12 @@ def test_resolve_nonexistent_worktree_errors(root: Path) -> None:
     assert "no worktree, project, or workspace matches" in res.stderr
 
 
-def test_resolve_rejects_path(root: Path) -> None:
+def test_resolve_out_of_tree_path_errors(root: Path) -> None:
+    # Paths are matched geometrically against the workspaces now; a path under
+    # no declared workspace errors instead of resolving as an unmanaged repo.
     res = run("resolve", "./feat", root=root)
     assert res.returncode == 1
-    assert "not a path" in res.stderr
+    assert "outside every declared workspace" in res.stderr
 
 
 def test_resolve_env_emits_exports(root: Path) -> None:
@@ -3836,7 +3987,8 @@ def test_leave_no_match_errors(root: Path) -> None:
 
 
 def test_leave_dir_arg_still_a_path(root: Path, tmp_path: Path) -> None:
-    # A path-looking single arg keeps the classic worktree-path behavior.
+    # A path-looking single arg resolves geometrically; '.' stands in the
+    # worktree itself, so the teardown targets exactly where you are.
     _seed_repo(root, "alpha")
     run("create", "alpha", "feat", root=root)
     wt = root / "alpha" / "worktrees" / "feat"
@@ -3848,6 +4000,52 @@ def test_leave_dir_arg_still_a_path(root: Path, tmp_path: Path) -> None:
     assert res.returncode == 0, res.stderr
     assert wt.exists()
     assert _shell_unsets(shell_file) == set(MANAGED_ENV_VARS)
+
+
+# --- paths through the locator: pins, errors, queries -------------------------
+
+
+def test_list_by_worktree_path_resolves_the_project(root: Path) -> None:
+    # A PROJECT-pinned command truncates a deeper path up: a worktree path
+    # names its project ('wtm list <root>/proj/worktrees/wt' lists that project).
+    _seed_repo(root, "alpha")
+    run("create", "alpha", "feat", root=root)
+    res = run("list", f"{root}/alpha/worktrees/feat", root=root, cwd=root)
+    assert res.returncode == 0, res.stderr
+    assert "feat" in res.stdout
+
+
+def test_list_workspace_path_is_a_pin_mismatch(root: Path) -> None:
+    # Truncation only climbs to the pin tier -- a workspace-level stray cannot
+    # answer a project-only command.
+    res = run("list", ".", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "names a workspace, not a project" in res.stderr
+
+
+def test_hook_list_shallow_path_errors(root: Path) -> None:
+    # A WORKTREE-pinned command rejects a path that stops at the project dir.
+    _seed_repo(root, "alpha")
+    res = run("hook", "list", f"{root}/alpha", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "names a project, not a worktree" in res.stderr
+
+
+def test_enter_out_of_tree_path_errors(root: Path, tmp_path: Path) -> None:
+    # Strict policy: unmanaged trees are out of scope; import is the entrance.
+    outside = tmp_path / "unmanaged"
+    outside.mkdir()
+    res = run("enter", str(outside), root=root, cwd=root)
+    assert res.returncode == 1
+    assert "outside every declared workspace" in res.stderr
+
+
+def test_enter_nonexistent_leaf_errors_without_truncating(root: Path) -> None:
+    # A typo must not silently land on an enclosing entity (the workspace root).
+    _seed_repo(root, "alpha")
+    res = run("enter", "./ghost/proj", root=root, cwd=root)
+    assert res.returncode == 1
+    assert "outside every declared workspace" in res.stderr
 
 
 # --- usage / dispatch --------------------------------------------------------

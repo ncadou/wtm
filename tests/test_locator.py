@@ -2,7 +2,9 @@
 
 The cascade is the test surface: :func:`locate` takes a :class:`LocationIndex`
 snapshot explicitly, so every tier, qualifier reading, and ambiguity is exercised
-without spawning ``wtm``, touching git, or hitting the filesystem. A couple of
+without spawning ``wtm``, touching git, or hitting the filesystem. The path
+reading (:func:`locate_path`) is the same over absolute paths against the
+nonexistent fixture roots; only its symlink case needs a real tree. A couple of
 :func:`build_index` tests cover the one filesystem-bound edge over a tmp tree.
 """
 
@@ -17,11 +19,13 @@ from wtm.locator import (
     Ambiguous,
     Location,
     LocationIndex,
+    Mismatch,
     NotFound,
     Resolved,
     Tier,
     build_index,
     locate,
+    locate_path,
     narrow_by_context,
 )
 
@@ -371,3 +375,204 @@ def test_build_index_default_excludes_config_only(tmp_path: Path) -> None:
 
     assert {(p.workspace, p.project) for p in index.projects} == {("work", "api")}
     assert {(w.workspace, w.project, w.name) for w in index.worktrees} == {("work", "api", "main")}
+
+
+# --- locate_path: geometry over a real tree -----------------------------------
+
+# The existence gate means the index's roots must be real dirs: the fixture
+# mirrors INDEX's shape on disk (same names, tmp-based roots).
+
+
+@pytest.fixture
+def tree(tmp_path: Path) -> tuple[LocationIndex, Path, Path]:
+    """An on-disk mirror of INDEX plus its roots -- and the roots themselves."""
+    work = tmp_path / "w"
+    _make_project(work, "api", ["main", "feature/auth", "hotfix"])
+    _make_project(work, "web", ["main", "hotfix"])
+    (work / "web" / "docs").mkdir()
+    (work / "scratch").mkdir()
+    (work / "scratch" / "deep").mkdir()
+    oss = tmp_path / "o"
+    _make_project(oss, "wtm", ["main", "docs"])
+    _make_project(oss, "api", ["main"])
+    (oss / "not-a-project" / "inner").mkdir(parents=True)
+
+    return build_index(_FakeConfig({"work": work, "oss": oss})), work, oss  # type: ignore[arg-type]
+
+
+def test_worktree_dir_resolves_to_the_worktree(tree: tuple[LocationIndex, Path, Path]) -> None:
+    index, work, _ = tree
+    assert locate_path(work / "api" / "worktrees" / "hotfix", index) == Resolved(
+        _wt("work", "api", "hotfix")
+    )
+
+
+def test_arbitrary_depth_inside_a_worktree_truncates_up(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    leaf = work / "api" / "worktrees" / "main" / "src" / "pkg"
+    leaf.mkdir(parents=True)
+    (leaf / "mod.py").write_text("")
+    assert locate_path(leaf / "mod.py", index) == Resolved(_wt("work", "api", "main"))
+
+
+def test_nested_name_dir_is_one_entity(tree: tuple[LocationIndex, Path, Path]) -> None:
+    # 'feature/auth' is a single worktree whose name contains '/'.
+    index, work, _ = tree
+    assert locate_path(work / "api" / "worktrees" / "feature" / "auth", index) == Resolved(
+        _wt("work", "api", "feature/auth")
+    )
+
+
+def test_project_dir_resolves_to_the_project(tree: tuple[LocationIndex, Path, Path]) -> None:
+    index, work, _ = tree
+    assert locate_path(work / "web", index) == Resolved(_pr("work", "web"))
+
+
+def test_depth_inside_a_project_outside_its_worktrees_is_the_project(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    (work / "web" / "docs" / "readme.md").write_text("")
+    assert locate_path(work / "web" / "docs" / "readme.md", index) == Resolved(_pr("work", "web"))
+
+
+def test_projects_root_stray_resolves_to_the_workspace(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    # A dir inside the workspace but outside every project truncates to it.
+    index, work, _ = tree
+    assert locate_path(work / "scratch" / "deep", index) == Resolved(
+        Location(tier=Tier.WORKSPACE, workspace="work")
+    )
+
+
+def test_workspace_root_itself_resolves(tree: tuple[LocationIndex, Path, Path]) -> None:
+    index, _, oss = tree
+    assert locate_path(oss, index) == Resolved(Location(tier=Tier.WORKSPACE, workspace="oss"))
+
+
+def test_path_equal_to_a_projects_root_with_siblings_present(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    # The root holds api and web; the exact root is workspace 'work', not either.
+    index, work, _ = tree
+    assert locate_path(work, index) == Resolved(Location(tier=Tier.WORKSPACE, workspace="work"))
+
+
+def test_absent_leaf_is_not_found_even_in_tree(tree: tuple[LocationIndex, Path, Path]) -> None:
+    # A typo must not truncate onto an enclosing entity.
+    index, work, _ = tree
+    assert locate_path(work / "web" / "docs" / "ghost.md", index) == NotFound()
+    assert locate_path(work / "ghost" / "deeper", index) == NotFound()
+
+
+def test_out_of_tree_is_not_found() -> None:
+    # Pure reading: no fs touched for paths that cannot exist anyway.
+    assert locate_path("/elsewhere/x/y", INDEX) == NotFound()
+
+
+def test_sibling_of_a_root_is_not_found(tree: tuple[LocationIndex, Path, Path]) -> None:
+    # '<root>2' prefix-matches textually but not structurally.
+    index, work, _ = tree
+    assert locate_path(Path(f"{work}2/api"), index) == NotFound()
+
+
+def test_pinned_project_truncates_a_worktree_path_up(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, _, oss = tree
+    assert locate_path(oss / "wtm" / "worktrees" / "docs", index, tier=Tier.PROJECT) == Resolved(
+        _pr("oss", "wtm")
+    )
+
+
+def test_pinned_worktree_rejects_a_project_path(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    result = locate_path(work / "web", index, tier=Tier.WORKTREE)
+    assert result == Mismatch(natural=Tier.PROJECT, wanted=Tier.WORKTREE)
+
+
+def test_pinned_worktree_rejects_a_workspace_stray(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    result = locate_path(work / "scratch" / "deep", index, tier=Tier.WORKTREE)
+    assert result == Mismatch(natural=Tier.WORKSPACE, wanted=Tier.WORKTREE)
+
+
+def test_pinned_project_rejects_a_workspace_stray(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    result = locate_path(work / "scratch", index, tier=Tier.PROJECT)
+    assert result == Mismatch(natural=Tier.WORKSPACE, wanted=Tier.PROJECT)
+
+
+def test_pinned_project_rejects_an_inert_top_level_dir(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, _, oss = tree
+    result = locate_path(oss / "not-a-project" / "inner", index, tier=Tier.PROJECT)
+    assert result == Mismatch(natural=Tier.WORKSPACE, wanted=Tier.PROJECT)
+
+
+def test_dotdot_in_typed_path_normalized_before_matching(
+    tree: tuple[LocationIndex, Path, Path],
+) -> None:
+    index, work, _ = tree
+    typed = f"{work}/api/../web/worktrees/main"
+    assert locate_path(typed, index) == Resolved(_wt("work", "web", "main"))
+
+
+# --- interpret_path -----------------------------------------------------------
+
+
+def test_interpret_path_keeps_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from wtm.locator import interpret_path
+
+    monkeypatch.chdir(tmp_path)
+    assert interpret_path("/x/y") == Path("/x/y")
+
+
+def test_interpret_path_expands_home_and_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wtm.locator import interpret_path
+
+    monkeypatch.setenv("HOME", "/home/t")
+    monkeypatch.setenv("BASE", "/b")
+    assert interpret_path("~/r") == Path("/home/t/r")
+    assert interpret_path("${BASE}/q") == Path("/b/q")
+
+
+def test_interpret_path_anchors_relative_on_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from wtm.locator import interpret_path
+
+    monkeypatch.chdir(tmp_path)
+    assert interpret_path("./a/b") == tmp_path / "a" / "b"
+
+
+# --- symlink handling (needs a real tree) -------------------------------------
+
+
+def test_symlinked_root_matches_via_realpath(tmp_path: Path) -> None:
+    # A shell standing under a resolved symlink reports realpath'd cwds; typing
+    # one must still match an index whose roots are stored unresolved.
+    work = tmp_path / "raw-work"
+    _make_project(work, "api", ["main"])
+    link = tmp_path / "linked"
+    link.symlink_to(work)
+    index = build_index(_FakeConfig({"work": work}))  # type: ignore[arg-type]
+
+    through_link = link / "api" / "worktrees" / "main"
+    try:
+        through_link.relative_to(work)
+        pytest.skip("filesystem does not exercise the symlink split")
+    except ValueError:
+        pass
+
+    assert locate_path(through_link, index) == Resolved(_wt("work", "api", "main"))

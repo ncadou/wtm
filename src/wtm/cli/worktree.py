@@ -21,11 +21,10 @@ from wtm.cli.completions.locator import (
 from wtm.cli.completions.target import _complete_branch, _complete_target
 from wtm.cli.locator import _locate_one, _locate_parent_args, _locate_project
 from wtm.config import resolve_project_dir
-from wtm.core import WtmError, current_dir, remap_dir, rescue_dir, worktree_name
+from wtm.core import current_dir, remap_dir, rescue_dir, worktree_name
 from wtm.hooks import Scope
 from wtm.locator import Location, Tier, build_index
 from wtm.output import emit_env_line, emit_shell, log, warn, worktree_list_lines
-from wtm.target import looks_like_path
 from wtm.worktree import BranchStrategy, WorktreeCreated, WorktreeRenamed
 
 worktree_app = typer.Typer(
@@ -39,9 +38,10 @@ def enter(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [PATH]",
         help="Locator: a name resolved across every workspace (worktree > project "
-        "> workspace), qualified by leading tokens, or a DIR",
+        "> workspace), qualified by leading tokens, or a PATH truncated to its "
+        "most local entity",
         autocompletion=_complete_locate,
     ),
     do_install: bool = typer.Option(False, "-i", "--install", help="Run install hooks first"),
@@ -54,8 +54,9 @@ def enter(
     qualify it (``PROJECT NAME`` / ``WORKSPACE NAME`` / ``WORKSPACE PROJECT
     NAME``). Exactly one match is entered with that tier's WTM_* contract;
     several print the qualified choices and exit non-zero. ``leave`` undoes this
-    with the same locator. A single DIR (``/``, ``./``, ``../``, ``.``/``..``)
-    or no arg (the cwd worktree) stays the worktree path, as before.
+    with the same locator. A single PATH under a declared workspace is matched
+    by geometry and truncated to its most local entity; outside every workspace
+    it errors.
     """
     _enter_via_locator(ctx, args or [], do_install=do_install, strict=strict)
 
@@ -69,14 +70,14 @@ def _enter_via_locator(
 ) -> None:
     """Resolve a locator and cd into the matched worktree/project/workspace.
 
-    A DIR single arg or the no-arg cwd default keep the worktree path (they are
-    not names to resolve). Otherwise the tokens are resolved by the unpinned tier
-    cascade -- ``enter`` is tier-polymorphic -- and entered with that tier's
-    WTM_* contract.
+    The no-arg cwd default keeps the classic worktree path. Otherwise the tokens
+    are resolved by the unpinned tier cascade -- ``enter`` is tier-polymorphic --
+    with a single prefixed arg read as a path truncated to its most local entity,
+    and entered with that tier's WTM_* contract.
     """
     worktree = ctx.obj.worktree
-    # No args (cwd worktree) or a single DIR arg stay the classic worktree path.
-    if not args or (len(args) == 1 and looks_like_path(args[0])):
+    # No args (cwd worktree) stay the classic worktree path.
+    if not args:
         dest = worktree.enter(args, do_install=do_install, strict=strict)
         emit_shell(cd=dest, env=worktree.env_for_dir(dest))
 
@@ -120,9 +121,10 @@ def leave(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
+        metavar="[[WORKSPACE] PROJECT] NAME | [PATH]",
         help="Locator: a name resolved across every workspace (worktree > project "
-        "> workspace), qualified by leading tokens, or a DIR",
+        "> workspace), qualified by leading tokens, or a PATH truncated to its "
+        "most local entity",
         autocompletion=_complete_locate,
     ),
     no_cd: bool = typer.Option(
@@ -135,13 +137,13 @@ def leave(
     ``enter``'s inverse, and it takes the same locator, so a session entered by
     name is left by that same name: the tier cascade picks what to tear down (a
     worktree beats a project beats a workspace) and each tier's own leave runs,
-    cascading downward as it already does. A single DIR or no arg is the cwd
-    worktree, as before. Ends the shell session either way: the WTM_* contract is
-    unset even with -C (which only suppresses the cd-out, not the teardown).
+    cascading downward as it already does. A single PATH truncates like
+    ``enter``. Ends the shell session either way: the WTM_* contract is unset
+    even with -C (which only suppresses the cd-out, not the teardown).
     """
     args = args or []
-    # No args (cwd worktree) or a single DIR arg stay the classic worktree path.
-    if not args or (len(args) == 1 and looks_like_path(args[0])):
+    # No args (cwd worktree) stay the classic worktree path.
+    if not args:
         result = ctx.obj.worktree.leave(args, strict=strict)
         emit_shell(cd=None if no_cd else result.cd_dir, env={})
 
@@ -339,9 +341,9 @@ def resolve(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[WORKSPACE] PROJECT] NAME",
+        metavar="[[WORKSPACE] PROJECT] NAME | [PATH]",
         help="Locator: a name resolved across every workspace (worktree > project "
-        "> workspace), or none (the cwd worktree)",
+        "> workspace), or none (the cwd worktree); a PATH truncates likewise",
         autocompletion=_complete_locate,
     ),
     emit_env: bool = typer.Option(False, "-e", "--env", help="Emit the WTM_* contract for eval"),
@@ -351,9 +353,10 @@ def resolve(
     A read-only twin of ``enter``: the same unpinned tier cascade (worktree >
     project > workspace) resolves the target, and the resolved tier's path is
     printed. With no target it resolves the worktree the cwd is in (inspecting
-    git). With --env it emits that tier's WTM_* contract for eval -- the
-    worktree contract inspects git, the project and workspace contracts are
-    pure path math (no WTM_WORKTREE_DIR / WTM_BRANCH).
+    git). A single PATH under a declared workspace resolves by geometry. With
+    --env it emits that tier's WTM_* contract for eval -- the worktree contract
+    inspects git, the project and workspace contracts are pure path math (no
+    WTM_WORKTREE_DIR / WTM_BRANCH).
     """
     worktree = ctx.obj.worktree
     args = args or []
@@ -366,9 +369,6 @@ def resolve(
             print(worktree.resolve_path([]))
 
         return
-
-    if looks_like_path(args[0]) and len(args) == 1:
-        raise WtmError(f"takes a NAME, not a path: {args[0]}")
 
     location = _locate_one(ctx, args, command="resolve")
     if location.tier is Tier.WORKTREE:

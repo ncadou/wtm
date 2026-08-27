@@ -68,7 +68,14 @@ its cwd-inferred project, relaxing to the workspace alone on a miss; a unique
 in-context match resolves silently, otherwise the tie stands and prints as
 before. The tiebreak only ever turns a former ambiguity error into a hit -- it
 never touches an already-unique resolution -- and the core cascade stays pure and
-global (it is a CLI-layer post-filter). Lives in `wtm.locator`: `locate` is the
+global (it is a CLI-layer post-filter). A locator also accepts a single **path**
+(prefixed `/` `~` `./` `../` `.` `..`; a slashful token without a prefix stays
+name-first and only falls back to a cwd-relative path on a clean miss): the path
+must exist under a declared workspace, the deepest entity dir containing it
+answers (`locate_path`, same `LocationIndex` geometry), so any depth truncates to
+the most local, tier-appropriate entity; truncation never descends below the
+caller's pin (`Mismatch` errors shallower landings), and absent or out-of-tree
+paths error. Lives in `wtm.locator`: `locate` is the
 pure cascade over a `LocationIndex` snapshot, `build_index` the filesystem-bound
 (git-free) edge. The CLI-side edge (`_locate_one` and its `_locate_project` /
 `_locate_worktree_args` / `_locate_parent_args` shapes) is command-agnostic and
@@ -114,7 +121,9 @@ target it can serve follows from what already exists. Three classes:
   `hook list`, `hook run`, `config show`. `config show` runs an unpinned locator
   (tier-polymorphic cascade, like `enter`/`leave`) with
   `include_config_only=True`, so it resolves config-only entities (inert
-  projects, absent worktrees) too.
+  projects, absent worktrees) too. Every whole-target command also accepts a
+  single path in place of the name query (see **Locator**); the qualifier-only
+  and neither classes keep their positional discipline.
 - *Qualifiers only*: the leaf is being named into existence but its ancestors are
   not -- the **qualifier-only locator** commands (`create`, `worktree set`).
 - *Neither*: a **destructive** verb (`delete`, `rename`, `hook delete`) stays

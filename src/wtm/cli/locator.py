@@ -7,6 +7,13 @@ fully-qualified ``WORKSPACE PROJECT NAME`` triple. A command that accepts one
 kind of target only passes a leaf-tier pin, so a project-level command never
 resolves a same-named worktree.
 
+A single *path* argument rides the locator too (:func:`wtm.locator.locate_path`):
+anything starting with ``/``, ``~``, ``./``, ``../`` or ``.``/``..`` is read
+path-only, while other tokens are matched by name first and fall back to a cwd
+relative-path reading on a clean miss (never past an ambiguity). A path landing
+on a tier shallower than the command's pin errors; a path outside every
+declared workspace errors -- unmanaged trees are out of scope by design.
+
 Which commands take a locator (and which deliberately do not) is a policy, not
 an accident: a locator reaches globally and only sees what exists on disk, so
 how much of a command's target it can resolve depends on what already exists.
@@ -32,13 +39,41 @@ from wtm.core import WtmError, current_dir, project_dir_for
 from wtm.locator import (
     Ambiguous,
     Location,
+    Mismatch,
     NotFound,
+    Resolution,
     Tier,
     build_index,
     locate,
+    locate_path,
     narrow_by_context,
 )
 from wtm.target import looks_like_path
+
+
+def _resolve_tokens(
+    ctx: typer.Context,
+    args: list[str],
+    *,
+    tier: Tier | None = None,
+    include_config_only: bool = False,
+) -> Resolution:
+    """Resolution logic shared by :func:`_locate_one` and :func:`_locate_optional`.
+
+    A single prefixed arg is a path (read path-only); everything else matches
+    names first, falling back to a path reading only on a clean not-found -- an
+    ambiguity stands rather than silently switching input disciplines.
+    """
+    index = build_index(ctx.obj.config, include_config_only=include_config_only)
+    if len(args) == 1 and looks_like_path(args[0]):
+        return locate_path(args[0], index, tier=tier)
+
+    resolution = locate(args, index, tier=tier)
+    if isinstance(resolution, NotFound) and len(args) == 1 and "/" in args[0]:
+        # A nested-name query ('feature/x') may equally be a relative path tail.
+        return locate_path(args[0], index, tier=tier)
+
+    return resolution
 
 
 def _locate_one(
@@ -58,14 +93,15 @@ def _locate_one(
     :param include_config_only: enrich the index with config-declared inert
         projects and absent worktrees (see :func:`wtm.locator.build_index`).
     :returns: the sole matching location.
-    :raises WtmError: nothing matched, or several did and the current context
-        could not single one out.
+    :raises WtmError: nothing matched (or the match lay outside every declared
+        workspace), several did and the current context could not single one
+        out, or a path named a shallower tier than *tier*.
     """
-    resolution = locate(
-        args, build_index(ctx.obj.config, include_config_only=include_config_only), tier=tier
-    )
+    resolution = _resolve_tokens(ctx, args, tier=tier, include_config_only=include_config_only)
     if isinstance(resolution, NotFound):
-        raise WtmError(f"no {_tier_noun(tier)} matches: {' '.join(args)}")
+        raise WtmError(_not_found_message(tier, args))
+    if isinstance(resolution, Mismatch):
+        raise WtmError(_mismatch_message(resolution, args[0]))
     if isinstance(resolution, Ambiguous):
         picked = _context_pick(ctx, resolution.candidates)
         if picked is None:
@@ -90,15 +126,35 @@ def _locate_optional(
     KEY+SUBKEY reading rather than erroring. Applies the same context tiebreak
     as :func:`_locate_one` before giving up.
     """
-    resolution = locate(
-        args, build_index(ctx.obj.config, include_config_only=include_config_only), tier=tier
-    )
-    if isinstance(resolution, NotFound):
+    resolution = _resolve_tokens(ctx, args, tier=tier, include_config_only=include_config_only)
+    if isinstance(resolution, NotFound | Mismatch):
         return None
     if isinstance(resolution, Ambiguous):
         return _context_pick(ctx, resolution.candidates)
 
     return resolution.location
+
+
+def _not_found_message(tier: Tier | None, args: list[str]) -> str:
+    """Shape the not-found error by what was typed: name-first or path-first."""
+    noun = _tier_noun(tier)
+    if len(args) == 1 and looks_like_path(args[0]):
+        return (
+            f"path '{args[0]}' names no entity "
+            "(it does not exist, or lies outside every declared workspace)"
+        )
+    if len(args) == 1 and "/" in args[0]:
+        return (
+            f"no {noun} matches: {' '.join(args)} "
+            f"(and '{args[0]}' is not a path under any workspace)"
+        )
+
+    return f"no {noun} matches: {' '.join(args)}"
+
+
+def _mismatch_message(mismatch: Mismatch, value: str) -> str:
+    """Render the pin-mismatch error: truncation only climbs."""
+    return f"'{value}' names a {mismatch.natural.value}, not a {mismatch.wanted.value}"
 
 
 def _locate_project(
@@ -122,10 +178,10 @@ def _locate_worktree_args(ctx: typer.Context, args: list[str], *, command: str) 
     Returns positionals rather than a :class:`Location` so the existing
     target-grammar operations can be called unchanged; the triple resolves
     regardless of the active workspace, which is the portability win. A single
-    ``DIR`` and the no-token cwd default are not names to resolve, so they pass
-    straight through.
+    path arg resolves through the locator too (truncated to its worktree); the
+    empty-token cwd default passes straight through.
     """
-    if not args or (len(args) == 1 and looks_like_path(args[0])):
+    if not args:
         return args
     location = _locate_one(ctx, args, command=command, tier=Tier.WORKTREE)
 

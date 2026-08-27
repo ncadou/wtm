@@ -55,9 +55,9 @@ def hook_run(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[WORKSPACE] PROJECT] NAME | [DIR] HOOK",
-        help="Locator: a worktree name resolved across every workspace (or a DIR), "
-        "followed by the event (HOOK) to run",
+        metavar="[[WORKSPACE] PROJECT] NAME | [PATH] HOOK",
+        help="Locator: a worktree name resolved across every workspace (or a PATH "
+        "truncated to its worktree), followed by the event (HOOK) to run",
         autocompletion=_complete_locate_hook_target,
     ),
     scope: Scope | None = typer.Option(
@@ -69,7 +69,7 @@ def hook_run(
 
     HOOK (the event) is the last positional; anything before it is the target, a
     worktree-pinned locator (as for ``hook list``), so a bare name reaches
-    another workspace's worktree. A DIR or no target is the cwd worktree.
+    another workspace's worktree. No target is the cwd worktree.
     """
     if not args:
         raise WtmError("hook run requires an event (HOOK) as the last argument")
@@ -112,8 +112,9 @@ def hook_list(
     ctx: typer.Context,
     args: list[str] = typer.Argument(
         None,
-        metavar="[[WORKSPACE] PROJECT] NAME | [DIR]",
-        help="Locator: a worktree name resolved across every workspace, or a DIR (default: cwd)",
+        metavar="[[WORKSPACE] PROJECT] NAME | [PATH]",
+        help="Locator: a worktree name resolved across every workspace, or a PATH "
+        "truncated to its worktree (default: cwd)",
         autocompletion=_complete_locate_worktree,
     ),
     types: bool = typer.Option(False, "-t", "--types", help="Show a compact per-event summary"),
@@ -121,8 +122,8 @@ def hook_list(
     """List installed hooks, grouped by event across scopes.
 
     A read-only query over an existing worktree, so it takes a worktree-pinned
-    locator: a bare name reaches another workspace's worktree. A DIR or no arg is
-    the cwd worktree, as before.
+    locator: a bare name reaches another workspace's worktree. No arg is the
+    cwd worktree, as before.
     """
     grouped = ctx.obj.hooks.list(_locate_worktree_args(ctx, args or [], command="hook list"))
     plugin = ctx.obj.hooks.plugin_rows(args or [])

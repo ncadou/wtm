@@ -62,9 +62,37 @@ wtm config get project port
 wtm config set ws project ci.runner.image ubuntu
 ```
 
-`enter` and `leave` also accept a single directory or no argument for the cwd
-worktree. `hook list` and `hook run` accept a directory or cwd worktree too.
-`resolve` accepts names only; no argument means the cwd worktree.
+`enter` and `leave` also accept no argument for the cwd worktree. `hook list`
+and `hook run` resolve their target the same way; no target means the cwd
+worktree.
+
+## Paths
+
+A locator also accepts a single **path** instead of a name query: anything that
+starts with `/`, `~`, `./`, or `../`, or is `.` or `..`. A token containing `/`
+but without such a prefix is still read as a name query first (nested worktree
+names like `feature/x` are names); only when it matches nothing is it retried as
+a cwd-relative path.
+
+The path must exist and lie under a declared workspace; the deepest entity whose
+directory contains it answers, so *any depth* truncates to the most local,
+tier-appropriate entity:
+
+```sh
+wtm enter ~/ws/api/worktrees/main/src   # enters 'main'
+wtm list ./api/worktrees/feat           # lists project 'api'
+wtm enter .                             # standing in a workspace root: workspace
+```
+
+Truncation only climbs to the command's pin tier. A path that stops at a
+shallower tier is an error (`hook list <project-dir>` reports that the path
+names a project, not a worktree), and a path outside every declared workspace
+is rejected -- unmanaged trees are out of scope by design.
+
+Shell completion mirrors this: a partial-path token completes one directory
+level at a time, offering only the dirs whose subtree still leads to an entity
+admissible under the command's pin. Nothing is offered past the pin, so
+completion never steers into a truncation.
 
 ## Leaf-tier pins
 
