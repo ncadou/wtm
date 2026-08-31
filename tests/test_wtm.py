@@ -1183,6 +1183,27 @@ def test_locate_completion_path_walks_to_a_worktree(
     assert _complete_locate(_Ctx(()), f"{root}/alpha/worktrees/feat/") == []
 
 
+def test_tilde_path_completion_falls_through_to_the_shell(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A tilde token is answered by the shell's own path completion, not by wtm:
+    # zsh re-quotes a live '~' in a completion candidate on every insertion
+    # round (it inserts '\~/projects/'), so wtm offers nothing and typer's
+    # empty-case fallback takes over ('_files' on zsh, '-o default' on bash).
+    # Slash-anchored and './'-anchored forms keep wtm's entity-filtered mode.
+    _seed_repo(root, "alpha")
+    _use_config(monkeypatch, root)
+    from wtm.cli.completions.locator import _complete_locate
+
+    assert _complete_locate(_Ctx(()), "~") == []
+    assert _complete_locate(_Ctx(()), "~/al") == []
+    monkeypatch.chdir(root)
+    assert _labels(_complete_locate(_Ctx(()), "./al")) == {"./alpha/": "project"}
+    # End to end through the real renderer: the empty result surfaces as the
+    # shell's native file completion.
+    assert _complete_zsh(root, args="wtm enter ~/al", cwd=root).strip() == "_files"
+
+
 def test_project_pinned_path_completion_stops_at_the_project(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

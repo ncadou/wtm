@@ -93,7 +93,11 @@ is rejected -- unmanaged trees are out of scope by design.
 Shell completion mirrors this: a partial-path token completes one directory
 level at a time, offering only the dirs whose subtree still leads to an entity
 admissible under the command's pin. Nothing is offered past the pin, so
-completion never steers into a truncation.
+completion never steers into a truncation. Tilde tokens (`~/ws`, `~user/ws`)
+are left to the shell's own path completion, which keeps the `~` live -- a
+completion candidate carrying a `~` is re-quoted by zsh on every insertion
+round (`\~/ws/`), so wtm cannot offer one cleanly; entity filtering therefore
+applies to name and slash-anchored tokens only.
 
 ## Leaf-tier pins
 

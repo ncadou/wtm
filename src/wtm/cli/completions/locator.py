@@ -10,6 +10,11 @@ leads to an entity admissible under the command's pin -- so once the pin tier
 is reached nothing further is offered and completion can never steer into a
 truncation the runtime would have had to apply. Entity-bearing dirs are
 labelled like their name-mode twins; intermediate waypoints get ``dir``.
+Tilde tokens are not answered here at all: the shell's own path completion
+takes them (typer's empty-case ``_files`` fallback on zsh, ``-o default`` on
+bash), because zsh re-quotes a live ``~`` in a completion candidate on every
+insertion round -- wtm could only ever offer the mangled form. Entity
+filtering therefore applies to name and slash-anchored tokens.
 """
 
 from __future__ import annotations
@@ -64,8 +69,12 @@ def _locate_completion(
     universe to the tier the command can actually resolve, so ``wtm list <TAB>``
     offers projects rather than every name in the tree. Builds its own index (the
     app callback has not fired) from the filesystem, so it never touches git and
-    never errors.
+    never errors. Tilde tokens fall through to the shell's own path completion
+    (see the module docstring): wtm offers nothing for them.
     """
+    if incomplete.startswith("~"):
+        return []
+
     args = ctx.params.get("args") or []
     try:
         index = build_index(Config.load())
@@ -104,7 +113,9 @@ def _path_completion(
     the shell keeps completing mid-word), followed by a trailing ``/``. A dir is
     offered when an entity equals it (arrival -- its own tier fitting the pin) or
     lies strictly inside it on the way down (descent -- same rule), so nothing
-    past the pin tier is ever suggested. Off-tree bases complete nothing.
+    past the pin tier is ever suggested. Off-tree bases complete nothing. Tilde
+    tokens never reach here: the entry points fall them through to the shell's
+    own path completion before path mode is consulted.
     """
     prefix, base = _typed_base(incomplete)
     if base is None:
@@ -296,8 +307,12 @@ def _complete_locate_hook_target(ctx: typer.Context, incomplete: str) -> list[tu
     rather than the count-based grammar's. HOOK is still the trailing token and
     so may appear at any slot, so the event names are merged in as before -- but
     only in name mode: mid-path there is no slot an event could occupy. A name
-    already offered as a target keeps its locator label.
+    already offered as a target keeps its locator label. Tilde tokens fall
+    through to the shell's own path completion (see the module docstring).
     """
+    if incomplete.startswith("~"):
+        return []
+
     args = ctx.params.get("args") or []
     try:
         index = build_index(Config.load())
