@@ -128,6 +128,23 @@ class TestHandleOps:
         svc.set("wtm-server.api.port", "8082")
         svc.unset("wtm-server")
         assert svc.get("wtm-server") is None
+
+    def test_table_make_creates_bare_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, _, wt = _make_tree(tmp_path)
+        _use_config(monkeypatch, tmp_path)
+        svc = Config.load().entity("ws", "alpha", "feat")
+
+        # table_make mirrors the CLI's KEY -T: the container, with no cell in it.
+        address = svc.table_make("wtm-server.services.md")
+        assert address.file == wt / ".wtm" / "config.toml"
+        assert "[wtm-server.services.md]" in address.file.read_text()
+        # Idempotent: a repeat call churns nothing, and cells survive it.
+        svc.table_set("wtm-server.services.api", "path", "/docs")
+        before = address.file.read_text()
+        svc.table_make("wtm-server.services.api")
+        assert address.file.read_text() == before
         assert svc.get("wtm-server.api.port") is None
 
     def test_scope_refusal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

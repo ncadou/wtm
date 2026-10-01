@@ -218,8 +218,9 @@ def _complete_config_set(ctx: typer.Context, incomplete: str) -> list[tuple[str,
     Every slot unions a **continuation reading** (the typed prefix is a partial
     locator; offer the next tier) with a **completion reading** (some prefix is
     a complete locator; offer the next key-group positional from that entity).
-    The key-group trailing count N is flag-decided (3 for ``-t``, else 2), so
-    the split point is inferred from count + flags. VALUE is never completed.
+    The key-group trailing count N is flag-decided (3 for ``-t``, 1 for ``-T``,
+    else 2), so the split point is inferred from count + flags. VALUE is never
+    completed.
     """
     args = list(ctx.params.get("args") or ctx.args or [])
     array = bool(ctx.params.get("array", False))

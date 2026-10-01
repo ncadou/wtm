@@ -185,6 +185,18 @@ class EntityHandle:
 
         return address
 
+    def table_make(self, key: str, *, scope: Scope | None = None) -> ConfigAddress:
+        """Create an empty table at *key* (the section itself, with no cell in it).
+
+        A no-op when a table is already there; a floored key refuses a write
+        landing deeper than its floor.
+        """
+        resolved, address, prefix = self._write_site(scope)
+        self._refuse_below_floor(key, resolved, prefix)
+        self._config.make_table_value(address, self._join(prefix, key))
+
+        return address
+
     def table_unset(self, key: str, subkey: str, *, scope: Scope | None = None) -> ConfigAddress:
         """Remove *subkey* from the section at *key* (a no-op when absent; not floor-guarded)."""
         _resolved, address, prefix = self._write_site(scope)

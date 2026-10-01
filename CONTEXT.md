@@ -252,7 +252,9 @@ on `Config`, three write/read tiers: an **arbitrary-key facility**
 (`get_value`/`set_value`/`unset_value` plus element-wise
 `add_to_array`/`remove_from_array` and `set_table_value`/`unset_table_value`
 over a `ConfigAddress` naming any scope
-plus a bare or tuple key -- the substrate everything else is built on), the
+plus a bare or tuple key -- the substrate everything else is built on; its one
+valueless write, `make_table_value`, declares a bare `[section]` container for
+`config set -T`, no cell in it), the
 **typed read view** (the `Workspace`/`ProjectAnnotation`/`ResolvedWorktree`/
 `HookSpec` dataclasses, each carrying an `extra` dict of arbitrary keys; every
 key resolves by a single **uniform locality merge** -- `merge_locality` folds a
@@ -301,7 +303,8 @@ suppresses all reads and refuses all writes; there is no `WTM_NO_SYSTEM` (point
 is whatever `wtm.config.__all__` exports: reads are native-typed (TOML ints/bools
 come back as-is) and writes are strings by default, typed scalars opt-in through
 the coercion helpers (`parse_typed_value`/`parse_toml_value`, scalar-gated --
-tables/arrays are not writable yet), `(unset)` remains a CLI rendering
+tables/arrays are not writable yet; the *container* is created apart from its
+value by `config set -T`), `(unset)` remains a CLI rendering
 of a `None`. The **placement policy** ("deepest scope whose dir exists" + the
 per-tier write-scope allowlists) has one home in `wtm.config.writes`
 (`project_default_scope`/`workspace_default_scope`/`worktree_default_scope`,

@@ -556,6 +556,16 @@ class Config:
         """
         self._store.table_set(address.file, key, subkey, value)
 
+    def make_table_value(self, address: ConfigAddress, key: Key) -> None:
+        """Create an empty table at *key* in the file *address* names.
+
+        The valueless counterpart of :meth:`set_table_value`: declares the
+        container without a cell in it. A no-op when a table is already there;
+        a non-table value already at *key* is a kind clash. Read-modify-write
+        under a per-file lock. Refused under ``WTM_NO_CONFIG``.
+        """
+        self._store.make_table(address.file, key)
+
     def unset_table_value(self, address: ConfigAddress, key: Key, subkey: str) -> None:
         """Remove *subkey* from the table at *key* (a no-op if the key or sub-key is absent)."""
         self._store.table_unset(address.file, key, subkey)

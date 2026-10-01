@@ -6296,7 +6296,7 @@ def test_config_set_table_kind_clash_on_scalar(root: Path) -> None:
     run("config", "set", "env", "prod", root=root, cwd=cwd)
     res = run("config", "set", "env", "TIER", "prod", "-t", root=root, cwd=cwd)
     assert res.returncode == 1
-    assert "not a table" in res.stderr.lower()
+    assert "not a table; cannot set a sub-key" in res.stderr
 
 
 def test_config_set_array_table_flags_mutually_exclusive(root: Path) -> None:
@@ -6304,6 +6304,74 @@ def test_config_set_array_table_flags_mutually_exclusive(root: Path) -> None:
     res = run("config", "set", "x", "1", "-a", "-t", root=root, cwd=root / "proj")
     assert res.returncode == 1
     assert "mutually exclusive" in res.stderr.lower()
+
+
+def test_config_set_empty_table_creates_bare_section(root: Path) -> None:
+    # `-T` declares the container itself, with no cell in it.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    res = run("config", "set", "-T", "wtm-server.services.md", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    text = (cwd / ".wtm" / "config.toml").read_text()
+    assert "[wtm-server.services.md]" in text
+    assert "md = " not in text
+    # A repeat call churns nothing.
+    before = text
+    run("config", "set", "-T", "wtm-server.services.md", root=root, cwd=cwd)
+    assert (cwd / ".wtm" / "config.toml").read_text() == before
+
+
+def test_config_set_empty_table_readback_and_unset(root: Path) -> None:
+    # The new section reads back, and `unset` removes it whole (no -T needed).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "-t", "wtm-server.services", "api", "/docs", root=root, cwd=cwd)
+    run("config", "set", "-T", "wtm-server.services.md", root=root, cwd=cwd)
+    res = run("config", "get", "wtm-server.services", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    # The empty section renders as a bare `md:` heading beside a scalar sibling.
+    assert "api = /docs" in res.stdout and "md:" in res.stdout
+    res = run("config", "unset", "wtm-server.services.md", root=root, cwd=cwd)
+    assert res.returncode == 0, res.stderr
+    assert "[wtm-server.services.md]" not in (cwd / ".wtm" / "config.toml").read_text()
+
+
+def test_config_set_empty_table_kind_clash_on_scalar(root: Path) -> None:
+    # `-T` over a key already holding a scalar is a hard kind clash, and the
+    # refusal names the table-creating attempt (not the -t "sub-key" wording).
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    run("config", "set", "env", "prod", root=root, cwd=cwd)
+    res = run("config", "set", "-T", "env", root=root, cwd=cwd)
+    assert res.returncode == 1
+    assert "not a table; cannot declare an empty table" in res.stderr
+
+
+def test_config_set_empty_table_exclusive_with_value_flags(root: Path) -> None:
+    # `-T` takes no VALUE, so every VALUE-shaping flag is refused with it.
+    _seed_repo(root, "proj")
+    cwd = root / "proj"
+    for flag in (["-a"], ["-t"], ["--toml"], ["--type", "int"]):
+        res = run("config", "set", "-T", "x", "1", *flag, root=root, cwd=cwd)
+        assert res.returncode == 1, flag
+        assert "exclusive" in res.stderr.lower()
+
+
+def test_config_set_empty_table_reserved_head_refused(root: Path) -> None:
+    _seed_repo(root, "proj")
+    res = run("config", "set", "-T", "workspaces", root=root, cwd=root / "proj")
+    assert res.returncode == 1
+    assert "reserved key" in res.stderr.lower()
+
+
+def test_config_set_empty_table_global_tier(root: Path) -> None:
+    # `-g -T` declares a bare global section at the user file's top level.
+    cfg = root / "cfg.toml"
+    cfg.write_text(f'[workspaces.ws]\npath = "{root}"\n')
+    env = {"WTM_CONFIG": str(cfg)}
+    res = run("config", "set", "-T", "-g", "tools.lint", root=root, extra_env=env)
+    assert res.returncode == 0, res.stderr
+    assert "[tools.lint]" in cfg.read_text()
 
 
 def test_config_set_bad_arity(root: Path) -> None:
@@ -7440,6 +7508,26 @@ def test_config_set_table_via_locator(tmp_path: Path) -> None:
     text = (alpha / "proj" / ".wtm" / "config.toml").read_text()
     assert "[labels]" in text
     assert 'env = "prod"' in text
+
+
+def test_config_set_empty_table_via_locator(tmp_path: Path) -> None:
+    """config set -T with a locator prefix writes a bare section on the named entity."""
+    config, roots = _multi_workspace_config(tmp_path, ["alpha", "beta"])
+    alpha, beta = roots
+    _seed_repo_at(alpha, "proj")
+    res = _run_multi(
+        "config",
+        "set",
+        "-T",
+        "alpha",
+        "proj",
+        "labels.ci",
+        config=config,
+        cwd=beta,
+        workspace="beta",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "[labels.ci]" in (alpha / "proj" / ".wtm" / "config.toml").read_text()
 
 
 def test_config_unset_table_via_locator(tmp_path: Path) -> None:

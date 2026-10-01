@@ -863,6 +863,8 @@ def test_write_below_floor_refused_by_handle(
     with pytest.raises(WriteProhibitedError):
         svc.table_set("region", "sub", "v", scope=Scope.WORKTREE)
     with pytest.raises(WriteProhibitedError):
+        svc.table_make("region", scope=Scope.WORKTREE)
+    with pytest.raises(WriteProhibitedError):
         svc.array_add("region", "v", scope=Scope.WORKTREE)
     # At the floor tier (and above), the write goes through.
     address = svc.set("region", "v", scope=Scope.PROJECT)
@@ -1233,8 +1235,75 @@ def test_set_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) ->
     (ws / ".wtm").mkdir(parents=True)
     (ws / ".wtm" / "config.toml").write_text('env = "prod"\n')
     address = ConfigAddress.workspace(ws)
-    with pytest.raises(WtmError, match="not a table"):
+    with pytest.raises(WtmError, match="not a table; cannot set a sub-key"):
         Config.load().set_table_value(address, "env", "TIER", "prod")
+
+
+def test_unset_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) -> None:
+    # Removal refuses the same clash, worded as a removal (it used to read
+    # "cannot set a sub-key", which misdescribed what -t unset was doing).
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('env = "prod"\n')
+    address = ConfigAddress.workspace(ws)
+    with pytest.raises(WtmError, match="not a table; cannot remove a sub-key"):
+        Config.load().unset_table_value(address, "env", "TIER")
+
+
+def test_make_table_value_creates_empty_table(user_cfg: Path, tmp_path: Path) -> None:
+    # A dotted KEY creates the container with no cell in it, as a [header] (not `k = {}`).
+    import tomllib
+
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().make_table_value(address, ("ci", "runner", "lint"))
+    text = (ws / ".wtm" / "config.toml").read_text()
+    assert "[ci.runner.lint]" in text
+    assert "lint = " not in text
+    assert tomllib.loads(text) == {"ci": {"runner": {"lint": {}}}}
+
+
+def test_make_table_value_is_idempotent_and_keeps_cells(user_cfg: Path, tmp_path: Path) -> None:
+    # A repeat call churns nothing, and an existing table keeps its cells.
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    config = Config.load()
+    config.set_table_value(address, "env", "REGION", "us-east")
+    before = (ws / ".wtm" / "config.toml").read_text()
+    config.make_table_value(address, "env")
+    assert (ws / ".wtm" / "config.toml").read_text() == before
+
+
+def test_make_table_value_creates_file_and_parents(user_cfg: Path, tmp_path: Path) -> None:
+    # A fresh file and every missing parent level come along for the ride.
+    import tomllib
+
+    ws = tmp_path / "w"
+    address = ConfigAddress.workspace(ws)
+    Config.load().make_table_value(address, ("a", "b"))
+    assert tomllib.loads((ws / ".wtm" / "config.toml").read_text()) == {"a": {"b": {}}}
+
+
+def test_make_table_value_kind_clash_on_scalar(user_cfg: Path, tmp_path: Path) -> None:
+    # The refusal names the operation attempted, so it reads as a table clash
+    # on the *container* rather than reusing the -t "sub-key" wording.
+    ws = tmp_path / "w"
+    (ws / ".wtm").mkdir(parents=True)
+    (ws / ".wtm" / "config.toml").write_text('env = "prod"\n')
+    address = ConfigAddress.workspace(ws)
+    with pytest.raises(WtmError, match="not a table; cannot declare an empty table"):
+        Config.load().make_table_value(address, "env")
+
+
+def test_make_table_value_refused_under_no_config(
+    user_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "w"
+    monkeypatch.setenv("WTM_NO_CONFIG", "1")
+    config = Config.load()
+    with pytest.raises(WtmError, match="WTM_NO_CONFIG"):
+        config.make_table_value(ConfigAddress.workspace(ws), "env")
+    assert not (ws / ".wtm" / "config.toml").exists()
 
 
 # --- typed values (opt-in scalar writes) --------------------------------------

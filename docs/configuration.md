@@ -169,8 +169,20 @@ element-wise, instead of writing a scalar:
   table at `KEY`; creates the table on first set. `KEY` may be dotted, so this is
   the one-level form of a dotted write.
 - `wtm config unset KEY SUBKEY -t [-s SCOPE]` — remove `SUBKEY` from that table.
+- `wtm config set KEY -T/--empty-table [-s SCOPE]` — create the table at `KEY`
+  with **nothing in it**, the way to declare a bare `[section]` container:
 
-`-a` and `-t` are mutually exclusive. Values are stored as **strings** unless a
+  ```toml
+  wtm config set -T wtm-server.services.md   # [wtm-server.services.md]
+  ```
+
+  A no-op when the table is already there (its cells survive); a key already
+  holding a scalar or array is a hard kind-clash. To remove one, `unset` takes
+  the whole table without `-T`: `wtm config unset wtm-server.services.md`.
+
+`-a` and `-t` are mutually exclusive. `-T` takes no `VALUE`, so it is refused
+together with every flag that shapes one (`-a`, `-t`, `-f`, `--toml`,
+`--type`). Values are stored as **strings** unless a
 typed opt-in says otherwise (see below). Mutating a key that already holds a
 different kind (a scalar, or an array where a
 table is expected, or vice versa) is a hard error (the same kind-clash rule reads
@@ -199,7 +211,8 @@ should not spend its life quoted:
 - `wtm config set KEY VALUE -x/--toml` — parse `VALUE` exactly as TOML would:
   every scalar spelling, including the three date/time forms
   (`1979-05-27T07:32:00Z`). Arrays and tables parse but are **not writable yet**
-  (scalars only) — element-wise `-a`/`-t` remain the way to grow them.
+  (scalars only) — element-wise `-a`/`-t` remain the way to grow them, and `-T`
+  is how you declare a valueless table.
 
 The two flags are mutually exclusive; both compose with `-a` (typed elements,
 removed by their own kind of value via the same flags on `config unset`) and

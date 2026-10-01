@@ -142,12 +142,15 @@ def _writable_array(container, key: str, full_key: str | tuple[str, ...]):
     return existing
 
 
-def _writable_table(container, key: str, full_key: str | tuple[str, ...]):
+def _writable_table(container, key: str, full_key: str | tuple[str, ...], attempt: str):
     """Return the tomlkit table at *container[key]*, creating an empty one if absent.
 
     A present non-table value is a kind clash (hard error), aligning table
     mutation with the read-side :func:`wtm.config.model.check_kind` rule.
-    *full_key* names the key for the error message.
+    *full_key* names the key for the error message, and *attempt* names the
+    operation the caller was trying, so the refusal says which one it was
+    (setting a cell, removing one, declaring a bare table) rather than a single
+    catch-all phrase.
     """
     existing = container.get(key)
     if existing is None:
@@ -158,7 +161,7 @@ def _writable_table(container, key: str, full_key: str | tuple[str, ...]):
         raise KindConflictError(
             f"config key '{_key_label(full_key)}' "
             f"is a {kind(_unwrap_scalar(existing))}, not a table; "
-            f"cannot set a sub-key"
+            f"cannot {attempt}"
         )
 
     return existing
@@ -353,8 +356,21 @@ class Store:
         with self._transaction(path) as doc:
             parts = key_parts(key)
             container = _descend_for_write(doc, parts[:-1]) if parts[:-1] else doc
-            table = _writable_table(container, parts[-1], key)
+            table = _writable_table(container, parts[-1], key, "set a sub-key")
             table[subkey] = value
+
+    def make_table(self, path: Path, key: str | tuple[str, ...]) -> None:
+        """Create an empty table at *key* in *path* (a no-op when one is there).
+
+        The valueless counterpart of :meth:`table_set`: intermediate levels are
+        walked or created as usual, and an existing table is left untouched, so
+        the flush is elided on a repeat call. A non-table value already at *key*
+        is a kind clash (hard error), matching :meth:`table_set`.
+        """
+        with self._transaction(path) as doc:
+            parts = key_parts(key)
+            container = _descend_for_write(doc, parts[:-1]) if parts[:-1] else doc
+            _writable_table(container, parts[-1], key, "declare an empty table")
 
     def table_unset(self, path: Path, key: str | tuple[str, ...], subkey: str) -> None:
         """Remove *subkey* from the table at *key* in *path* (a no-op when absent).
@@ -373,7 +389,7 @@ class Store:
             if not isinstance(node, dict) or parts[-1] not in node:
                 return
 
-            table = _writable_table(node, parts[-1], key)
+            table = _writable_table(node, parts[-1], key, "remove a sub-key")
             table.pop(subkey, None)
 
     @contextmanager

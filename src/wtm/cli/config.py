@@ -448,6 +448,9 @@ def config_set(
     table: bool = typer.Option(
         False, "-t", "--table", help="Set SUBKEY = VALUE in the table at KEY"
     ),
+    empty_table: bool = typer.Option(
+        False, "-T", "--empty-table", help="Create an empty table at KEY (no VALUE)"
+    ),
     floor: str | None = typer.Option(
         None,
         "-f",
@@ -494,7 +497,12 @@ def config_set(
     element-wise. ``-a``/``--array`` (``KEY VALUE``) adds VALUE to the string
     array at KEY, idempotently (set semantics); ``-t``/``--table`` (``KEY
     SUBKEY VALUE``) sets SUBKEY in the table at KEY. Both mutate element-wise
-    under a per-file lock. The one reserved array a user may mutate via
+    under a per-file lock. ``-T``/``--empty-table`` (``KEY``) is their
+    valueless counterpart: it creates the table at KEY with nothing in it --
+    the way to declare a bare ``[section]`` container, whose KEY may be dotted
+    (``-T wtm-server.services.md`` writes ``[wtm-server.services.md]``). It
+    takes no VALUE, so it is refused together with every VALUE-shaping flag.
+    The one reserved array a user may mutate via
     ``-a`` is ``inheritable`` (the opt-in allowlist of extra inheritable
     keys); its elements are key *declarations*, so ``--type``/``--toml`` are
     refused there. Each inheritable element is validated (a reserved or
@@ -514,9 +522,9 @@ def config_set(
     top-level meaning. Only the head segment of a dotted path is checked
     against the reserved names -- deeper segments are harmless cells.
 
-    The locator prefix is ``args[:-N]`` (N flag-decided: 3 for ``-t``, else 2);
-    it is absent when ``len(args) == N``. ``config set KEY VALUE`` (cwd-inferred)
-    is unchanged.
+    The locator prefix is ``args[:-N]`` (N flag-decided: 3 for ``-t``, 1 for
+    ``-T``, else 2); it is absent when ``len(args) == N``. ``config set KEY
+    VALUE`` (cwd-inferred) is unchanged.
     """
     if array and table:
         raise WtmError("-a/--array and -t/--table are mutually exclusive")
@@ -524,25 +532,33 @@ def config_set(
         raise WtmError("--type and --toml are mutually exclusive")
     if floor is not None and not array:
         raise WtmError("--floor requires -a/--array")
+    if empty_table and (array or table or floor is not None):
+        raise WtmError("-T/--empty-table takes no VALUE; it is exclusive with -a, -t and -f")
+    if empty_table and (toml_literal or value_type is not None):
+        raise WtmError("-T/--empty-table takes no VALUE; it is exclusive with --toml and --type")
 
-    n = 3 if table else 2
+    n = 3 if table else 1 if empty_table else 2
     if len(args) < n:
-        raise WtmError(
-            f"config set {'-t ' if table else '-a ' if array else ''}requires "
-            f"{'KEY SUBKEY VALUE' if table else 'KEY VALUE'}"
-        )
+        flag = "-t " if table else "-a " if array else ""
+        shape = "KEY SUBKEY VALUE" if table else "KEY VALUE"
+        raise WtmError(f"config set {flag}requires {shape}")
     loc_args = args[:-n]
     if global_scope and loc_args:
         raise WtmError("-g/--global cannot be combined with a locator")
     if table:
         key, subkey, value = args[-3:]
+    elif empty_table:
+        key, value = args[-1], ""
     else:
         key, value = args[-2:]
 
+    # -T carries no VALUE, so every VALUE-shaping step below is skipped for it.
     element: str | dict[str, str] = value
-    if (toml_literal or value_type is not None) and array and key == "inheritable":
+    if empty_table:
+        validate_arbitrary_key_path(key)
+    elif (toml_literal or value_type is not None) and array and key == "inheritable":
         raise WtmError("inheritable elements are key declarations; --type/--toml do not apply")
-    if key == "inheritable" and array:
+    elif key == "inheritable" and array:
         if floor is not None:
             element = {"key": value, "floor": floor}
         parse_inheritable_element(element)
@@ -553,19 +569,19 @@ def config_set(
 
     # Coerce the raw VALUE once, after validation; the bare form stays a string.
     coerced: TomlValue = value
-    if toml_literal:
-        coerced = parse_toml_value(value)
-    elif value_type is not None:
-        if value_type not in TYPED_VALUE_FORMATS:
-            raise WtmError(
-                f"unknown --type '{value_type}' (choose one of {', '.join(TYPED_VALUE_FORMATS)})"
-            )
-        coerced = parse_typed_value(value, value_type)
+    if not empty_table:
+        if toml_literal:
+            coerced = parse_toml_value(value)
+        elif value_type is not None:
+            if value_type not in TYPED_VALUE_FORMATS:
+                choices = ", ".join(TYPED_VALUE_FORMATS)
+                raise WtmError(f"unknown --type '{value_type}' (choose one of {choices})")
+            coerced = parse_typed_value(value, value_type)
 
-    # A [hooks] policy cell always lands as a native boolean, whatever form
-    # the raw VALUE took (bare "true"/"false", --toml, or --type bool).
-    if _is_policy_key(key):
-        coerced = parse_policy_value(coerced)
+        # A [hooks] policy cell always lands as a native boolean, whatever form
+        # the raw VALUE took (bare "true"/"false", --toml, or --type bool).
+        if _is_policy_key(key):
+            coerced = parse_policy_value(coerced)
 
     config = ctx.obj.config
     if global_scope:
@@ -588,6 +604,11 @@ def config_set(
         written: TomlValue | dict[str, str] = coerced if key != "inheritable" else element
         config.add_to_array(address, full_key, written)
         log(f"{target.label}: {key} += {value} [{scope.value}] ({address.file})")
+
+        return
+    if empty_table:
+        config.make_table_value(address, full_key)
+        log(f"{target.label}: table {key} [{scope.value}] ({address.file})")
 
         return
     if table:
